@@ -76,6 +76,8 @@ use codex_mcp::McpPluginAttribution;
 use codex_mcp::McpServerRegistration;
 use codex_mcp::ResolvedMcpCatalog;
 use codex_memories_read::memory_root;
+use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
+use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
@@ -282,10 +284,9 @@ fn resolve_cli_auth_credentials_store_mode(
     package_version: &str,
 ) -> AuthCredentialsStoreMode {
     match (package_version, configured) {
-        (
-            LOCAL_DEV_BUILD_VERSION,
-            AuthCredentialsStoreMode::Keyring | AuthCredentialsStoreMode::Auto,
-        ) => AuthCredentialsStoreMode::File,
+        (LOCAL_DEV_BUILD_VERSION, AuthCredentialsStoreMode::Keyring) => {
+            AuthCredentialsStoreMode::File
+        }
         (_, mode) => mode,
     }
 }
@@ -2423,6 +2424,36 @@ fn resolve_web_search_config(config_toml: &ConfigToml) -> Option<WebSearchConfig
         .map(Into::into)
 }
 
+fn resolve_model_for_provider(model: Option<String>, model_provider_id: &str) -> Option<String> {
+    if model_provider_id != AMBIENT_PROVIDER_ID {
+        return model;
+    }
+
+    match model {
+        Some(model)
+            if model.trim().starts_with("ambient/") || model.trim().starts_with("zai-org/") =>
+        {
+            Some(model)
+        }
+        _ => Some(AMBIENT_DEFAULT_MODEL.to_string()),
+    }
+}
+
+fn normalize_ambient_reasoning_effort(effort: ReasoningEffort) -> ReasoningEffort {
+    match effort {
+        ReasoningEffort::High | ReasoningEffort::XHigh => ReasoningEffort::XHigh,
+        ReasoningEffort::Custom(value)
+            if matches!(
+                value.as_str(),
+                "deep" | "max" | "xhigh" | "extra_high" | "extra-high"
+            ) =>
+        {
+            ReasoningEffort::XHigh
+        }
+        _ => ReasoningEffort::Medium,
+    }
+}
+
 fn resolve_experimental_request_user_input_enabled(config_toml: &ConfigToml) -> bool {
     config_toml
         .tools
@@ -3306,7 +3337,7 @@ impl Config {
 
         let model_provider_id = model_provider
             .or(cfg.model_provider)
-            .unwrap_or_else(|| "openai".to_string());
+            .unwrap_or_else(|| AMBIENT_PROVIDER_ID.to_string());
         let model_provider = model_providers
             .get(&model_provider_id)
             .ok_or_else(|| {
@@ -3448,9 +3479,18 @@ impl Config {
             })
             .filter(|values| !values.is_empty());
 
-        let forced_login_method = cfg.forced_login_method;
+        let ambient_provider_selected = model_provider_id == AMBIENT_PROVIDER_ID;
+        let forced_login_method = cfg
+            .forced_login_method
+            .or_else(|| ambient_provider_selected.then_some(ForcedLoginMethod::Api));
 
-        let model = model.or(cfg.model);
+        let model = resolve_model_for_provider(model.or(cfg.model), &model_provider_id);
+        let model_reasoning_effort = if ambient_provider_selected {
+            cfg.model_reasoning_effort
+                .map(normalize_ambient_reasoning_effort)
+        } else {
+            cfg.model_reasoning_effort
+        };
         let notices = cfg.notice.unwrap_or_default();
         let service_tier = match service_tier_override {
             Some(Some(service_tier)) => Some(service_tier),
@@ -3783,7 +3823,7 @@ impl Config {
                 .or(show_raw_agent_reasoning)
                 .unwrap_or(false),
             guardian_policy_config,
-            model_reasoning_effort: cfg.model_reasoning_effort,
+            model_reasoning_effort,
             plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,
             model_reasoning_summary: cfg.model_reasoning_summary,
             model_supports_reasoning_summaries: cfg.model_supports_reasoning_summaries,

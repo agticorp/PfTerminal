@@ -1672,8 +1672,8 @@ Run codex doctor without --summary for detailed diagnostics.
     #[test]
     fn redact_detail_preserves_env_var_names() {
         assert_eq!(
-            redact_detail("auth env vars present: OPENAI_API_KEY, CODEX_API_KEY"),
-            "auth env vars present: OPENAI_API_KEY, CODEX_API_KEY"
+            redact_detail("auth env vars present: OPENAI_API_KEY, CODEX_API_KEY, AMBIENT_API_KEY"),
+            "auth env vars present: OPENAI_API_KEY, CODEX_API_KEY, AMBIENT_API_KEY"
         );
     }
 

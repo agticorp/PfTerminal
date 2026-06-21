@@ -1,6 +1,10 @@
 use crate::error::ApiError;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Verbosity as VerbosityConfig;
+use codex_protocol::models::AgentMessageInputContent;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::ModelVerification;
@@ -11,6 +15,7 @@ use codex_protocol::protocol::W3cTraceContext;
 use futures::Stream;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::ser::SerializeStruct;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -124,9 +129,15 @@ pub enum ReasoningContext {
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct Reasoning {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffortConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<ReasoningSummaryConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<ReasoningContext>,
 }
@@ -179,10 +190,9 @@ impl From<VerbosityConfig> for OpenAiVerbosity {
     }
 }
 
-#[derive(Debug, Serialize, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResponsesApiRequest {
     pub model: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub instructions: String,
     pub input: Vec<ResponseItem>,
     pub tools: Vec<serde_json::Value>,
@@ -192,14 +202,268 @@ pub struct ResponsesApiRequest {
     pub store: bool,
     pub stream: bool,
     pub include: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<TextControls>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_metadata: Option<HashMap<String, String>>,
+    pub thinking_budget: Option<i64>,
+    pub emit_usage: Option<bool>,
+    pub enable_thinking: Option<bool>,
+    pub reasoning_effort: Option<String>,
+}
+
+impl ResponsesApiRequest {
+    fn uses_ambient_input_format(&self) -> bool {
+        self.thinking_budget.is_some()
+            || self.emit_usage == Some(true)
+            || self.enable_thinking.is_some()
+            || self.reasoning_effort.is_some()
+    }
+}
+
+impl Serialize for ResponsesApiRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut field_count = 8;
+        field_count += usize::from(!self.instructions.is_empty());
+        field_count += usize::from(self.reasoning.is_some());
+        field_count += usize::from(self.service_tier.is_some());
+        field_count += usize::from(self.prompt_cache_key.is_some());
+        field_count += usize::from(self.text.is_some());
+        field_count += usize::from(self.client_metadata.is_some());
+        field_count += usize::from(self.thinking_budget.is_some());
+        field_count += usize::from(self.emit_usage.is_some());
+        field_count += usize::from(self.enable_thinking.is_some());
+        field_count += usize::from(self.reasoning_effort.is_some());
+
+        let mut state = serializer.serialize_struct("ResponsesApiRequest", field_count)?;
+        state.serialize_field("model", &self.model)?;
+        if !self.instructions.is_empty() {
+            state.serialize_field("instructions", &self.instructions)?;
+        }
+        if self.uses_ambient_input_format() {
+            state.serialize_field("input", &ambient_input_from_response_items(&self.input))?;
+        } else {
+            state.serialize_field("input", &self.input)?;
+        }
+        state.serialize_field("tools", &self.tools)?;
+        state.serialize_field("tool_choice", &self.tool_choice)?;
+        state.serialize_field("parallel_tool_calls", &self.parallel_tool_calls)?;
+        if let Some(reasoning) = &self.reasoning {
+            state.serialize_field("reasoning", reasoning)?;
+        }
+        state.serialize_field("store", &self.store)?;
+        state.serialize_field("stream", &self.stream)?;
+        state.serialize_field("include", &self.include)?;
+        if let Some(service_tier) = &self.service_tier {
+            state.serialize_field("service_tier", service_tier)?;
+        }
+        if let Some(prompt_cache_key) = &self.prompt_cache_key {
+            state.serialize_field("prompt_cache_key", prompt_cache_key)?;
+        }
+        if let Some(text) = &self.text {
+            state.serialize_field("text", text)?;
+        }
+        if let Some(client_metadata) = &self.client_metadata {
+            state.serialize_field("client_metadata", client_metadata)?;
+        }
+        if let Some(thinking_budget) = self.thinking_budget {
+            state.serialize_field("thinking_budget", &thinking_budget)?;
+        }
+        if let Some(emit_usage) = self.emit_usage {
+            state.serialize_field("emit_usage", &emit_usage)?;
+        }
+        if let Some(enable_thinking) = self.enable_thinking {
+            state.serialize_field("enable_thinking", &enable_thinking)?;
+        }
+        if let Some(reasoning_effort) = &self.reasoning_effort {
+            state.serialize_field("reasoning_effort", reasoning_effort)?;
+        }
+        state.end()
+    }
+}
+
+#[derive(Debug)]
+struct AmbientReasoningContentChunk {
+    role: String,
+    content: String,
+    reasoning: Option<String>,
+}
+
+fn ambient_input_from_response_items(input: &[ResponseItem]) -> String {
+    let chunks: Vec<_> = input
+        .iter()
+        .filter_map(ambient_chunk_from_response_item)
+        .collect();
+
+    if chunks.is_empty() {
+        return String::new();
+    }
+
+    if chunks.len() == 1 && chunks[0].role == "user" && chunks[0].reasoning.is_none() {
+        return chunks[0].content.clone();
+    }
+
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let mut text = format!("{}:\n{}", chunk.role, chunk.content);
+            if let Some(reasoning) = chunk.reasoning
+                && !reasoning.trim().is_empty()
+            {
+                text.push_str("\nreasoning:\n");
+                text.push_str(&reasoning);
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn ambient_chunk_from_response_item(item: &ResponseItem) -> Option<AmbientReasoningContentChunk> {
+    match item {
+        ResponseItem::Message { role, content, .. } => ambient_text_from_content_items(content)
+            .map(|content| AmbientReasoningContentChunk {
+                role: role.clone(),
+                content,
+                reasoning: None,
+            }),
+        ResponseItem::AgentMessage {
+            author,
+            recipient,
+            content,
+            ..
+        } => ambient_text_from_agent_message_content(content).map(|content| {
+            AmbientReasoningContentChunk {
+                role: "assistant".to_string(),
+                content: format!("{author} to {recipient}:\n{content}"),
+                reasoning: None,
+            }
+        }),
+        ResponseItem::Reasoning {
+            summary, content, ..
+        } => {
+            let mut reasoning = Vec::new();
+            for item in summary {
+                match item {
+                    ReasoningItemReasoningSummary::SummaryText { text } => {
+                        reasoning.push(text.as_str());
+                    }
+                }
+            }
+            if let Some(content) = content {
+                for item in content {
+                    match item {
+                        ReasoningItemContent::ReasoningText { text }
+                        | ReasoningItemContent::Text { text } => reasoning.push(text.as_str()),
+                    }
+                }
+            }
+            let reasoning = reasoning.join("\n");
+            (!reasoning.trim().is_empty()).then(|| AmbientReasoningContentChunk {
+                role: "assistant".to_string(),
+                content: String::new(),
+                reasoning: Some(reasoning),
+            })
+        }
+        ResponseItem::FunctionCall { .. }
+        | ResponseItem::CustomToolCall { .. }
+        | ResponseItem::LocalShellCall { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. } => ambient_json_chunk("assistant", item),
+        ResponseItem::FunctionCallOutput { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::CompactionTrigger { .. } => ambient_json_chunk("tool", item),
+        ResponseItem::Other => None,
+    }
+}
+
+fn ambient_json_chunk(role: &str, item: &ResponseItem) -> Option<AmbientReasoningContentChunk> {
+    serde_json::to_string(item)
+        .ok()
+        .filter(|content| !content.trim().is_empty())
+        .map(|content| AmbientReasoningContentChunk {
+            role: role.to_string(),
+            content,
+            reasoning: None,
+        })
+}
+
+fn ambient_text_from_content_items(content: &[ContentItem]) -> Option<String> {
+    let parts: Vec<_> = content
+        .iter()
+        .map(|item| match item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => text.clone(),
+            ContentItem::InputImage { image_url, .. } => format!("[image: {image_url}]"),
+        })
+        .filter(|text| !text.trim().is_empty())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn ambient_text_from_agent_message_content(content: &[AgentMessageInputContent]) -> Option<String> {
+    let parts: Vec<_> = content
+        .iter()
+        .filter_map(|item| match item {
+            AgentMessageInputContent::InputText { text } => Some(text.clone()),
+            AgentMessageInputContent::EncryptedContent { .. } => None,
+        })
+        .filter(|text| !text.trim().is_empty())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ChatCompletionsRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<ChatStreamOptions>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<Value>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ChatStreamOptions {
+    pub include_usage: bool,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ChatMessage {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ChatToolCall>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ChatToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ChatToolFunction,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ChatToolFunction {
+    pub name: String,
+    pub arguments: String,
 }
 
 impl From<&ResponsesApiRequest> for ResponseCreateWsRequest {
@@ -221,6 +485,10 @@ impl From<&ResponsesApiRequest> for ResponseCreateWsRequest {
             text: request.text.clone(),
             generate: None,
             client_metadata: request.client_metadata.clone(),
+            thinking_budget: request.thinking_budget,
+            emit_usage: request.emit_usage,
+            enable_thinking: request.enable_thinking,
+            reasoning_effort: request.reasoning_effort.clone(),
         }
     }
 }
@@ -236,6 +504,7 @@ pub struct ResponseCreateWsRequest {
     pub tools: Vec<Value>,
     pub tool_choice: String,
     pub parallel_tool_calls: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Reasoning>,
     pub store: bool,
     pub stream: bool,
@@ -250,6 +519,14 @@ pub struct ResponseCreateWsRequest {
     pub generate: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_metadata: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emit_usage: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 pub fn response_create_client_metadata(

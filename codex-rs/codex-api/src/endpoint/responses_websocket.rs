@@ -836,6 +836,10 @@ mod tests {
                 "traceparent".to_string(),
                 "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01".to_string(),
             )])),
+            thinking_budget: None,
+            emit_usage: None,
+            enable_thinking: None,
+            reasoning_effort: None,
         });
 
         let previous_payload = serde_json::to_value(&request).expect("serialize previous payload");

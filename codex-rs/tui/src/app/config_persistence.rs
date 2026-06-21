@@ -5,6 +5,7 @@
 //! loop.
 
 use super::*;
+use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 #[cfg(target_os = "windows")]
 use codex_utils_approval_presets::ApprovalPreset;
 
@@ -726,7 +727,26 @@ impl App {
         model: &str,
         reasoning_effort: Option<&ReasoningEffortConfig>,
     ) -> Option<String> {
-        (!model.starts_with("codex-auto-")).then(|| Self::reasoning_label(reasoning_effort))
+        (!model.starts_with("codex-auto-")).then(|| {
+            if model == AMBIENT_DEFAULT_MODEL {
+                match reasoning_effort {
+                    Some(ReasoningEffortConfig::High | ReasoningEffortConfig::XHigh) => {
+                        "deep".to_string()
+                    }
+                    Some(ReasoningEffortConfig::Custom(value))
+                        if matches!(
+                            value.as_str(),
+                            "deep" | "max" | "xhigh" | "extra_high" | "extra-high"
+                        ) =>
+                    {
+                        "deep".to_string()
+                    }
+                    _ => "standard".to_string(),
+                }
+            } else {
+                Self::reasoning_label(reasoning_effort)
+            }
+        })
     }
 
     pub(crate) fn token_usage(&self) -> crate::token_usage::TokenUsage {

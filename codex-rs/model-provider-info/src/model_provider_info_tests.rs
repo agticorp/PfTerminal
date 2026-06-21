@@ -107,7 +107,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
 }
 
 #[test]
-fn test_deserialize_chat_wire_api_shows_helpful_error() {
+fn test_deserialize_chat_wire_api() {
     let provider_toml = r#"
 name = "OpenAI using Chat Completions"
 base_url = "https://api.openai.com/v1"
@@ -115,8 +115,8 @@ env_key = "OPENAI_API_KEY"
 wire_api = "chat"
         "#;
 
-    let err = toml::from_str::<ModelProviderInfo>(provider_toml).unwrap_err();
-    assert!(err.to_string().contains(CHAT_WIRE_API_REMOVED_ERROR));
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(provider.wire_api, WireApi::Chat);
 }
 
 #[test]
@@ -281,6 +281,33 @@ fn test_create_amazon_bedrock_provider() {
 }
 
 #[test]
+fn test_create_ambient_provider() {
+    assert_eq!(
+        ModelProviderInfo::create_ambient_provider(),
+        ModelProviderInfo {
+            name: "Ambient".to_string(),
+            base_url: Some(AMBIENT_BASE_URL.to_string()),
+            env_key: None,
+            env_key_instructions: None,
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: true,
+            supports_websockets: false,
+        }
+    );
+    assert_eq!(AMBIENT_DEFAULT_MODEL, "zai-org/GLM-5.2-FP8");
+}
+
+#[test]
 fn test_amazon_bedrock_provider_adds_mantle_client_agent_header() {
     let api_provider = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None)
         .to_api_provider(/*auth_mode*/ None)
@@ -303,6 +330,18 @@ fn test_built_in_model_providers_include_amazon_bedrock() {
         providers
             .get(AMAZON_BEDROCK_PROVIDER_ID)
             .map(ModelProviderInfo::is_amazon_bedrock),
+        Some(true)
+    );
+}
+
+#[test]
+fn test_built_in_model_providers_include_ambient() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    assert_eq!(
+        providers
+            .get(AMBIENT_PROVIDER_ID)
+            .map(ModelProviderInfo::is_ambient),
         Some(true)
     );
 }

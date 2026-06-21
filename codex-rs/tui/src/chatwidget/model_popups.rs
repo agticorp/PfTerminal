@@ -4,6 +4,8 @@
 //! into another, especially while Plan mode is active.
 
 use super::*;
+use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
+use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 
 impl ChatWidget {
     /// Open a popup to choose a quick auto model. Selecting "All models"
@@ -27,7 +29,7 @@ impl ChatWidget {
                 return;
             }
         };
-        self.open_model_popup_with_presets(presets);
+        self.open_model_popup_with_presets(self.filter_model_presets_for_current_provider(presets));
     }
 
     fn model_menu_header(&self, title: &str, subtitle: &str) -> Box<dyn Renderable> {
@@ -152,6 +154,20 @@ impl ChatWidget {
             header,
             ..Default::default()
         });
+    }
+
+    fn filter_model_presets_for_current_provider(
+        &self,
+        presets: Vec<ModelPreset>,
+    ) -> Vec<ModelPreset> {
+        if self.config.model_provider_id != AMBIENT_PROVIDER_ID {
+            return presets;
+        }
+
+        presets
+            .into_iter()
+            .filter(|preset| preset.model == AMBIENT_DEFAULT_MODEL)
+            .collect()
     }
 
     fn is_auto_model(model: &str) -> bool {
@@ -353,6 +369,7 @@ impl ChatWidget {
         let supported = preset.supported_reasoning_efforts;
         let in_plan_mode =
             self.collaboration_modes_enabled() && self.active_mode_kind() == ModeKind::Plan;
+        let uses_ambient_reasoning_modes = preset.model == AMBIENT_DEFAULT_MODEL;
 
         let warn_effort = if supported
             .iter()
@@ -368,7 +385,7 @@ impl ChatWidget {
             None
         };
         let warning_text = warn_effort.as_ref().map(|effort| {
-            let effort_label = Self::reasoning_effort_label(effort);
+            let effort_label = Self::reasoning_effort_label_for_model(&preset.model, effort);
             format!("⚠ {effort_label} reasoning effort can quickly consume Plus plan rate limits.")
         });
         let warn_for_model = preset.model.starts_with("gpt-5.1-codex")
@@ -427,7 +444,7 @@ impl ChatWidget {
         let mut items: Vec<SelectionItem> = Vec::new();
         for choice in choices.iter() {
             let effort = choice.clone();
-            let mut effort_label = Self::reasoning_effort_label(&effort);
+            let mut effort_label = Self::reasoning_effort_label_for_model(&model_slug, &effort);
             if Some(choice) == default_choice.as_ref() {
                 effort_label.push_str(" (default)");
             }
@@ -484,8 +501,13 @@ impl ChatWidget {
         }
 
         let mut header = ColumnRenderable::new();
+        let header_title = if uses_ambient_reasoning_modes {
+            "Select Reasoning Mode"
+        } else {
+            "Select Reasoning Level"
+        };
         header.push(Line::from(
-            format!("Select Reasoning Level for {model_slug}").bold(),
+            format!("{header_title} for {model_slug}").bold(),
         ));
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
@@ -495,6 +517,25 @@ impl ChatWidget {
             initial_selected_idx,
             ..Default::default()
         });
+    }
+
+    fn reasoning_effort_label_for_model(model: &str, effort: &ReasoningEffortConfig) -> String {
+        if model == AMBIENT_DEFAULT_MODEL {
+            return match effort {
+                ReasoningEffortConfig::High | ReasoningEffortConfig::XHigh => "Deep".to_string(),
+                ReasoningEffortConfig::Custom(value)
+                    if matches!(
+                        value.as_str(),
+                        "deep" | "max" | "xhigh" | "extra_high" | "extra-high"
+                    ) =>
+                {
+                    "Deep".to_string()
+                }
+                _ => "Standard".to_string(),
+            };
+        }
+
+        Self::reasoning_effort_label(effort)
     }
 
     pub(super) fn reasoning_effort_label(effort: &ReasoningEffortConfig) -> String {

@@ -43,6 +43,7 @@ use codex_install_context::CodexPackageLayout;
 use codex_install_context::InstallContext;
 use codex_install_context::InstallMethod;
 use codex_install_context::StandalonePlatform;
+use codex_login::AMBIENT_API_KEY_ENV_VAR;
 use codex_login::AuthDotJson;
 use codex_login::AuthManager;
 use codex_login::CODEX_ACCESS_TOKEN_ENV_VAR;
@@ -1175,6 +1176,7 @@ fn auth_check(config: &Config) -> DoctorCheck {
     let env_auth_vars = [
         OPENAI_API_KEY_ENV_VAR,
         CODEX_API_KEY_ENV_VAR,
+        AMBIENT_API_KEY_ENV_VAR,
         CODEX_ACCESS_TOKEN_ENV_VAR,
     ]
     .into_iter()
@@ -1358,8 +1360,9 @@ fn stored_auth_issues(
                 .openai_api_key
                 .as_deref()
                 .is_some_and(|key| !key.trim().is_empty());
-            let env_key_present =
-                env_var_present(OPENAI_API_KEY_ENV_VAR) || env_var_present(CODEX_API_KEY_ENV_VAR);
+            let env_key_present = env_var_present(OPENAI_API_KEY_ENV_VAR)
+                || env_var_present(CODEX_API_KEY_ENV_VAR)
+                || env_var_present(AMBIENT_API_KEY_ENV_VAR);
             if !stored_key_present && !env_key_present {
                 issues.push("API key auth is missing an API key");
             }
@@ -2575,7 +2578,10 @@ fn provider_auth_reachability_mode_from_auth(
     if !requires_openai_auth {
         return ProviderAuthReachabilityMode::NotRequired;
     }
-    if env_var_present(OPENAI_API_KEY_ENV_VAR) || env_var_present(CODEX_API_KEY_ENV_VAR) {
+    if env_var_present(OPENAI_API_KEY_ENV_VAR)
+        || env_var_present(CODEX_API_KEY_ENV_VAR)
+        || env_var_present(AMBIENT_API_KEY_ENV_VAR)
+    {
         return ProviderAuthReachabilityMode::ApiKey;
     }
     if env_var_present(CODEX_ACCESS_TOKEN_ENV_VAR) {
@@ -3498,6 +3504,7 @@ mod tests {
             vec!["API key auth is missing an API key"]
         );
         assert!(stored_auth_issues(&auth, |name| name == OPENAI_API_KEY_ENV_VAR).is_empty());
+        assert!(stored_auth_issues(&auth, |name| name == AMBIENT_API_KEY_ENV_VAR).is_empty());
     }
 
     #[test]
@@ -3568,6 +3575,14 @@ mod tests {
             provider_auth_reachability_mode_from_auth(
                 /*requires_openai_auth*/ true,
                 |name| name == OPENAI_API_KEY_ENV_VAR,
+                /*stored_auth*/ None,
+            ),
+            ProviderAuthReachabilityMode::ApiKey
+        );
+        assert_eq!(
+            provider_auth_reachability_mode_from_auth(
+                /*requires_openai_auth*/ true,
+                |name| name == AMBIENT_API_KEY_ENV_VAR,
                 /*stored_auth*/ None,
             ),
             ProviderAuthReachabilityMode::ApiKey

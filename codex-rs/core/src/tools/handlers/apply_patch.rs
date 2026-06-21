@@ -254,6 +254,17 @@ fn write_permissions_for_paths(
 fn apply_patch_payload_command(payload: &ToolPayload) -> Option<String> {
     match payload {
         ToolPayload::Custom { input } => Some(input.clone()),
+        ToolPayload::Function { arguments } => {
+            let value: serde_json::Value = serde_json::from_str(arguments).ok()?;
+            match value {
+                serde_json::Value::String(input) => Some(input),
+                serde_json::Value::Object(map) => map
+                    .get("input")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -355,7 +366,7 @@ impl ApplyPatchHandler {
             ..
         } = invocation;
 
-        let ToolPayload::Custom { input: patch_input } = payload else {
+        let Some(patch_input) = apply_patch_payload_command(&payload) else {
             return Err(FunctionCallError::RespondToModel(
                 "apply_patch handler received unsupported payload".to_string(),
             ));
@@ -492,7 +503,10 @@ impl ApplyPatchHandler {
 
 impl CoreToolRuntime for ApplyPatchHandler {
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
-        matches!(payload, ToolPayload::Custom { .. })
+        matches!(
+            payload,
+            ToolPayload::Custom { .. } | ToolPayload::Function { .. }
+        )
     }
 
     fn create_diff_consumer(&self) -> Option<Box<dyn ToolArgumentDiffConsumer>> {
@@ -515,6 +529,9 @@ impl CoreToolRuntime for ApplyPatchHandler {
         invocation.payload = match invocation.payload {
             ToolPayload::Custom { .. } => ToolPayload::Custom {
                 input: patch.to_string(),
+            },
+            ToolPayload::Function { .. } => ToolPayload::Function {
+                arguments: serde_json::json!({ "input": patch.to_string() }).to_string(),
             },
             payload => payload,
         };

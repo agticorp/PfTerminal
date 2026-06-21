@@ -8,6 +8,8 @@ use codex_app_server_protocol::HooksListResponse;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::PluginAvailability;
 use codex_features::Stage;
+use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
+use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -2625,6 +2627,55 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
         !popup.contains("test-hidden-model"),
         "expected hidden model to be excluded from picker:\n{popup}"
     );
+}
+
+#[tokio::test]
+async fn ambient_model_picker_only_shows_ambient_model_with_reasoning() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some(AMBIENT_DEFAULT_MODEL)).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    assert_eq!(chat.config.model_provider_id, AMBIENT_PROVIDER_ID);
+
+    chat.open_model_popup();
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+
+    assert!(
+        popup.contains(AMBIENT_DEFAULT_MODEL),
+        "expected Ambient GLM 5.2 in /model picker:\n{popup}"
+    );
+    assert!(
+        popup.contains("Ambient's default GLM 5.2 coding model."),
+        "expected Ambient model description in /model picker:\n{popup}"
+    );
+    assert!(
+        !popup.contains("gpt-"),
+        "expected OpenAI models to be hidden for Ambient provider:\n{popup}"
+    );
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::OpenReasoningPopup { model } = event {
+            chat.open_reasoning_popup(model);
+            break;
+        }
+    }
+    let reasoning_popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(
+        reasoning_popup.contains("Select Reasoning Mode"),
+        "expected selecting Ambient model to open reasoning picker:\n{reasoning_popup}"
+    );
+    for label in ["Standard (default)", "Deep"] {
+        assert!(
+            reasoning_popup.contains(label),
+            "expected Ambient reasoning option {label:?} in picker:\n{reasoning_popup}"
+        );
+    }
+    for label in ["None", "Low", "Medium", "High", "Extra high"] {
+        assert!(
+            !reasoning_popup.contains(label),
+            "expected old Ambient reasoning option {label:?} to be hidden:\n{reasoning_popup}"
+        );
+    }
 }
 
 #[tokio::test]

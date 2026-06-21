@@ -54,6 +54,7 @@ use crate::token_data::parse_chatgpt_jwt_claims;
 use crate::token_data::parse_jwt_expiration;
 use codex_client::CodexHttpClient;
 use codex_config::types::AuthCredentialsStoreMode;
+pub use codex_model_provider_info::AMBIENT_API_KEY_ENV_VAR;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::auth::PlanType as InternalPlanType;
 use codex_protocol::auth::RefreshTokenFailedError;
@@ -755,6 +756,10 @@ pub fn read_openai_api_key_from_env() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+pub fn read_ambient_api_key_from_env() -> Option<String> {
+    read_non_empty_env_var(AMBIENT_API_KEY_ENV_VAR)
+}
+
 pub fn read_codex_api_key_from_env() -> Option<String> {
     read_non_empty_env_var(CODEX_API_KEY_ENV_VAR)
 }
@@ -1007,7 +1012,7 @@ async fn enforce_login_restrictions_with_agent_identity_authapi_base_url(
         };
 
         if let Some(message) = method_violation {
-            return logout_with_message(
+            return logout_and_continue(
                 &config.codex_home,
                 message,
                 config.auth_credentials_store_mode,
@@ -1088,6 +1093,27 @@ fn logout_with_message(
     Err(std::io::Error::other(error_message))
 }
 
+fn logout_and_continue(
+    codex_home: &Path,
+    message: String,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+) -> std::io::Result<()> {
+    match logout_all_stores(
+        codex_home,
+        auth_credentials_store_mode,
+        keyring_backend_kind,
+    ) {
+        Ok(_) => {
+            tracing::warn!("{message}");
+            Ok(())
+        }
+        Err(err) => Err(std::io::Error::other(format!(
+            "{message}. Failed to remove auth.json: {err}"
+        ))),
+    }
+}
+
 fn logout_all_stores(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
@@ -1124,6 +1150,9 @@ async fn load_auth(
 ) -> std::io::Result<Option<CodexAuth>> {
     // API key via env var takes precedence over any other auth method.
     if enable_codex_api_key_env && let Some(api_key) = read_codex_api_key_from_env() {
+        return Ok(Some(CodexAuth::from_api_key(api_key.as_str())));
+    }
+    if let Some(api_key) = read_ambient_api_key_from_env() {
         return Ok(Some(CodexAuth::from_api_key(api_key.as_str())));
     }
 

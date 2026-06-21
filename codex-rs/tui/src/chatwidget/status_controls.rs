@@ -5,6 +5,7 @@
 //! history-facing `/status` surface.
 
 use super::*;
+use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 
 impl ChatWidget {
     /// Update the status indicator header and details.
@@ -388,5 +389,29 @@ impl ChatWidget {
             None | Some(ReasoningEffortConfig::None) => "default".to_string(),
             Some(effort) => effort.as_str().to_string(),
         }
+    }
+
+    pub(crate) fn status_line_reasoning_effort_label_for_model(
+        model: &str,
+        effort: Option<&ReasoningEffortConfig>,
+    ) -> String {
+        if model == AMBIENT_DEFAULT_MODEL {
+            return match effort {
+                Some(ReasoningEffortConfig::High | ReasoningEffortConfig::XHigh) => {
+                    "deep".to_string()
+                }
+                Some(ReasoningEffortConfig::Custom(value))
+                    if matches!(
+                        value.as_str(),
+                        "deep" | "max" | "xhigh" | "extra_high" | "extra-high"
+                    ) =>
+                {
+                    "deep".to_string()
+                }
+                _ => "standard".to_string(),
+            };
+        }
+
+        Self::status_line_reasoning_effort_label(effort)
     }
 }

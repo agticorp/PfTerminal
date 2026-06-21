@@ -107,7 +107,7 @@ struct ResponseCompleted {
     end_turn: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct ResponseCompletedUsage {
     input_tokens: i64,
     input_tokens_details: Option<ResponseCompletedInputTokensDetails>,
@@ -134,12 +134,12 @@ impl From<ResponseCompletedUsage> for TokenUsage {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct ResponseCompletedInputTokensDetails {
     cached_tokens: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct ResponseCompletedOutputTokensDetails {
     reasoning_tokens: i64,
 }
@@ -155,6 +155,7 @@ pub struct ResponsesStreamEvent {
     item_id: Option<String>,
     call_id: Option<String>,
     delta: Option<String>,
+    usage: Option<ResponseCompletedUsage>,
     summary_index: Option<i64>,
     content_index: Option<i64>,
 }
@@ -216,6 +217,19 @@ impl ResponsesStreamEvent {
             .and_then(|metadata| metadata.get("openai_chatgpt_moderation_metadata"))
             .cloned()
             .map(|metadata| TurnModerationMetadataEvent { metadata })
+    }
+
+    fn token_usage(&self) -> Option<TokenUsage> {
+        if let Some(usage) = self.usage.clone() {
+            return Some(usage.into());
+        }
+
+        self.response
+            .as_ref()
+            .and_then(|response| response.get("usage"))
+            .cloned()
+            .and_then(|usage| serde_json::from_value::<ResponseCompletedUsage>(usage).ok())
+            .map(Into::into)
     }
 }
 
@@ -440,6 +454,7 @@ pub async fn process_sse(
     let mut stream = stream.eventsource();
     let mut response_error: Option<ApiError> = None;
     let mut last_server_model: Option<String> = None;
+    let mut pending_usage: Option<TokenUsage> = None;
 
     loop {
         let start = Instant::now();
@@ -510,9 +525,19 @@ pub async fn process_sse(
             return;
         }
 
+        if event.kind() == "response.usage" {
+            pending_usage = event.token_usage();
+            continue;
+        }
+
         match process_responses_event(event) {
-            Ok(Some(event)) => {
+            Ok(Some(mut event)) => {
                 let is_completed = matches!(event, ResponseEvent::Completed { .. });
+                if let ResponseEvent::Completed { token_usage, .. } = &mut event
+                    && token_usage.is_none()
+                {
+                    *token_usage = pending_usage.take();
+                }
                 if tx_event.send(Ok(event)).await.is_err() {
                     return;
                 }

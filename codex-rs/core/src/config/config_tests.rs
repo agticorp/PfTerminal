@@ -65,11 +65,14 @@ use codex_core_plugins::PluginsManager;
 use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
 use codex_features::FeaturesToml;
+use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
+use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_model_provider_info::WireApi;
 use codex_models_manager::bundled_models_response;
 use codex_network_proxy::NetworkMode;
+use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::models::ActivePermissionProfile;
@@ -687,6 +690,147 @@ region = "us-west-2"
             .and_then(|aws| aws.region.as_deref()),
         Some("us-west-2")
     );
+}
+
+#[tokio::test]
+async fn load_config_defaults_to_ambient_provider_and_model() -> std::io::Result<()> {
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, AMBIENT_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(AMBIENT_DEFAULT_MODEL));
+    assert_eq!(config.model_provider.wire_api, WireApi::Responses);
+    assert_eq!(config.forced_login_method, Some(ForcedLoginMethod::Api));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_accepts_legacy_configured_ambient_provider() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "ambient"
+model = "ambient/large"
+
+[model_providers.ambient]
+name = "Ambient"
+base_url = "https://api.ambient.xyz/v1"
+env_key = "AMBIENT_API_KEY"
+wire_api = "responses"
+"#,
+    )
+    .expect("legacy Ambient provider config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, AMBIENT_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some("ambient/large"));
+    assert_eq!(config.model_provider.wire_api, WireApi::Responses);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_ambient_provider_replaces_stale_openai_model() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "ambient"
+model = "gpt-5.5"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, AMBIENT_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(AMBIENT_DEFAULT_MODEL));
+    assert_eq!(config.model_provider.wire_api, WireApi::Responses);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_ambient_provider_normalizes_standard_reasoning_effort() -> std::io::Result<()>
+{
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "ambient"
+model_reasoning_effort = "low"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, AMBIENT_PROVIDER_ID);
+    assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::Medium));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_ambient_provider_normalizes_deep_reasoning_effort() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "ambient"
+model_reasoning_effort = "high"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, AMBIENT_PROVIDER_ID);
+    assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::XHigh));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_ambient_provider_keeps_supported_reasoning_effort() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "ambient"
+model_reasoning_effort = "xhigh"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, AMBIENT_PROVIDER_ID);
+    assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::XHigh));
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -5009,7 +5153,7 @@ async fn memory_tool_makes_memories_root_readable_without_creating_or_widening_w
 }
 
 #[tokio::test]
-async fn config_defaults_to_file_cli_auth_store_mode() -> std::io::Result<()> {
+async fn config_defaults_to_auto_cli_auth_store_mode() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml::default();
 
@@ -5022,7 +5166,10 @@ async fn config_defaults_to_file_cli_auth_store_mode() -> std::io::Result<()> {
 
     assert_eq!(
         config.cli_auth_credentials_store_mode,
-        AuthCredentialsStoreMode::File,
+        resolve_cli_auth_credentials_store_mode(
+            AuthCredentialsStoreMode::Auto,
+            env!("CARGO_PKG_VERSION"),
+        ),
     );
 
     Ok(())
@@ -5078,7 +5225,7 @@ async fn config_resolves_default_oauth_store_mode() -> std::io::Result<()> {
 }
 
 #[test]
-fn local_dev_builds_force_file_cli_auth_store_modes() {
+fn local_dev_builds_force_file_for_explicit_keyring_cli_auth_store_mode() {
     assert_eq!(
         resolve_cli_auth_credentials_store_mode(
             AuthCredentialsStoreMode::Keyring,
@@ -5091,7 +5238,7 @@ fn local_dev_builds_force_file_cli_auth_store_modes() {
             AuthCredentialsStoreMode::Auto,
             LOCAL_DEV_BUILD_VERSION,
         ),
-        AuthCredentialsStoreMode::File,
+        AuthCredentialsStoreMode::Auto,
     );
     assert_eq!(
         resolve_cli_auth_credentials_store_mode(

@@ -8,6 +8,7 @@ use codex_api::Provider;
 use codex_api::SharedAuthProvider;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::manager::OpenAiModelsManager;
 use codex_models_manager::manager::SharedModelsManager;
@@ -218,6 +219,42 @@ impl ModelProvider for ConfiguredModelProvider {
         &self.info
     }
 
+    fn capabilities(&self) -> ProviderCapabilities {
+        if self.info.is_ambient() {
+            ProviderCapabilities {
+                namespace_tools: false,
+                image_generation: false,
+                web_search: false,
+            }
+        } else {
+            ProviderCapabilities::default()
+        }
+    }
+
+    fn approval_review_preferred_model(&self) -> &'static str {
+        if self.info.is_ambient() {
+            AMBIENT_DEFAULT_MODEL
+        } else {
+            DEFAULT_APPROVAL_REVIEW_PREFERRED_MODEL
+        }
+    }
+
+    fn memory_extraction_preferred_model(&self) -> &'static str {
+        if self.info.is_ambient() {
+            AMBIENT_DEFAULT_MODEL
+        } else {
+            DEFAULT_MEMORY_EXTRACTION_PREFERRED_MODEL
+        }
+    }
+
+    fn memory_consolidation_preferred_model(&self) -> &'static str {
+        if self.info.is_ambient() {
+            AMBIENT_DEFAULT_MODEL
+        } else {
+            DEFAULT_MEMORY_CONSOLIDATION_PREFERRED_MODEL
+        }
+    }
+
     fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.auth_manager.clone()
     }
@@ -310,6 +347,7 @@ mod tests {
     use std::num::NonZeroU64;
 
     use codex_login::auth::BedrockApiKeyAuth;
+    use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
     use codex_model_provider_info::ModelProviderAwsAuthInfo;
     use codex_model_provider_info::WireApi;
     use codex_models_manager::manager::RefreshStrategy;
@@ -412,6 +450,35 @@ mod tests {
         );
 
         assert_eq!(provider.capabilities(), ProviderCapabilities::default());
+    }
+
+    #[test]
+    fn ambient_provider_disables_responses_only_capabilities() {
+        let provider = create_model_provider(
+            ModelProviderInfo::create_ambient_provider(),
+            /*auth_manager*/ None,
+        );
+
+        assert_eq!(
+            provider.capabilities(),
+            ProviderCapabilities {
+                namespace_tools: false,
+                image_generation: false,
+                web_search: false,
+            }
+        );
+        assert_eq!(
+            provider.approval_review_preferred_model(),
+            AMBIENT_DEFAULT_MODEL
+        );
+        assert_eq!(
+            provider.memory_extraction_preferred_model(),
+            AMBIENT_DEFAULT_MODEL
+        );
+        assert_eq!(
+            provider.memory_consolidation_preferred_model(),
+            AMBIENT_DEFAULT_MODEL
+        );
     }
 
     #[test]

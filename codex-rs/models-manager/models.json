@@ -1,5 +1,88 @@
 {
   "models": [
+    {
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "input_modalities": [
+        "text"
+      ],
+      "supports_image_detail_original": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "context_window": 202752,
+      "max_context_window": 202752,
+      "auto_compact_token_limit": null,
+      "default_reasoning_summary": "none",
+      "slug": "zai-org/GLM-5.2-FP8",
+      "display_name": "Ambient GLM 5.2",
+      "description": "Ambient's default GLM 5.2 coding model.",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "medium",
+          "description": "Standard. Normal Ambient reasoning mode; sends reasoning_effort=high."
+        },
+        {
+          "effort": "xhigh",
+          "description": "Deep. Harder Ambient reasoning mode; sends reasoning_effort=max."
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "availability_nux": null,
+      "upgrade": null,
+      "priority": 0,
+      "base_instructions": "You are OneRing, a coding agent. Help the user complete software tasks in the current workspace. Be direct, inspect the code before changing it, keep edits scoped, and verify your work when practical.",
+      "model_messages": null,
+      "experimental_supported_tools": [],
+      "service_tiers": [],
+      "additional_speed_tiers": [],
+      "supports_reasoning_summaries": false,
+      "supports_search_tool": false
+    },
+    {
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "input_modalities": [
+        "text"
+      ],
+      "supports_image_detail_original": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "context_window": 131072,
+      "max_context_window": 131072,
+      "auto_compact_token_limit": null,
+      "default_reasoning_summary": "none",
+      "slug": "ambient/large",
+      "display_name": "Ambient Large",
+      "description": "Ambient's default coding model.",
+      "default_reasoning_level": null,
+      "supported_reasoning_levels": [],
+      "shell_type": "shell_command",
+      "visibility": "hide",
+      "supported_in_api": true,
+      "availability_nux": null,
+      "upgrade": null,
+      "priority": 0,
+      "base_instructions": "You are OneRing, a coding agent. Help the user complete software tasks in the current workspace. Be direct, inspect the code before changing it, keep edits scoped, and verify your work when practical.",
+      "model_messages": null,
+      "experimental_supported_tools": [],
+      "service_tiers": [],
+      "additional_speed_tiers": [],
+      "supports_reasoning_summaries": false,
+      "supports_search_tool": false
+    },
     { 
       "prefer_websockets": true,
       "support_verbosity": true,

@@ -423,8 +423,13 @@ impl AuthStorageBackend for AutoAuthStorage {
     }
 
     fn delete(&self) -> std::io::Result<bool> {
-        // Keyring storage will delete from disk as well
-        self.keyring_storage.delete()
+        match self.keyring_storage.delete() {
+            Ok(removed) => Ok(removed),
+            Err(err) => {
+                warn!("failed to delete auth from keyring, falling back to file storage: {err}");
+                self.file_storage.delete()
+            }
+        }
     }
 }
 

@@ -32,6 +32,13 @@ use std::sync::atomic::Ordering;
 
 use codex_api::ApiError;
 use codex_api::AuthProvider;
+use codex_api::ChatCompletionsClient as ApiChatCompletionsClient;
+use codex_api::ChatCompletionsOptions as ApiChatCompletionsOptions;
+use codex_api::ChatCompletionsRequest;
+use codex_api::ChatMessage;
+use codex_api::ChatStreamOptions;
+use codex_api::ChatToolCall;
+use codex_api::ChatToolFunction;
 use codex_api::CompactClient as ApiCompactClient;
 use codex_api::CompactionInput as ApiCompactionInput;
 use codex_api::Compression;
@@ -73,7 +80,9 @@ use codex_otel::current_span_w3c_trace_context;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Verbosity as VerbosityConfig;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::plaintext_agent_message_content;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::InternalSessionSource;
@@ -82,6 +91,7 @@ use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
+use codex_tools::ToolSpec;
 use codex_tools::create_tools_json_for_responses_api;
 use eventsource_stream::Event;
 use eventsource_stream::EventStreamError;
@@ -90,6 +100,8 @@ use http::HeaderMap as ApiHeaderMap;
 use http::HeaderValue;
 use http::StatusCode as HttpStatusCode;
 use reqwest::StatusCode;
+use serde_json::Value;
+use serde_json::json;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -148,6 +160,7 @@ const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=20
 const X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER: &str =
     "x-openai-internal-codex-responses-lite";
 const RESPONSES_ENDPOINT: &str = "/responses";
+const CHAT_COMPLETIONS_ENDPOINT: &str = "/chat/completions";
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
 // period between stream events.
@@ -288,6 +301,10 @@ fn responses_request_properties_match(
         prompt_cache_key: previous_prompt_cache_key,
         text: previous_text,
         client_metadata: _,
+        thinking_budget: previous_thinking_budget,
+        emit_usage: previous_emit_usage,
+        enable_thinking: previous_enable_thinking,
+        reasoning_effort: previous_zai_reasoning_effort,
     } = previous;
     let ResponsesApiRequest {
         model: current_model,
@@ -304,6 +321,10 @@ fn responses_request_properties_match(
         prompt_cache_key: current_prompt_cache_key,
         text: current_text,
         client_metadata: _,
+        thinking_budget: current_thinking_budget,
+        emit_usage: current_emit_usage,
+        enable_thinking: current_enable_thinking,
+        reasoning_effort: current_zai_reasoning_effort,
     } = current;
 
     previous_model == current_model
@@ -318,6 +339,10 @@ fn responses_request_properties_match(
         && previous_service_tier == current_service_tier
         && previous_prompt_cache_key == current_prompt_cache_key
         && previous_text == current_text
+        && previous_thinking_budget == current_thinking_budget
+        && previous_emit_usage == current_emit_usage
+        && previous_enable_thinking == current_enable_thinking
+        && previous_zai_reasoning_effort == current_zai_reasoning_effort
 }
 
 impl WebsocketSession {
@@ -649,8 +674,11 @@ impl ModelClient {
             model: model_info.slug.clone(),
             raw_memories,
             reasoning: effort.map(|effort| Reasoning {
+                enabled: None,
                 effort: Some(effort),
+                max_tokens: None,
                 summary: None,
+                exclude: None,
                 context: None,
             }),
         };
@@ -750,12 +778,15 @@ impl ModelClient {
     ) -> Option<Reasoning> {
         if model_info.supports_reasoning_summaries {
             Some(Reasoning {
+                enabled: None,
                 effort: effort.or_else(|| model_info.default_reasoning_level.clone()),
+                max_tokens: None,
                 summary: if summary == ReasoningSummaryConfig::None {
                     None
                 } else {
                     Some(summary)
                 },
+                exclude: None,
                 // When Responses Lite is disabled, omit context so Responses uses the default,
                 // which is currently `current_turn`.
                 context: model_info
@@ -764,6 +795,21 @@ impl ModelClient {
             })
         } else {
             None
+        }
+    }
+
+    fn ambient_zai_reasoning_effort(effort: Option<&ReasoningEffortConfig>) -> &'static str {
+        match effort {
+            Some(ReasoningEffortConfig::High | ReasoningEffortConfig::XHigh) => "max",
+            Some(ReasoningEffortConfig::Custom(value))
+                if matches!(
+                    value.as_str(),
+                    "deep" | "max" | "xhigh" | "extra_high" | "extra-high"
+                ) =>
+            {
+                "max"
+            }
+            _ => "high",
         }
     }
 
@@ -783,9 +829,25 @@ impl ModelClient {
         if !self.state.provider.info().is_openai() {
             input.iter_mut().for_each(ResponseItem::clear_metadata);
         }
-        let tools = create_tools_json_for_responses_api(&prompt.tools)?;
-        let reasoning = Self::build_reasoning(model_info, effort, summary);
-        let include = if reasoning.is_some() {
+        let is_ambient = self.state.provider.info().is_ambient();
+        let mut tools = create_tools_json_for_responses_api(&prompt.tools)?;
+        if is_ambient {
+            tools.retain(|tool| tool.get("type").and_then(Value::as_str) == Some("function"));
+        }
+        let ambient_reasoning_effort = is_ambient.then(|| {
+            Self::ambient_zai_reasoning_effort(
+                effort
+                    .as_ref()
+                    .or(model_info.default_reasoning_level.as_ref()),
+            )
+            .to_string()
+        });
+        let reasoning = if is_ambient {
+            None
+        } else {
+            Self::build_reasoning(model_info, effort, summary)
+        };
+        let include = if !is_ambient && reasoning.is_some() {
             vec!["reasoning.encrypted_content".to_string()]
         } else {
             Vec::new()
@@ -806,8 +868,13 @@ impl ModelClient {
             &prompt.output_schema,
             prompt.output_schema_strict,
         );
-        let prompt_cache_key = Some(self.prompt_cache_key());
-        let service_tier = model_info.service_tier_for_request(service_tier);
+        let prompt_cache_key = (!is_ambient).then(|| self.prompt_cache_key());
+        let service_tier = if is_ambient {
+            None
+        } else {
+            model_info.service_tier_for_request(service_tier)
+        };
+        let client_metadata = (!is_ambient).then(|| responses_metadata.client_metadata());
         let request = ResponsesApiRequest {
             model: model_info.slug.clone(),
             instructions: instructions.clone(),
@@ -822,9 +889,60 @@ impl ModelClient {
             service_tier,
             prompt_cache_key,
             text,
-            client_metadata: Some(responses_metadata.client_metadata()),
+            client_metadata,
+            thinking_budget: None,
+            emit_usage: is_ambient.then_some(true),
+            enable_thinking: is_ambient.then_some(true),
+            reasoning_effort: ambient_reasoning_effort,
         };
         Ok(request)
+    }
+
+    fn build_chat_completions_request(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+    ) -> Result<ChatCompletionsRequest> {
+        let mut messages = Vec::new();
+        let instructions = prompt.base_instructions.text.trim();
+        if !instructions.is_empty() {
+            messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: Some(instructions.to_string()),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            });
+        }
+
+        let input = prompt.get_formatted_input_for_request(model_info.use_responses_lite);
+        for item in input {
+            append_chat_messages_for_response_item(item, &mut messages);
+        }
+
+        let tools = create_tools_json_for_chat_completions(&prompt.tools)?;
+        let response_format = prompt.output_schema.as_ref().map(|schema| {
+            json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "codex_output_schema",
+                    "strict": prompt.output_schema_strict,
+                    "schema": schema,
+                }
+            })
+        });
+
+        Ok(ChatCompletionsRequest {
+            model: model_info.slug.clone(),
+            messages,
+            stream: true,
+            stream_options: Some(ChatStreamOptions {
+                include_usage: true,
+            }),
+            tool_choice: (!tools.is_empty()).then(|| "auto".to_string()),
+            parallel_tool_calls: (!tools.is_empty() && prompt.parallel_tool_calls).then_some(true),
+            tools,
+            response_format,
+        })
     }
 
     fn prepare_response_items_for_request(&self, input: &mut [ResponseItem], store: bool) {
@@ -1043,6 +1161,28 @@ impl ModelClientSession {
         }
     }
 
+    async fn build_chat_completions_options(
+        &self,
+        responses_metadata: &CodexResponsesMetadata,
+    ) -> ApiChatCompletionsOptions {
+        ApiChatCompletionsOptions {
+            session_id: Some(responses_metadata.session_id.to_string()),
+            thread_id: Some(responses_metadata.thread_id.to_string()),
+            session_source: Some(self.client.state.session_source.clone()),
+            extra_headers: {
+                let mut headers = ApiHeaderMap::new();
+                if let Ok(header_value) = HeaderValue::from_str(&responses_metadata.installation_id)
+                {
+                    headers.insert(X_CODEX_INSTALLATION_ID_HEADER, header_value);
+                }
+                if let Some(header_value) = self.client.generate_attestation_header_for().await {
+                    headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
+                }
+                headers
+            },
+        }
+    }
+
     fn get_incremental_items(
         &self,
         request: &ResponsesApiRequest,
@@ -1247,6 +1387,109 @@ impl ModelClientSession {
             Compression::Zstd
         } else {
             Compression::None
+        }
+    }
+
+    /// Streams a turn via the OpenAI-compatible Chat Completions API.
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        name = "model_client.stream_chat_completions_api",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "chat_completions_http",
+            http.method = "POST",
+            api.path = "chat/completions",
+            turn.has_metadata_header = responses_metadata.has_turn_metadata()
+        )
+    )]
+    async fn stream_chat_completions_api(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        responses_metadata: &CodexResponsesMetadata,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let auth_manager = self.client.state.provider.auth_manager();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                pending_retry,
+            );
+            let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
+                session_telemetry,
+                request_auth_context,
+                RequestRouteTelemetry::for_endpoint(CHAT_COMPLETIONS_ENDPOINT),
+                self.client.state.auth_env_telemetry.clone(),
+            );
+            let mut options = self
+                .build_chat_completions_options(responses_metadata)
+                .await;
+            let request = self
+                .client
+                .build_chat_completions_request(prompt, model_info)?;
+            let inference_trace_attempt = inference_trace.start_attempt();
+            inference_trace_attempt.add_request_headers(&mut options.extra_headers);
+            inference_trace_attempt.record_started(&request);
+            let client = ApiChatCompletionsClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+            )
+            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            let stream_result = client.stream_request(request, options).await;
+
+            match stream_result {
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(
+                        stream,
+                        session_telemetry.clone(),
+                        inference_trace_attempt,
+                    );
+                    return Ok(stream);
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    let response_debug_context =
+                        extract_response_debug_context(&unauthorized_transport);
+                    inference_trace_attempt.record_failed(
+                        &unauthorized_transport,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                        )
+                        .await?,
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    let response_debug_context =
+                        extract_response_debug_context_from_api_error(&err);
+                    let err = map_api_error(err);
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    return Err(err);
+                }
+            }
         }
     }
 
@@ -1680,6 +1923,16 @@ impl ModelClientSession {
                 )
                 .await
             }
+            WireApi::Chat => {
+                self.stream_chat_completions_api(
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    responses_metadata,
+                    inference_trace,
+                )
+                .await
+            }
         }
     }
 
@@ -1700,6 +1953,187 @@ impl ModelClientSession {
         self.websocket_session = WebsocketSession::default();
         activated
     }
+}
+
+fn append_chat_messages_for_response_item(item: ResponseItem, messages: &mut Vec<ChatMessage>) {
+    match item {
+        ResponseItem::Message { role, content, .. } => {
+            if let Some(content) = content_items_to_chat_text(&content) {
+                messages.push(ChatMessage {
+                    role: normalize_chat_role(&role),
+                    content: Some(content),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                });
+            }
+        }
+        ResponseItem::AgentMessage { content, .. } => {
+            if let Some(content) = plaintext_agent_message_content(&content) {
+                messages.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: Some(content),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                });
+            }
+        }
+        ResponseItem::FunctionCall {
+            name,
+            arguments,
+            call_id,
+            ..
+        }
+        | ResponseItem::CustomToolCall {
+            name,
+            input: arguments,
+            call_id,
+            ..
+        } => {
+            messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_call_id: None,
+                tool_calls: vec![ChatToolCall {
+                    id: call_id,
+                    kind: "function".to_string(),
+                    function: ChatToolFunction { name, arguments },
+                }],
+            });
+        }
+        ResponseItem::FunctionCallOutput {
+            call_id, output, ..
+        }
+        | ResponseItem::CustomToolCallOutput {
+            call_id, output, ..
+        } => {
+            messages.push(ChatMessage {
+                role: "tool".to_string(),
+                content: Some(output.body.to_text().unwrap_or_else(|| output.to_string())),
+                tool_call_id: Some(call_id),
+                tool_calls: Vec::new(),
+            });
+        }
+        ResponseItem::Reasoning { .. }
+        | ResponseItem::LocalShellCall { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::CompactionTrigger { .. }
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::Other => {}
+    }
+}
+
+fn content_items_to_chat_text(content: &[ContentItem]) -> Option<String> {
+    let parts = content
+        .iter()
+        .filter_map(|item| match item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                (!text.trim().is_empty()).then_some(text.as_str())
+            }
+            ContentItem::InputImage { .. } => None,
+        })
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+fn normalize_chat_role(role: &str) -> String {
+    match role {
+        "assistant" | "system" | "tool" | "user" => role.to_string(),
+        "developer" => "system".to_string(),
+        _ => "user".to_string(),
+    }
+}
+
+fn create_tools_json_for_chat_completions(tools: &[ToolSpec]) -> Result<Vec<Value>> {
+    tools
+        .iter()
+        .filter_map(tool_spec_to_chat_tool)
+        .collect::<Result<Vec<_>>>()
+}
+
+fn tool_spec_to_chat_tool(tool: &ToolSpec) -> Option<Result<Value>> {
+    match tool {
+        ToolSpec::Function(_) => Some(serde_json::to_value(tool).map_err(Into::into).and_then(
+            |value| {
+                responses_tool_to_chat_tool(value).ok_or_else(|| {
+                    CodexErr::Fatal("failed to convert function tool for chat".to_string())
+                })
+            },
+        )),
+        ToolSpec::Freeform(tool) => Some(Ok(freeform_tool_to_chat_tool(tool))),
+        ToolSpec::Namespace(_)
+        | ToolSpec::ToolSearch { .. }
+        | ToolSpec::ImageGeneration { .. }
+        | ToolSpec::WebSearch { .. } => None,
+    }
+}
+
+fn responses_tool_to_chat_tool(mut tool: Value) -> Option<Value> {
+    let object = tool.as_object_mut()?;
+    if object.get("type").and_then(Value::as_str)? != "function" {
+        return None;
+    }
+
+    let name = object.remove("name")?;
+    let description = object.remove("description");
+    let parameters = object.remove("parameters").unwrap_or_else(|| {
+        json!({
+            "type": "object",
+            "properties": {}
+        })
+    });
+    let strict = object.remove("strict");
+
+    let mut function = serde_json::Map::new();
+    function.insert("name".to_string(), name);
+    if let Some(description) = description {
+        function.insert("description".to_string(), description);
+    }
+    function.insert("parameters".to_string(), parameters);
+    if let Some(strict) = strict {
+        function.insert("strict".to_string(), strict);
+    }
+
+    Some(json!({
+        "type": "function",
+        "function": Value::Object(function),
+    }))
+}
+
+fn freeform_tool_to_chat_tool(tool: &codex_tools::FreeformTool) -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": tool.name.as_str(),
+            "description": format!(
+                "{} Pass the raw freeform input in the `input` field.",
+                tool.description
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": format!(
+                            "Raw {} input. Do not JSON-encode this field's contents.",
+                            tool.name.as_str()
+                        ),
+                    },
+                },
+                "required": ["input"],
+                "additionalProperties": false,
+            },
+            "strict": true,
+        },
+    })
 }
 
 /// Stamp a ResponsesWsRequest with the current time.

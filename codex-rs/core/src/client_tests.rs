@@ -19,15 +19,18 @@ use codex_app_server_protocol::AuthMode;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::BearerAuthProvider;
+use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -38,6 +41,9 @@ use codex_rollout_trace::RawTraceEventPayload;
 use codex_rollout_trace::RolloutTrace;
 use codex_rollout_trace::TraceWriter;
 use codex_rollout_trace::replay_bundle;
+use codex_tools::FreeformTool;
+use codex_tools::FreeformToolFormat;
+use codex_tools::ToolSpec;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -131,6 +137,37 @@ fn test_model_info() -> ModelInfo {
     .expect("deserialize test model info")
 }
 
+fn test_ambient_model_info() -> ModelInfo {
+    serde_json::from_value(json!({
+        "slug": AMBIENT_DEFAULT_MODEL,
+        "display_name": "Ambient GLM 5.2",
+        "description": "Ambient GLM 5.2",
+        "default_reasoning_level": "medium",
+        "supported_reasoning_levels": [
+            {"effort": "medium", "description": "Standard"},
+            {"effort": "xhigh", "description": "Deep"}
+        ],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 1,
+        "upgrade": null,
+        "base_instructions": "base instructions",
+        "model_messages": null,
+        "supports_reasoning_summaries": false,
+        "support_verbosity": false,
+        "default_verbosity": null,
+        "apply_patch_tool_type": null,
+        "truncation_policy": {"mode": "tokens", "limit": 10000},
+        "supports_parallel_tool_calls": true,
+        "supports_image_detail_original": false,
+        "context_window": 202752,
+        "auto_compact_token_limit": null,
+        "experimental_supported_tools": []
+    }))
+    .expect("deserialize Ambient test model info")
+}
+
 fn test_session_telemetry() -> SessionTelemetry {
     SessionTelemetry::new(
         ThreadId::new(),
@@ -144,6 +181,116 @@ fn test_session_telemetry() -> SessionTelemetry {
         "test-terminal".to_string(),
         SessionSource::Cli,
     )
+}
+
+#[test]
+fn chat_completions_wraps_freeform_tools_as_functions() {
+    let tools =
+        super::create_tools_json_for_chat_completions(&[ToolSpec::Freeform(FreeformTool {
+            name: "apply_patch".to_string(),
+            description: "Apply a patch".to_string(),
+            format: FreeformToolFormat {
+                r#type: "grammar".to_string(),
+                syntax: "lark".to_string(),
+                definition: "start: /.+/".to_string(),
+            },
+        })])
+        .expect("chat tools");
+
+    assert_eq!(
+        tools,
+        vec![json!({
+            "type": "function",
+            "function": {
+                "name": "apply_patch",
+                "description": "Apply a patch Pass the raw freeform input in the `input` field.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "input": {
+                            "type": "string",
+                            "description": "Raw apply_patch input. Do not JSON-encode this field's contents.",
+                        },
+                    },
+                    "required": ["input"],
+                    "additionalProperties": false,
+                },
+                "strict": true,
+            },
+        })]
+    );
+}
+
+#[test]
+fn ambient_responses_request_uses_zai_reasoning_fields() {
+    let provider_info = ModelProviderInfo::create_ambient_provider();
+    let api_provider = provider_info
+        .to_api_provider(Some(AuthMode::ApiKey))
+        .expect("Ambient API provider");
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        provider_info,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*item_ids_enabled*/ false,
+        /*attestation_provider*/ None,
+    );
+    let prompt = super::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            metadata: None,
+        }],
+        ..Default::default()
+    };
+    let model_info = test_ambient_model_info();
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        Some("turn-1"),
+        "window-1".to_string(),
+        None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+
+    let standard = client
+        .build_responses_request(
+            &api_provider,
+            &prompt,
+            &model_info,
+            Some(ReasoningEffortConfig::Medium),
+            ReasoningSummaryConfig::None,
+            None,
+            &responses_metadata,
+        )
+        .expect("standard Ambient request");
+    assert_eq!(standard.reasoning, None);
+    assert_eq!(standard.thinking_budget, None);
+    assert_eq!(standard.enable_thinking, Some(true));
+    assert_eq!(standard.reasoning_effort.as_deref(), Some("high"));
+
+    let deep = client
+        .build_responses_request(
+            &api_provider,
+            &prompt,
+            &model_info,
+            Some(ReasoningEffortConfig::XHigh),
+            ReasoningSummaryConfig::None,
+            None,
+            &responses_metadata,
+        )
+        .expect("deep Ambient request");
+    assert_eq!(deep.reasoning, None);
+    assert_eq!(deep.thinking_budget, None);
+    assert_eq!(deep.enable_thinking, Some(true));
+    assert_eq!(deep.reasoning_effort.as_deref(), Some("max"));
 }
 
 #[derive(Default)]

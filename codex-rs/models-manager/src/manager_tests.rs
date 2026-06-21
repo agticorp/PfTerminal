@@ -10,7 +10,9 @@ use codex_login::ExternalAuth;
 use codex_login::ExternalAuthRefreshContext;
 use codex_login::ExternalAuthTokens;
 use codex_login::TokenData;
+use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
+use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::VecDeque;
@@ -952,4 +954,46 @@ fn bundled_models_json_roundtrips() {
         !response.models.is_empty(),
         "bundled models.json should contain at least one model"
     );
+}
+
+#[test]
+fn bundled_models_json_contains_ambient_models() {
+    let response = crate::bundled_models_response()
+        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+
+    let ambient_default = response
+        .models
+        .iter()
+        .find(|model| model.slug == "zai-org/GLM-5.2-FP8")
+        .expect("bundled models.json should include the Ambient GLM 5.2 default");
+
+    assert_eq!(ambient_default.display_name, "Ambient GLM 5.2");
+    assert_eq!(ambient_default.context_window, Some(202_752));
+    assert_eq!(
+        ambient_default.default_reasoning_level,
+        Some(ReasoningEffort::Medium)
+    );
+    assert_eq!(
+        ambient_default
+            .supported_reasoning_levels
+            .iter()
+            .map(|level| level.effort.clone())
+            .collect::<Vec<_>>(),
+        vec![ReasoningEffort::Medium, ReasoningEffort::XHigh]
+    );
+    assert_eq!(ambient_default.visibility, ModelVisibility::List);
+    assert!(ambient_default.supports_parallel_tool_calls);
+    assert!(!ambient_default.used_fallback_model_metadata);
+
+    let ambient = response
+        .models
+        .iter()
+        .find(|model| model.slug == "ambient/large")
+        .expect("bundled models.json should include ambient/large");
+
+    assert_eq!(ambient.display_name, "Ambient Large");
+    assert_eq!(ambient.context_window, Some(131_072));
+    assert_eq!(ambient.visibility, ModelVisibility::Hide);
+    assert!(ambient.supports_parallel_tool_calls);
+    assert!(!ambient.used_fallback_model_metadata);
 }

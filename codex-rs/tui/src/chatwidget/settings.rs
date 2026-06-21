@@ -698,12 +698,12 @@ impl ChatWidget {
         {
             let mut message = format!("Model changed to {next_model}");
             if !next_model.starts_with("codex-auto-") {
-                let reasoning_label = match next_effort.as_ref() {
-                    None | Some(ReasoningEffortConfig::None) => "default",
-                    Some(effort) => effort.as_str(),
-                };
+                let reasoning_label = Self::status_line_reasoning_effort_label_for_model(
+                    next_model,
+                    next_effort.as_ref(),
+                );
                 message.push(' ');
-                message.push_str(reasoning_label);
+                message.push_str(&reasoning_label);
             }
             message.push_str(" for ");
             message.push_str(next_mode.display_name());

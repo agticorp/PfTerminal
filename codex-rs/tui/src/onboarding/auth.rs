@@ -16,7 +16,10 @@ use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
+use codex_login::OPENAI_API_KEY_ENV_VAR;
+use codex_login::read_ambient_api_key_from_env;
 use codex_login::read_openai_api_key_from_env;
+use codex_model_provider_info::AMBIENT_API_KEY_ENV_VAR;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -98,6 +101,12 @@ fn onboarding_request_id() -> codex_app_server_protocol::RequestId {
     codex_app_server_protocol::RequestId::String(Uuid::new_v4().to_string())
 }
 
+fn read_api_key_from_env() -> Option<(&'static str, String)> {
+    read_ambient_api_key_from_env()
+        .map(|value| (AMBIENT_API_KEY_ENV_VAR, value))
+        .or_else(|| read_openai_api_key_from_env().map(|value| (OPENAI_API_KEY_ENV_VAR, value)))
+}
+
 pub(super) async fn cancel_login_attempt(
     request_handle: &AppServerRequestHandle,
     login_id: String,
@@ -115,7 +124,19 @@ pub(super) async fn cancel_login_attempt(
 #[derive(Clone, Default)]
 pub(crate) struct ApiKeyInputState {
     value: String,
-    prepopulated_from_env: bool,
+    prepopulated_env_var: Option<&'static str>,
+}
+
+impl ApiKeyInputState {
+    pub(crate) fn from_env() -> Self {
+        match read_api_key_from_env() {
+            Some((env_var, value)) => Self {
+                value,
+                prepopulated_env_var: Some(env_var),
+            },
+            None => Self::default(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -313,14 +334,18 @@ impl AuthModeWidget {
     }
 
     fn displayed_sign_in_options(&self) -> Vec<SignInOption> {
-        let mut options = vec![SignInOption::ChatGpt];
         if self.is_chatgpt_login_allowed() {
+            let mut options = vec![SignInOption::ChatGpt];
             options.push(SignInOption::DeviceCode);
+            if self.is_api_login_allowed() {
+                options.push(SignInOption::ApiKey);
+            }
+            options
+        } else if self.is_api_login_allowed() {
+            vec![SignInOption::ApiKey]
+        } else {
+            Vec::new()
         }
-        if self.is_api_login_allowed() {
-            options.push(SignInOption::ApiKey);
-        }
-        options
     }
 
     fn selectable_sign_in_options(&self) -> Vec<SignInOption> {
@@ -379,6 +404,10 @@ impl AuthModeWidget {
         }
     }
 
+    fn ambient_api_key_required(&self) -> bool {
+        matches!(self.forced_login_method, Some(ForcedLoginMethod::Api))
+    }
+
     fn disallow_api_login(&mut self) {
         self.highlighted_mode = SignInOption::ChatGpt;
         self.set_error(Some(API_KEY_DISABLED_MESSAGE.to_string()));
@@ -387,17 +416,27 @@ impl AuthModeWidget {
     }
 
     fn render_pick_mode(&self, area: Rect, buf: &mut Buffer) {
-        let mut lines: Vec<Line> = vec![
-            Line::from(vec![
-                "  ".into(),
-                "Sign in with ChatGPT to use Codex as part of your paid plan".into(),
-            ]),
-            Line::from(vec![
-                "  ".into(),
-                "or connect an API key for usage-based billing".into(),
-            ]),
-            "".into(),
-        ];
+        let mut lines: Vec<Line> = if self.ambient_api_key_required() {
+            vec![
+                Line::from(vec![
+                    "  ".into(),
+                    "Connect an Ambient API key to use OneRing".into(),
+                ]),
+                "".into(),
+            ]
+        } else {
+            vec![
+                Line::from(vec![
+                    "  ".into(),
+                    "Sign in with ChatGPT to use Codex as part of your paid plan".into(),
+                ]),
+                Line::from(vec![
+                    "  ".into(),
+                    "or connect an API key for usage-based billing".into(),
+                ]),
+                "".into(),
+            ]
+        };
 
         let create_mode_item = |idx: usize,
                                 selected_mode: SignInOption,
@@ -454,12 +493,12 @@ impl AuthModeWidget {
                     ));
                 }
                 SignInOption::ApiKey => {
-                    lines.extend(create_mode_item(
-                        idx,
-                        option,
-                        "Provide your own API key",
-                        "Pay for what you use",
-                    ));
+                    let text = if self.ambient_api_key_required() {
+                        "Provide your Ambient API key"
+                    } else {
+                        "Provide your own API key"
+                    };
+                    lines.extend(create_mode_item(idx, option, text, "Pay for what you use"));
                 }
             }
             lines.push("".into());
@@ -603,10 +642,20 @@ impl AuthModeWidget {
     }
 
     fn render_api_key_configured(&self, area: Rect, buf: &mut Buffer) {
+        let configured_message = if self.ambient_api_key_required() {
+            "✓ Ambient API key configured"
+        } else {
+            "✓ API key configured"
+        };
+        let usage_message = if self.ambient_api_key_required() {
+            "  OneRing will use Ambient with your API key."
+        } else {
+            "  Codex will use usage-based billing with your API key."
+        };
         let lines = vec![
-            "✓ API key configured".fg(Color::Green).into(),
+            configured_message.fg(Color::Green).into(),
             "".into(),
-            "  Codex will use usage-based billing with your API key.".into(),
+            usage_message.into(),
         ];
 
         Paragraph::new(lines)
@@ -625,14 +674,19 @@ impl AuthModeWidget {
         let mut intro_lines: Vec<Line> = vec![
             Line::from(vec![
                 "> ".into(),
-                "Use your own OpenAI API key for usage-based billing".bold(),
+                if self.ambient_api_key_required() {
+                    "Use your Ambient API key"
+                } else {
+                    "Use your own API key for usage-based billing"
+                }
+                .bold(),
             ]),
             "".into(),
-            "  Paste or type your API key below. It will be stored locally in auth.json.".into(),
+            "  Paste or type your API key below. It will be stored in your configured credential store.".into(),
             "".into(),
         ];
-        if state.prepopulated_from_env {
-            intro_lines.push("  Detected OPENAI_API_KEY environment variable.".into());
+        if let Some(env_var) = state.prepopulated_env_var {
+            intro_lines.push(format!("  Detected {env_var} environment variable.").into());
             intro_lines.push(
                 "  Paste a different key if you prefer to use another account."
                     .dim()
@@ -703,9 +757,9 @@ impl AuthModeWidget {
                 } else {
                     match key_event.code {
                         KeyCode::Backspace => {
-                            if state.prepopulated_from_env {
+                            if state.prepopulated_env_var.is_some() {
                                 state.value.clear();
-                                state.prepopulated_from_env = false;
+                                state.prepopulated_env_var = None;
                             } else {
                                 state.value.pop();
                             }
@@ -718,9 +772,9 @@ impl AuthModeWidget {
                                 && !key_event.modifiers.contains(KeyModifiers::CONTROL)
                                 && !key_event.modifiers.contains(KeyModifiers::ALT) =>
                         {
-                            if state.prepopulated_from_env {
+                            if state.prepopulated_env_var.is_some() {
                                 state.value.clear();
-                                state.prepopulated_from_env = false;
+                                state.prepopulated_env_var = None;
                             }
                             state.value.push(c);
                             self.set_error(/*message*/ None);
@@ -751,9 +805,9 @@ impl AuthModeWidget {
 
         let mut guard = self.sign_in_state.write().unwrap();
         if let SignInState::ApiKeyEntry(state) = &mut *guard {
-            if state.prepopulated_from_env {
+            if state.prepopulated_env_var.is_some() {
                 state.value = trimmed.to_string();
-                state.prepopulated_from_env = false;
+                state.prepopulated_env_var = None;
             } else {
                 state.value.push_str(trimmed);
             }
@@ -773,23 +827,26 @@ impl AuthModeWidget {
             return;
         }
         self.set_error(/*message*/ None);
-        let prefill_from_env = read_openai_api_key_from_env();
+        let prefill_from_env = read_api_key_from_env();
         let mut guard = self.sign_in_state.write().unwrap();
         match &mut *guard {
             SignInState::ApiKeyEntry(state) => {
                 if state.value.is_empty() {
-                    if let Some(prefill) = prefill_from_env {
-                        state.value = prefill;
-                        state.prepopulated_from_env = true;
+                    if let Some((env_var, prefill)) = prefill_from_env.as_ref() {
+                        state.value = prefill.clone();
+                        state.prepopulated_env_var = Some(*env_var);
                     } else {
-                        state.prepopulated_from_env = false;
+                        state.prepopulated_env_var = None;
                     }
                 }
             }
             _ => {
                 *guard = SignInState::ApiKeyEntry(ApiKeyInputState {
-                    value: prefill_from_env.clone().unwrap_or_default(),
-                    prepopulated_from_env: prefill_from_env.is_some(),
+                    value: prefill_from_env
+                        .as_ref()
+                        .map(|(_, value)| value.clone())
+                        .unwrap_or_default(),
+                    prepopulated_env_var: prefill_from_env.map(|(env_var, _)| env_var),
                 });
             }
         }
@@ -827,14 +884,14 @@ impl AuthModeWidget {
                     ));
                     *sign_in_state.write().unwrap() = SignInState::ApiKeyEntry(ApiKeyInputState {
                         value: api_key,
-                        prepopulated_from_env: false,
+                        prepopulated_env_var: None,
                     });
                 }
                 Err(err) => {
                     *error.write().unwrap() = Some(format!("Failed to save API key: {err}"));
                     *sign_in_state.write().unwrap() = SignInState::ApiKeyEntry(ApiKeyInputState {
                         value: api_key,
-                        prepopulated_from_env: false,
+                        prepopulated_env_var: None,
                     });
                 }
             }

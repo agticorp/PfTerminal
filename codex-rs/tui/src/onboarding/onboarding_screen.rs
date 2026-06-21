@@ -36,6 +36,7 @@ use crate::config_update::format_config_error;
 use crate::config_update::write_trusted_project;
 use crate::key_hint::KeyBindingListExt;
 use crate::legacy_core::config::Config;
+use crate::onboarding::auth::ApiKeyInputState;
 use crate::onboarding::auth::AuthModeWidget;
 use crate::onboarding::auth::SignInOption;
 use crate::onboarding::auth::SignInState;
@@ -123,12 +124,18 @@ impl OnboardingScreen {
                 Some(ForcedLoginMethod::Api) => SignInOption::ApiKey,
                 _ => SignInOption::ChatGpt,
             };
+            let initial_sign_in_state = match forced_login_method {
+                Some(ForcedLoginMethod::Api) => {
+                    SignInState::ApiKeyEntry(ApiKeyInputState::from_env())
+                }
+                _ => SignInState::PickMode,
+            };
             if let Some(app_server_request_handle) = app_server_request_handle {
                 steps.push(Step::Auth(AuthModeWidget {
                     request_frame: tui.frame_requester(),
                     highlighted_mode,
                     error: Arc::new(RwLock::new(None)),
-                    sign_in_state: Arc::new(RwLock::new(SignInState::PickMode)),
+                    sign_in_state: Arc::new(RwLock::new(initial_sign_in_state)),
                     login_status,
                     app_server_request_handle,
                     forced_login_method,

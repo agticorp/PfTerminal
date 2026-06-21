@@ -124,6 +124,10 @@ fn serializes_text_verbosity_when_set() {
             format: None,
         }),
         client_metadata: None,
+        thinking_budget: None,
+        emit_usage: None,
+        enable_thinking: None,
+        reasoning_effort: None,
     };
 
     let v = serde_json::to_value(&req).expect("json");
@@ -168,6 +172,10 @@ fn serializes_text_schema_with_strict_format() {
         service_tier: None,
         text: Some(text_controls),
         client_metadata: None,
+        thinking_budget: None,
+        emit_usage: None,
+        enable_thinking: None,
+        reasoning_effort: None,
     };
 
     let v = serde_json::to_value(&req).expect("json");
@@ -229,10 +237,60 @@ fn omits_text_when_not_set() {
         service_tier: None,
         text: None,
         client_metadata: None,
+        thinking_budget: None,
+        emit_usage: None,
+        enable_thinking: None,
+        reasoning_effort: None,
     };
 
     let v = serde_json::to_value(&req).expect("json");
     assert!(v.get("text").is_none());
+}
+
+#[test]
+fn ambient_fast_request_serializes_plain_string_input() {
+    let req = ResponsesApiRequest {
+        model: "zai-org/GLM-5.2-FP8".to_string(),
+        instructions: String::new(),
+        input: vec![ResponseItem::Message {
+            id: Some("msg_1".to_string()),
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Reply exactly OK_FAST_PATH_123".to_string(),
+            }],
+            phase: None,
+            metadata: None,
+        }],
+        tools: vec![],
+        tool_choice: "auto".to_string(),
+        parallel_tool_calls: false,
+        reasoning: None,
+        store: false,
+        stream: true,
+        include: vec![],
+        prompt_cache_key: None,
+        service_tier: None,
+        text: None,
+        client_metadata: None,
+        thinking_budget: None,
+        emit_usage: Some(true),
+        enable_thinking: Some(true),
+        reasoning_effort: Some("high".to_string()),
+    };
+
+    let v = serde_json::to_value(&req).expect("json");
+    assert_eq!(
+        v.get("input").and_then(|input| input.as_str()),
+        Some("Reply exactly OK_FAST_PATH_123")
+    );
+    assert!(v.get("reasoning").is_none());
+    assert!(v.get("thinking_budget").is_none());
+    assert_eq!(v.get("emit_usage"), Some(&serde_json::json!(true)));
+    assert_eq!(v.get("enable_thinking"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        v.get("reasoning_effort").and_then(|value| value.as_str()),
+        Some("high")
+    );
 }
 
 #[test]
@@ -252,6 +310,10 @@ fn serializes_flex_service_tier_when_set() {
         service_tier: Some(ServiceTier::Flex.to_string()),
         text: None,
         client_metadata: None,
+        thinking_budget: None,
+        emit_usage: None,
+        enable_thinking: None,
+        reasoning_effort: None,
     };
 
     let v = serde_json::to_value(&req).expect("json");

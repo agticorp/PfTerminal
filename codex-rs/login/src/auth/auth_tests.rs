@@ -1564,6 +1564,7 @@ async fn load_auth_keeps_codex_api_key_env_precedence() {
     let record = agent_identity_record(WORKSPACE_ID_ALLOWED);
     let agent_identity = fake_agent_identity_jwt(&record).expect("fake agent identity");
     let _access_token_guard = EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, &agent_identity);
+    let _ambient_api_key_guard = EnvVarGuard::set(AMBIENT_API_KEY_ENV_VAR, "ambient-env");
     let _api_key_guard = EnvVarGuard::set(CODEX_API_KEY_ENV_VAR, "sk-env");
 
     let auth = super::load_auth(
@@ -1580,6 +1581,32 @@ async fn load_auth_keeps_codex_api_key_env_precedence() {
     .expect("env auth should be present");
 
     assert_eq!(auth.api_key(), Some("sk-env"));
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn load_auth_reads_ambient_api_key_from_env() {
+    let codex_home = tempdir().unwrap();
+    let record = agent_identity_record(WORKSPACE_ID_ALLOWED);
+    let agent_identity = fake_agent_identity_jwt(&record).expect("fake agent identity");
+    let _access_token_guard = EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, &agent_identity);
+    let _codex_api_key_guard = EnvVarGuard::remove(CODEX_API_KEY_ENV_VAR);
+    let _ambient_api_key_guard = EnvVarGuard::set(AMBIENT_API_KEY_ENV_VAR, "ambient-env");
+
+    let auth = super::load_auth(
+        codex_home.path(),
+        /*enable_codex_api_key_env*/ true,
+        AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
+        /*chatgpt_base_url*/ None,
+        AuthKeyringBackendKind::Direct,
+        /*agent_identity_authapi_base_url*/ None,
+    )
+    .await
+    .expect("env auth should load")
+    .expect("env auth should be present");
+
+    assert_eq!(auth.api_key(), Some("ambient-env"));
 }
 
 #[tokio::test]
@@ -1602,10 +1629,9 @@ async fn enforce_login_restrictions_logs_out_for_method_mismatch() {
     )
     .await;
 
-    let err = super::enforce_login_restrictions(&config)
+    super::enforce_login_restrictions(&config)
         .await
-        .expect_err("expected method mismatch to error");
-    assert!(err.to_string().contains("ChatGPT login is required"));
+        .expect("method mismatch should clear auth and continue");
     assert!(
         !codex_home.path().join("auth.json").exists(),
         "auth.json should be removed on mismatch"
