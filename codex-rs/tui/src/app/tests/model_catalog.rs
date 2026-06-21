@@ -175,7 +175,7 @@ fn select_model_availability_nux_returns_none_when_all_models_are_exhausted() {
 }
 
 #[tokio::test]
-async fn prepare_startup_tooltip_override_persists_model_availability_nux_count() {
+async fn prepare_startup_tooltip_override_suppresses_model_availability_nux() {
     let codex_home = tempdir().expect("temp codex home");
     let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
@@ -197,21 +197,15 @@ async fn prepare_startup_tooltip_override_persists_model_availability_nux_count(
     let tooltip =
         prepare_startup_tooltip_override(&mut config, &presets, /*is_first_run*/ false).await;
 
-    assert_eq!(tooltip.as_deref(), Some("gpt-5.4 is available"));
-    assert_eq!(
-        config.model_availability_nux.shown_count,
-        HashMap::from([("gpt-5.4".to_string(), 1)])
-    );
+    assert_eq!(tooltip, None);
+    assert_eq!(config.model_availability_nux.shown_count, HashMap::new());
 
     let reloaded = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .build()
         .await
         .expect("reloaded config");
-    assert_eq!(
-        reloaded.model_availability_nux.shown_count,
-        HashMap::from([("gpt-5.4".to_string(), 1)])
-    );
+    assert_eq!(reloaded.model_availability_nux.shown_count, HashMap::new());
 }
 
 #[tokio::test]

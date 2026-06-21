@@ -202,14 +202,17 @@ pub(super) fn apply_accepted_model_migration(
     });
 }
 
+#[cfg(test)]
 pub(super) const MODEL_AVAILABILITY_NUX_MAX_SHOW_COUNT: u32 = 4;
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StartupTooltipOverride {
     pub(super) model_slug: String,
     pub(super) message: String,
 }
 
+#[cfg(test)]
 pub(super) fn select_model_availability_nux(
     available_models: &[ModelPreset],
     nux_config: &ModelAvailabilityNuxConfig,
@@ -229,42 +232,11 @@ pub(super) fn select_model_availability_nux(
 }
 
 pub(super) async fn prepare_startup_tooltip_override(
-    config: &mut Config,
-    available_models: &[ModelPreset],
-    is_first_run: bool,
+    _config: &mut Config,
+    _available_models: &[ModelPreset],
+    _is_first_run: bool,
 ) -> Option<String> {
-    if is_first_run || !config.show_tooltips {
-        return None;
-    }
-
-    let tooltip_override =
-        select_model_availability_nux(available_models, &config.model_availability_nux)?;
-
-    let shown_count = config
-        .model_availability_nux
-        .shown_count
-        .get(&tooltip_override.model_slug)
-        .copied()
-        .unwrap_or_default();
-    let next_count = shown_count.saturating_add(1);
-    let mut updated_shown_count = config.model_availability_nux.shown_count.clone();
-    updated_shown_count.insert(tooltip_override.model_slug.clone(), next_count);
-
-    if let Err(err) = ConfigEditsBuilder::for_config(config)
-        .set_model_availability_nux_count(&updated_shown_count)
-        .apply()
-        .await
-    {
-        tracing::error!(
-            error = %err,
-            model = %tooltip_override.model_slug,
-            "failed to persist model availability nux count"
-        );
-        return Some(tooltip_override.message);
-    }
-
-    config.model_availability_nux.shown_count = updated_shown_count;
-    Some(tooltip_override.message)
+    None
 }
 
 pub(super) async fn handle_model_migration_prompt_if_needed(

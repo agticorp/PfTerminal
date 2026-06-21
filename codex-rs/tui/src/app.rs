@@ -134,6 +134,7 @@ use codex_config::ConfigLayerStackOrdering;
 use codex_config::LoaderOverrides;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::MemoriesToml;
+#[cfg(test)]
 use codex_config::types::ModelAvailabilityNuxConfig;
 #[cfg(target_os = "windows")]
 use codex_config::types::WindowsToml;
@@ -153,6 +154,7 @@ use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::models::PermissionProfile;
+#[cfg(test)]
 use codex_protocol::openai_models::ModelAvailabilityNux;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelUpgrade;
