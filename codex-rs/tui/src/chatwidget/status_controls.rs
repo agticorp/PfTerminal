@@ -6,6 +6,7 @@
 
 use super::*;
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
+use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 
 impl ChatWidget {
     /// Update the status indicator header and details.
@@ -395,7 +396,7 @@ impl ChatWidget {
         model: &str,
         effort: Option<&ReasoningEffortConfig>,
     ) -> String {
-        if model == AMBIENT_DEFAULT_MODEL {
+        if model == AMBIENT_DEFAULT_MODEL || model == ZAI_DEFAULT_MODEL {
             return match effort {
                 Some(ReasoningEffortConfig::High | ReasoningEffortConfig::XHigh) => {
                     "deep".to_string()

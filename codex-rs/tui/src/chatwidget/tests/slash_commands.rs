@@ -1,5 +1,7 @@
 use super::*;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
+use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
+use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use pretty_assertions::assert_eq;
 use serial_test::serial;
 
@@ -399,9 +401,9 @@ async fn queued_slash_menu_cancel_drains_next_input() {
 
 #[tokio::test]
 async fn queued_settings_selection_applies_before_next_input() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some(AMBIENT_DEFAULT_MODEL)).await;
     chat.thread_id = Some(ThreadId::new());
-    let mut preset = get_available_model(&chat, "gpt-5.4");
+    let mut preset = get_available_model(&chat, ZAI_DEFAULT_MODEL);
     preset.supported_reasoning_efforts.truncate(1);
     let selected_effort = preset.supported_reasoning_efforts[0].effort.clone();
     chat.model_catalog = std::sync::Arc::new(ModelCatalog::new(vec![preset]));
@@ -424,6 +426,7 @@ async fn queued_settings_selection_applies_before_next_input() {
         match event {
             AppEvent::OpenReasoningPopup { model } => chat.open_reasoning_popup(model),
             AppEvent::UpdateModel(model) => chat.set_model(&model),
+            AppEvent::UpdateModelSelection { model, .. } => chat.set_model(&model),
             AppEvent::UpdateReasoningEffort(effort) => chat.set_reasoning_effort(effort),
             AppEvent::SettingsSelectionClosed => {
                 chat.app_event_tx.send(AppEvent::SettingsSelectionSettled);
@@ -439,7 +442,7 @@ async fn queued_settings_selection_applies_before_next_input() {
     match next_submit_op(&mut op_rx) {
         Op::UserTurn { model, effort, .. } => assert_eq!(
             (model, effort),
-            ("gpt-5.4".to_string(), Some(selected_effort))
+            (ZAI_DEFAULT_MODEL.to_string(), Some(selected_effort))
         ),
         other => panic!("expected queued message with updated model, got {other:?}"),
     }
@@ -1254,7 +1257,7 @@ async fn signed_out_usage_command_with_args_reports_chatgpt_login_requirement() 
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        rendered.contains("Sign in with ChatGPT to use /usage."),
+        rendered.contains("Sign in with ChatGPT to view OpenAI usage with /usage."),
         "expected ChatGPT login requirement, got: {rendered:?}"
     );
     assert_eq!(recall_latest_after_clearing(&mut chat), "/usage weekly");
@@ -1578,7 +1581,7 @@ async fn pending_token_activity_refresh_keeps_composer_visible_in_short_viewport
             .vt100()
             .screen()
             .contents()
-            .contains("Ask Codex to do anything")
+            .contains("Ask PFTerminal to do anything")
     );
 }
 

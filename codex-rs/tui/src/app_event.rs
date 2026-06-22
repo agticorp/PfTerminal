@@ -691,6 +691,12 @@ pub(crate) enum AppEvent {
     /// Update the current model slug in the running app and widget.
     UpdateModel(String),
 
+    /// Update model and provider together so active thread settings stay coherent.
+    UpdateModelSelection {
+        model: String,
+        provider: Option<String>,
+    },
+
     /// Update the current personality in the running app and widget.
     UpdatePersonality(Personality),
 
@@ -702,6 +708,7 @@ pub(crate) enum AppEvent {
     /// Persist the selected model and reasoning effort to the appropriate config.
     PersistModelSelection {
         model: String,
+        provider: Option<String>,
         effort: Option<ReasoningEffort>,
     },
 

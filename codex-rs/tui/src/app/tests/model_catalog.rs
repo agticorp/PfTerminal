@@ -38,15 +38,15 @@ fn model_migration_copy_to_plain_text(copy: &crate::model_migration::ModelMigrat
 }
 
 #[tokio::test]
-async fn model_migration_prompt_only_shows_for_deprecated_models() {
+async fn model_migration_prompt_skips_hidden_gpt_targets() {
     let seen = BTreeMap::new();
-    assert!(should_show_model_migration_prompt(
+    assert!(!should_show_model_migration_prompt(
         "gpt-5.2",
         "gpt-5.4",
         &seen,
         &all_model_presets()
     ));
-    assert!(should_show_model_migration_prompt(
+    assert!(!should_show_model_migration_prompt(
         "gpt-5.3-codex",
         "gpt-5.4",
         &seen,
@@ -258,7 +258,7 @@ async fn accepted_model_migration_persists_target_default_reasoning_effort() {
     let persist_selection = rx.try_recv().expect("persist model selection event");
     assert_matches!(
         persist_selection,
-        AppEvent::PersistModelSelection { model, effort }
+        AppEvent::PersistModelSelection { model, effort, .. }
             if model == "gpt-5.4" && effort == Some(ReasoningEffortConfig::Medium)
     );
 }

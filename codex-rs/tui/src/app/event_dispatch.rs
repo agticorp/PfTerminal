@@ -887,6 +887,27 @@ impl App {
                 self.sync_active_thread_service_tier_to_cached_session()
                     .await;
             }
+            AppEvent::UpdateModelSelection { model, provider } => {
+                if let Some(model_provider) = provider.as_ref() {
+                    let Some(provider_info) =
+                        self.config.model_providers.get(model_provider).cloned()
+                    else {
+                        self.chat_widget.add_error_message(format!(
+                            "Model provider `{model_provider}` is not configured."
+                        ));
+                        return Ok(AppRunControl::Continue);
+                    };
+                    self.config.model_provider_id = model_provider.clone();
+                    self.config.model_provider = provider_info.clone();
+                    self.chat_widget
+                        .set_model_provider(model_provider.clone(), provider_info);
+                }
+                self.chat_widget.set_model(&model);
+                self.sync_active_thread_model_selection(app_server, model, provider)
+                    .await;
+                self.sync_active_thread_service_tier_to_cached_session()
+                    .await;
+            }
             AppEvent::UpdatePersonality(personality) => {
                 self.on_update_personality(personality);
                 self.sync_active_thread_personality_setting(app_server, personality)
@@ -1417,11 +1438,16 @@ impl App {
                     let _ = (preset, mode, profile_selection);
                 }
             }
-            AppEvent::PersistModelSelection { model, effort } => {
+            AppEvent::PersistModelSelection {
+                model,
+                provider,
+                effort,
+            } => {
                 match crate::config_update::write_config_batch(
                     app_server.request_handle(),
                     crate::config_update::build_model_selection_edits(
                         model.as_str(),
+                        provider.as_deref(),
                         effort.as_ref(),
                     ),
                 )
@@ -1432,8 +1458,15 @@ impl App {
                             .as_ref()
                             .map(std::string::ToString::to_string)
                             .unwrap_or_else(|| "default".to_string());
-                        tracing::info!("Selected model: {model}, Selected effort: {effort_label}");
-                        let mut message = format!("Model changed to {model}");
+                        tracing::info!(
+                            "Selected model: {model}, Selected provider: {:?}, Selected effort: {effort_label}",
+                            provider
+                        );
+                        let mut message = if let Some(provider) = provider {
+                            format!("Model changed to {model} via {provider}")
+                        } else {
+                            format!("Model changed to {model}")
+                        };
                         if let Some(label) = Self::reasoning_label_for(&model, effort.as_ref()) {
                             message.push(' ');
                             message.push_str(&label);

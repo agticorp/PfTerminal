@@ -115,7 +115,7 @@ You MUST adhere to the following criteria when solving queries:
 - Working on the repo(s) in the current environment is allowed, even if they are proprietary.
 - Analyzing code for vulnerabilities is allowed.
 - Showing user code and tool call details is allowed.
-- Use the `apply_patch` tool to edit files (NEVER try `applypatch` or `apply-patch`, only `apply_patch`). This is a FREEFORM tool, so do not wrap the patch in JSON.
+- Use the `apply_patch` tool to edit files (NEVER try `applypatch` or `apply-patch`, only `apply_patch`). If the tool is presented as a function with an `input` argument, put the raw patch text in `input`. If it is presented as a freeform tool, pass the raw patch text directly. Do not use Python scripts, shell heredocs, or ad hoc file-writing commands to modify code when `apply_patch` is available.
 
 If completing the user's task requires writing or modifying files, your code and final answer should follow these coding guidelines, though user instructions (i.e. AGENTS.md) may override these guidelines:
 
@@ -253,7 +253,7 @@ When using the shell, you must adhere to the following guidelines:
 
 ## apply_patch
 
-Use the `apply_patch` tool to edit files. Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
+Use the `apply_patch` tool to edit files. If the tool is presented as a function with an `input` argument, put the raw patch text in `input`; do not wrap the patch in JSON inside that string. If it is presented as a freeform tool, pass the raw patch text directly. Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
 
 *** Begin Patch
 [ one or more file sections ]

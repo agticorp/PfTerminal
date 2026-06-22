@@ -17,9 +17,7 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_login::OPENAI_API_KEY_ENV_VAR;
-use codex_login::read_ambient_api_key_from_env;
 use codex_login::read_openai_api_key_from_env;
-use codex_model_provider_info::AMBIENT_API_KEY_ENV_VAR;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -94,6 +92,7 @@ pub(crate) enum SignInOption {
     ChatGpt,
     DeviceCode,
     ApiKey,
+    ProviderApiKey(usize),
 }
 
 const API_KEY_DISABLED_MESSAGE: &str = "API key login is disabled.";
@@ -101,10 +100,20 @@ fn onboarding_request_id() -> codex_app_server_protocol::RequestId {
     codex_app_server_protocol::RequestId::String(Uuid::new_v4().to_string())
 }
 
-fn read_api_key_from_env() -> Option<(&'static str, String)> {
-    read_ambient_api_key_from_env()
-        .map(|value| (AMBIENT_API_KEY_ENV_VAR, value))
-        .or_else(|| read_openai_api_key_from_env().map(|value| (OPENAI_API_KEY_ENV_VAR, value)))
+fn read_non_empty_env_var(env_var: &str) -> Option<String> {
+    std::env::var(env_var)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn read_api_key_from_env(provider_env_key: Option<&str>) -> Option<(String, String)> {
+    match provider_env_key {
+        Some(env_var) => read_non_empty_env_var(env_var).map(|value| (env_var.to_string(), value)),
+        None => {
+            read_openai_api_key_from_env().map(|value| (OPENAI_API_KEY_ENV_VAR.to_string(), value))
+        }
+    }
 }
 
 pub(super) async fn cancel_login_attempt(
@@ -124,12 +133,12 @@ pub(super) async fn cancel_login_attempt(
 #[derive(Clone, Default)]
 pub(crate) struct ApiKeyInputState {
     value: String,
-    prepopulated_env_var: Option<&'static str>,
+    prepopulated_env_var: Option<String>,
 }
 
 impl ApiKeyInputState {
-    pub(crate) fn from_env() -> Self {
-        match read_api_key_from_env() {
+    pub(crate) fn from_env(provider_env_key: Option<&str>) -> Self {
+        match read_api_key_from_env(provider_env_key) {
             Some((env_var, value)) => Self {
                 value,
                 prepopulated_env_var: Some(env_var),
@@ -245,6 +254,14 @@ impl KeyboardHandler for AuthModeWidget {
 
 #[derive(Clone)]
 #[allow(dead_code)]
+pub(crate) struct ApiKeyProviderOption {
+    pub id: String,
+    pub name: String,
+    pub env_var: String,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
 pub(crate) struct AuthModeWidget {
     pub request_frame: FrameRequester,
     pub highlighted_mode: SignInOption,
@@ -253,6 +270,10 @@ pub(crate) struct AuthModeWidget {
     pub login_status: LoginStatus,
     pub app_server_request_handle: AppServerRequestHandle,
     pub forced_login_method: Option<ForcedLoginMethod>,
+    pub api_key_provider_id: String,
+    pub api_key_provider_name: String,
+    pub api_key_env_var: Option<String>,
+    pub api_key_provider_options: Vec<ApiKeyProviderOption>,
     pub animations_enabled: bool,
     pub animations_suppressed: Cell<bool>,
 }
@@ -329,11 +350,22 @@ impl AuthModeWidget {
         !matches!(self.forced_login_method, Some(ForcedLoginMethod::Chatgpt))
     }
 
+    fn provider_picker_enabled(&self) -> bool {
+        !self.api_key_provider_options.is_empty() && self.is_api_login_allowed()
+    }
+
     fn is_chatgpt_login_allowed(&self) -> bool {
-        !matches!(self.forced_login_method, Some(ForcedLoginMethod::Api))
+        !self.provider_picker_enabled()
+            && !matches!(self.forced_login_method, Some(ForcedLoginMethod::Api))
     }
 
     fn displayed_sign_in_options(&self) -> Vec<SignInOption> {
+        if self.provider_picker_enabled() {
+            return (0..self.api_key_provider_options.len())
+                .map(SignInOption::ProviderApiKey)
+                .collect();
+        }
+
         if self.is_chatgpt_login_allowed() {
             let mut options = vec![SignInOption::ChatGpt];
             options.push(SignInOption::DeviceCode);
@@ -349,6 +381,10 @@ impl AuthModeWidget {
     }
 
     fn selectable_sign_in_options(&self) -> Vec<SignInOption> {
+        if self.provider_picker_enabled() {
+            return self.displayed_sign_in_options();
+        }
+
         let mut options = Vec::new();
         if self.is_chatgpt_login_allowed() {
             options.push(SignInOption::ChatGpt);
@@ -401,6 +437,11 @@ impl AuthModeWidget {
                     self.disallow_api_login();
                 }
             }
+            SignInOption::ProviderApiKey(index) => {
+                if self.select_provider_api_key_option(index) {
+                    self.start_api_key_entry();
+                }
+            }
         }
     }
 
@@ -408,19 +449,60 @@ impl AuthModeWidget {
         matches!(self.forced_login_method, Some(ForcedLoginMethod::Api))
     }
 
+    fn provider_api_key_required(&self) -> bool {
+        self.ambient_api_key_required()
+            || self.api_key_env_var.is_some()
+            || self.provider_picker_enabled()
+    }
+
+    fn api_key_provider_label(&self) -> String {
+        if self.api_key_provider_name.is_empty() {
+            "provider".to_string()
+        } else {
+            self.api_key_provider_name.clone()
+        }
+    }
+
+    fn select_provider_api_key_option(&mut self, index: usize) -> bool {
+        let Some(option) = self.api_key_provider_options.get(index).cloned() else {
+            return false;
+        };
+        self.api_key_provider_id = option.id;
+        self.api_key_provider_name = option.name;
+        self.api_key_env_var = Some(option.env_var);
+        self.set_error(/*message*/ None);
+        true
+    }
+
     fn disallow_api_login(&mut self) {
-        self.highlighted_mode = SignInOption::ChatGpt;
+        self.highlighted_mode = self
+            .displayed_sign_in_options()
+            .into_iter()
+            .next()
+            .unwrap_or(SignInOption::ApiKey);
         self.set_error(Some(API_KEY_DISABLED_MESSAGE.to_string()));
         *self.sign_in_state.write().unwrap() = SignInState::PickMode;
         self.request_frame.schedule_frame();
     }
 
     fn render_pick_mode(&self, area: Rect, buf: &mut Buffer) {
-        let mut lines: Vec<Line> = if self.ambient_api_key_required() {
+        let mut lines: Vec<Line> = if self.provider_picker_enabled() {
             vec![
                 Line::from(vec![
                     "  ".into(),
-                    "Connect an Ambient API key to use PFTerminal".into(),
+                    "Choose a provider account for PFTerminal".into(),
+                ]),
+                "".into(),
+            ]
+        } else if self.provider_api_key_required() {
+            vec![
+                Line::from(vec![
+                    "  ".into(),
+                    format!(
+                        "Connect a {} API key to use PFTerminal",
+                        self.api_key_provider_label()
+                    )
+                    .into(),
                 ]),
                 "".into(),
             ]
@@ -428,7 +510,7 @@ impl AuthModeWidget {
             vec![
                 Line::from(vec![
                     "  ".into(),
-                    "Sign in with ChatGPT to use Codex as part of your paid plan".into(),
+                    "Sign in with ChatGPT to use OpenAI-hosted models".into(),
                 ]),
                 Line::from(vec![
                     "  ".into(),
@@ -493,12 +575,18 @@ impl AuthModeWidget {
                     ));
                 }
                 SignInOption::ApiKey => {
-                    let text = if self.ambient_api_key_required() {
-                        "Provide your Ambient API key"
+                    let text = if self.provider_api_key_required() {
+                        format!("Provide your {} API key", self.api_key_provider_label())
                     } else {
-                        "Provide your own API key"
+                        "Provide your own API key".to_string()
                     };
-                    lines.extend(create_mode_item(idx, option, text, "Pay for what you use"));
+                    lines.extend(create_mode_item(idx, option, &text, "Pay for what you use"));
+                }
+                SignInOption::ProviderApiKey(provider_index) => {
+                    if let Some(provider) = self.api_key_provider_options.get(provider_index) {
+                        let description = format!("Use a key stored as {}", provider.env_var);
+                        lines.extend(create_mode_item(idx, option, &provider.name, &description));
+                    }
                 }
             }
             lines.push("".into());
@@ -642,15 +730,18 @@ impl AuthModeWidget {
     }
 
     fn render_api_key_configured(&self, area: Rect, buf: &mut Buffer) {
-        let configured_message = if self.ambient_api_key_required() {
-            "✓ Ambient API key configured"
+        let configured_message = if self.provider_api_key_required() {
+            format!("✓ {} API key configured", self.api_key_provider_label())
         } else {
-            "✓ API key configured"
+            "✓ API key configured".to_string()
         };
-        let usage_message = if self.ambient_api_key_required() {
-            "  PFTerminal will use Ambient with your API key."
+        let usage_message = if self.provider_api_key_required() {
+            format!(
+                "  PFTerminal will use {} with your API key.",
+                self.api_key_provider_label()
+            )
         } else {
-            "  Codex will use usage-based billing with your API key."
+            "  Codex will use usage-based billing with your API key.".to_string()
         };
         let lines = vec![
             configured_message.fg(Color::Green).into(),
@@ -674,10 +765,10 @@ impl AuthModeWidget {
         let mut intro_lines: Vec<Line> = vec![
             Line::from(vec![
                 "> ".into(),
-                if self.ambient_api_key_required() {
-                    "Use your Ambient API key"
+                if self.provider_api_key_required() {
+                    format!("Use your {} API key", self.api_key_provider_label())
                 } else {
-                    "Use your own API key for usage-based billing"
+                    "Use your own API key for usage-based billing".to_string()
                 }
                 .bold(),
             ]),
@@ -685,7 +776,7 @@ impl AuthModeWidget {
             "  Paste or type your API key below. It will be stored in your configured credential store.".into(),
             "".into(),
         ];
-        if let Some(env_var) = state.prepopulated_env_var {
+        if let Some(env_var) = state.prepopulated_env_var.as_ref() {
             intro_lines.push(format!("  Detected {env_var} environment variable.").into());
             intro_lines.push(
                 "  Paste a different key if you prefer to use another account."
@@ -827,14 +918,14 @@ impl AuthModeWidget {
             return;
         }
         self.set_error(/*message*/ None);
-        let prefill_from_env = read_api_key_from_env();
+        let prefill_from_env = read_api_key_from_env(self.api_key_env_var.as_deref());
         let mut guard = self.sign_in_state.write().unwrap();
         match &mut *guard {
             SignInState::ApiKeyEntry(state) => {
                 if state.value.is_empty() {
                     if let Some((env_var, prefill)) = prefill_from_env.as_ref() {
                         state.value = prefill.clone();
-                        state.prepopulated_env_var = Some(*env_var);
+                        state.prepopulated_env_var = Some(env_var.clone());
                     } else {
                         state.prepopulated_env_var = None;
                     }
@@ -860,17 +951,28 @@ impl AuthModeWidget {
             return;
         }
         self.set_error(/*message*/ None);
+        let provider = self
+            .api_key_env_var
+            .as_ref()
+            .map(|_| self.api_key_provider_id.clone());
         let request_handle = self.app_server_request_handle.clone();
         let sign_in_state = self.sign_in_state.clone();
         let error = self.error.clone();
         let request_frame = self.request_frame.clone();
         tokio::spawn(async move {
+            let params = match provider {
+                Some(provider) => LoginAccountParams::ProviderApiKey {
+                    provider,
+                    api_key: api_key.clone(),
+                },
+                None => LoginAccountParams::ApiKey {
+                    api_key: api_key.clone(),
+                },
+            };
             match request_handle
                 .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
                     request_id: onboarding_request_id(),
-                    params: LoginAccountParams::ApiKey {
-                        api_key: api_key.clone(),
-                    },
+                    params,
                 })
                 .await
             {
@@ -1126,10 +1228,62 @@ mod tests {
             login_status: LoginStatus::NotAuthenticated,
             app_server_request_handle: AppServerRequestHandle::InProcess(client.request_handle()),
             forced_login_method: Some(ForcedLoginMethod::Chatgpt),
+            api_key_provider_id: "openai".to_string(),
+            api_key_provider_name: "OpenAI".to_string(),
+            api_key_env_var: None,
+            api_key_provider_options: Vec::new(),
             animations_enabled: true,
             animations_suppressed: std::cell::Cell::new(false),
         };
         (widget, codex_home)
+    }
+
+    fn buffer_text(buf: &Buffer, area: Rect) -> String {
+        let mut out = String::new();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn provider_key_picker_shows_provider_accounts_only() {
+        let (mut widget, _tmp) = widget_forced_chatgpt().await;
+        widget.forced_login_method = None;
+        widget.highlighted_mode = SignInOption::ProviderApiKey(0);
+        widget.api_key_provider_options = vec![
+            ApiKeyProviderOption {
+                id: "ambient".to_string(),
+                name: "Ambient".to_string(),
+                env_var: "AMBIENT_API_KEY".to_string(),
+            },
+            ApiKeyProviderOption {
+                id: "zai".to_string(),
+                name: "Z.AI".to_string(),
+                env_var: "ZAI_API_KEY".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            widget.displayed_sign_in_options(),
+            vec![
+                SignInOption::ProviderApiKey(0),
+                SignInOption::ProviderApiKey(1)
+            ]
+        );
+
+        let area = Rect::new(0, 0, 80, 12);
+        let mut buf = Buffer::empty(area);
+        widget.render_pick_mode(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
+
+        assert!(rendered.contains("Ambient"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Z.AI"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("ChatGPT"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("Device Code"), "rendered:\n{rendered}");
     }
 
     #[tokio::test]

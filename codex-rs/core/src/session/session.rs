@@ -230,6 +230,21 @@ impl SessionConfiguration {
         if let Some(collaboration_mode) = updates.collaboration_mode.clone() {
             next_configuration.collaboration_mode = collaboration_mode;
         }
+        if let Some(model_provider_id) = updates.model_provider.clone() {
+            let mut config = (*next_configuration.original_config_do_not_use).clone();
+            let Some(provider) = config.model_providers.get(&model_provider_id).cloned() else {
+                return Err(ConstraintError::InvalidValue {
+                    field_name: "model_provider",
+                    candidate: model_provider_id,
+                    allowed: "a configured model provider id".to_string(),
+                    requirement_source: codex_config::RequirementSource::Unknown,
+                });
+            };
+            config.model_provider_id = model_provider_id;
+            config.model_provider = provider.clone();
+            next_configuration.provider = provider;
+            next_configuration.original_config_do_not_use = Arc::new(config);
+        }
         if let Some(multi_agent_mode) = updates.multi_agent_mode {
             next_configuration.multi_agent_mode = Some(multi_agent_mode);
         }
@@ -427,6 +442,7 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) active_permission_profile: Option<ActivePermissionProfile>,
     pub(crate) windows_sandbox_level: Option<WindowsSandboxLevel>,
     pub(crate) collaboration_mode: Option<CollaborationMode>,
+    pub(crate) model_provider: Option<String>,
     pub(crate) multi_agent_mode: Option<MultiAgentMode>,
     pub(crate) reasoning_summary: Option<ReasoningSummaryConfig>,
     pub(crate) service_tier: Option<Option<String>>,
@@ -1037,7 +1053,7 @@ impl Session {
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
                 time_provider,
-                model_client: ModelClient::new(
+                model_client: arc_swap::ArcSwap::from_pointee(ModelClient::new(
                     Some(Arc::clone(&auth_manager)),
                     thread_id,
                     session_configuration.provider.clone(),
@@ -1054,7 +1070,7 @@ impl Session {
                         &session_configuration.session_source,
                         session_configuration.parent_thread_id,
                     ),
-                ),
+                )),
                 code_mode_service: crate::tools::code_mode::CodeModeService::new(),
                 tool_search_handler_cache: Default::default(),
                 turn_environments: Arc::clone(&turn_environments),

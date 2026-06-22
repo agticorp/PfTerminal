@@ -40,6 +40,11 @@ pub const AMBIENT_PROVIDER_ID: &str = "ambient";
 pub const AMBIENT_BASE_URL: &str = "https://api.ambient.xyz/v1";
 pub const AMBIENT_DEFAULT_MODEL: &str = "zai-org/GLM-5.2-FP8";
 pub const AMBIENT_API_KEY_ENV_VAR: &str = "AMBIENT_API_KEY";
+const ZAI_PROVIDER_NAME: &str = "Z.AI";
+pub const ZAI_PROVIDER_ID: &str = "zai";
+pub const ZAI_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
+pub const ZAI_DEFAULT_MODEL: &str = "glm-5.2";
+pub const ZAI_API_KEY_ENV_VAR: &str = "ZAI_API_KEY";
 const AMAZON_BEDROCK_PROVIDER_NAME: &str = "Amazon Bedrock";
 pub const AMAZON_BEDROCK_PROVIDER_ID: &str = "amazon-bedrock";
 pub const AMAZON_BEDROCK_GPT_5_5_MODEL_ID: &str = "openai.gpt-5.5";
@@ -372,8 +377,10 @@ impl ModelProviderInfo {
         ModelProviderInfo {
             name: AMBIENT_PROVIDER_NAME.into(),
             base_url: Some(AMBIENT_BASE_URL.into()),
-            env_key: None,
-            env_key_instructions: None,
+            env_key: Some(AMBIENT_API_KEY_ENV_VAR.into()),
+            env_key_instructions: Some(format!(
+                "Set {AMBIENT_API_KEY_ENV_VAR} to your Ambient API key."
+            )),
             experimental_bearer_token: None,
             auth: None,
             aws: None,
@@ -385,7 +392,31 @@ impl ModelProviderInfo {
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
             websocket_connect_timeout_ms: None,
-            requires_openai_auth: true,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    }
+
+    pub fn create_zai_provider() -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: ZAI_PROVIDER_NAME.into(),
+            base_url: Some(ZAI_BASE_URL.into()),
+            env_key: Some(ZAI_API_KEY_ENV_VAR.into()),
+            env_key_instructions: Some(format!(
+                "Set {ZAI_API_KEY_ENV_VAR} to your Z.AI Plan API key."
+            )),
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Chat,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
             supports_websockets: false,
         }
     }
@@ -428,6 +459,10 @@ impl ModelProviderInfo {
         self.name == AMBIENT_PROVIDER_NAME
     }
 
+    pub fn is_zai(&self) -> bool {
+        self.name == ZAI_PROVIDER_NAME
+    }
+
     pub fn is_amazon_bedrock(&self) -> bool {
         self.name == AMAZON_BEDROCK_PROVIDER_NAME
     }
@@ -454,6 +489,7 @@ pub fn built_in_model_providers(
     use ModelProviderInfo as P;
     let openai_provider = P::create_openai_provider(openai_base_url);
     let ambient_provider = P::create_ambient_provider();
+    let zai_provider = P::create_zai_provider();
     let amazon_bedrock_provider = P::create_amazon_bedrock_provider(/*aws*/ None);
 
     // We do not want to be in the business of adjucating which third-party
@@ -462,6 +498,7 @@ pub fn built_in_model_providers(
     // `model_providers` in config.toml to add their own providers.
     [
         (AMBIENT_PROVIDER_ID, ambient_provider),
+        (ZAI_PROVIDER_ID, zai_provider),
         (OPENAI_PROVIDER_ID, openai_provider),
         (AMAZON_BEDROCK_PROVIDER_ID, amazon_bedrock_provider),
         (

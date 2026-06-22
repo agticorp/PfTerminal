@@ -29,7 +29,9 @@ use core_test_support::test_codex::local_selections;
 
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::model_info;
 use codex_models_manager::test_support::construct_model_info_offline_for_tests;
@@ -3952,6 +3954,39 @@ async fn session_settings_null_service_tier_update_uses_default_service_tier() {
 }
 
 #[tokio::test]
+async fn session_update_settings_model_provider_rebuilds_model_client() {
+    let (session, _rx_event) = make_session_with_config_and_rx(|config| {
+        let provider = config
+            .model_providers
+            .get(AMBIENT_PROVIDER_ID)
+            .expect("ambient provider should be configured")
+            .clone();
+        config.model_provider_id = AMBIENT_PROVIDER_ID.to_string();
+        config.model_provider = provider;
+    })
+    .await
+    .expect("session should initialize");
+
+    assert!(
+        session.services.model_client().provider_info().is_ambient(),
+        "test should start on Ambient"
+    );
+
+    session
+        .update_settings(SessionSettingsUpdate {
+            model_provider: Some(ZAI_PROVIDER_ID.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("provider update should apply");
+
+    assert!(
+        session.services.model_client().provider_info().is_zai(),
+        "provider update should rebuild the runtime model client"
+    );
+}
+
+#[tokio::test]
 async fn session_settings_legacy_fast_service_tier_update_uses_priority_request_value() {
     let session_configuration = make_session_configuration_for_tests().await;
 
@@ -5092,7 +5127,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         )),
         attestation_provider: None,
         time_provider: Arc::new(crate::current_time::SystemTimeProvider),
-        model_client: ModelClient::new(
+        model_client: arc_swap::ArcSwap::from_pointee(ModelClient::new(
             Some(auth_manager.clone()),
             thread_id,
             session_configuration.provider.clone(),
@@ -5103,7 +5138,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             Session::build_model_client_beta_features_header(config.as_ref()),
             /*item_ids_enabled*/ config.features.enabled(Feature::ItemIds),
             /*attestation_provider*/ None,
-        ),
+        )),
         code_mode_service: crate::tools::code_mode::CodeModeService::new(),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
@@ -7151,7 +7186,7 @@ where
         )),
         attestation_provider: None,
         time_provider: Arc::new(crate::current_time::SystemTimeProvider),
-        model_client: ModelClient::new(
+        model_client: arc_swap::ArcSwap::from_pointee(ModelClient::new(
             Some(Arc::clone(&auth_manager)),
             thread_id,
             session_configuration.provider.clone(),
@@ -7162,7 +7197,7 @@ where
             Session::build_model_client_beta_features_header(config.as_ref()),
             /*item_ids_enabled*/ config.features.enabled(Feature::ItemIds),
             /*attestation_provider*/ None,
-        ),
+        )),
         code_mode_service: crate::tools::code_mode::CodeModeService::new(),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),

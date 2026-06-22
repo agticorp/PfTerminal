@@ -1001,7 +1001,7 @@ async fn rate_limit_switch_prompt_skips_non_codex_limit() {
 }
 
 #[tokio::test]
-async fn rate_limit_switch_prompt_shows_once_per_session() {
+async fn rate_limit_switch_prompt_skips_when_nudge_model_hidden() {
     let (mut chat, _, _) = make_chatwidget_manual(Some("gpt-5")).await;
     chat.has_chatgpt_account = true;
 
@@ -1013,13 +1013,13 @@ async fn rate_limit_switch_prompt_shows_once_per_session() {
     chat.maybe_show_pending_rate_limit_prompt();
     assert!(matches!(
         chat.rate_limit_switch_prompt,
-        RateLimitSwitchPromptState::Shown
+        RateLimitSwitchPromptState::Idle
     ));
 
     chat.on_rate_limit_snapshot(Some(snapshot(/*percent*/ 95.0)));
     assert!(matches!(
         chat.rate_limit_switch_prompt,
-        RateLimitSwitchPromptState::Shown
+        RateLimitSwitchPromptState::Idle
     ));
 }
 
@@ -1038,7 +1038,7 @@ async fn rate_limit_switch_prompt_respects_hidden_notice() {
 }
 
 #[tokio::test]
-async fn rate_limit_switch_prompt_defers_until_task_complete() {
+async fn rate_limit_switch_prompt_does_not_defer_without_visible_nudge_model() {
     let (mut chat, _, _) = make_chatwidget_manual(Some("gpt-5")).await;
     chat.has_chatgpt_account = true;
 
@@ -1046,19 +1046,19 @@ async fn rate_limit_switch_prompt_defers_until_task_complete() {
     chat.on_rate_limit_snapshot(Some(snapshot(/*percent*/ 90.0)));
     assert!(matches!(
         chat.rate_limit_switch_prompt,
-        RateLimitSwitchPromptState::Pending
+        RateLimitSwitchPromptState::Idle
     ));
 
     chat.bottom_pane.set_task_running(/*running*/ false);
     chat.maybe_show_pending_rate_limit_prompt();
     assert!(matches!(
         chat.rate_limit_switch_prompt,
-        RateLimitSwitchPromptState::Shown
+        RateLimitSwitchPromptState::Idle
     ));
 }
 
 #[tokio::test]
-async fn rate_limit_switch_prompt_popup_snapshot() {
+async fn rate_limit_switch_prompt_does_not_open_hidden_nudge_popup() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
     chat.has_chatgpt_account = true;
 
@@ -1066,7 +1066,10 @@ async fn rate_limit_switch_prompt_popup_snapshot() {
     chat.maybe_show_pending_rate_limit_prompt();
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
-    assert_chatwidget_snapshot!("rate_limit_switch_prompt_popup", popup);
+    assert!(
+        !popup.contains("Approaching rate limits"),
+        "hidden GPT nudge should not open a rate limit popup:\n{popup}"
+    );
 }
 
 #[tokio::test]
@@ -2267,7 +2270,7 @@ async fn completed_turn_clears_visible_running_hook() {
 
 #[tokio::test]
 async fn status_line_fast_mode_renders_on_and_off() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     chat.config.tui_status_line = Some(vec!["fast-mode".to_string()]);
 
     chat.refresh_status_line();

@@ -1,9 +1,10 @@
 ---
 source: tui/src/chatwidget/tests/side.rs
+assertion_line: 401
 expression: terminal.backend()
 ---
 "                                                                                "
 "                                                                                "
 "› Check recently modified functions for compatibility                           "
 "                                                                                "
-"  gpt-5.5                             Side from main thread · Ctrl+C to return  "
+"  zai-org/GLM-5.2-FP8                 Side from main thread · Ctrl+C to return  "

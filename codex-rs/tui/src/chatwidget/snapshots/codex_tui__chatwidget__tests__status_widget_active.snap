@@ -1,11 +1,12 @@
 ---
 source: tui/src/chatwidget/tests/status_and_layout.rs
+assertion_line: 1978
 expression: normalized_backend_snapshot(terminal.backend())
 ---
 "                                                                                "
 "• Analyzing (0s • esc to interrupt)                                             "
 "                                                                                "
 "                                                                                "
-"› Ask Codex to do anything                                                      "
+"› Ask PFTerminal to do anything                                                 "
 "                                                                                "
-"  gpt-5.5 default · /tmp/project                                                "
+"  zai-org/GLM-5.2-FP8 standard · /tmp/project                                   "

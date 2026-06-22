@@ -3,8 +3,6 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Verbosity as VerbosityConfig;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
-use codex_protocol::models::ReasoningItemContent;
-use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::ModelVerification;
@@ -289,7 +287,6 @@ impl Serialize for ResponsesApiRequest {
 struct AmbientReasoningContentChunk {
     role: String,
     content: String,
-    reasoning: Option<String>,
 }
 
 fn ambient_input_from_response_items(input: &[ResponseItem]) -> String {
@@ -302,22 +299,13 @@ fn ambient_input_from_response_items(input: &[ResponseItem]) -> String {
         return String::new();
     }
 
-    if chunks.len() == 1 && chunks[0].role == "user" && chunks[0].reasoning.is_none() {
+    if chunks.len() == 1 && chunks[0].role == "user" {
         return chunks[0].content.clone();
     }
 
     chunks
         .into_iter()
-        .map(|chunk| {
-            let mut text = format!("{}:\n{}", chunk.role, chunk.content);
-            if let Some(reasoning) = chunk.reasoning
-                && !reasoning.trim().is_empty()
-            {
-                text.push_str("\nreasoning:\n");
-                text.push_str(&reasoning);
-            }
-            text
-        })
+        .map(|chunk| format!("{}:\n{}", chunk.role, chunk.content))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -328,7 +316,6 @@ fn ambient_chunk_from_response_item(item: &ResponseItem) -> Option<AmbientReason
             .map(|content| AmbientReasoningContentChunk {
                 role: role.clone(),
                 content,
-                reasoning: None,
             }),
         ResponseItem::AgentMessage {
             author,
@@ -339,35 +326,12 @@ fn ambient_chunk_from_response_item(item: &ResponseItem) -> Option<AmbientReason
             AmbientReasoningContentChunk {
                 role: "assistant".to_string(),
                 content: format!("{author} to {recipient}:\n{content}"),
-                reasoning: None,
             }
         }),
-        ResponseItem::Reasoning {
-            summary, content, ..
-        } => {
-            let mut reasoning = Vec::new();
-            for item in summary {
-                match item {
-                    ReasoningItemReasoningSummary::SummaryText { text } => {
-                        reasoning.push(text.as_str());
-                    }
-                }
-            }
-            if let Some(content) = content {
-                for item in content {
-                    match item {
-                        ReasoningItemContent::ReasoningText { text }
-                        | ReasoningItemContent::Text { text } => reasoning.push(text.as_str()),
-                    }
-                }
-            }
-            let reasoning = reasoning.join("\n");
-            (!reasoning.trim().is_empty()).then(|| AmbientReasoningContentChunk {
-                role: "assistant".to_string(),
-                content: String::new(),
-                reasoning: Some(reasoning),
-            })
-        }
+        // Hidden reasoning is model-internal state. Replaying it into Ambient/Z.AI
+        // string input makes the next turn treat private chain-of-thought as user
+        // visible context and can amplify a single provider leak into a loop.
+        ResponseItem::Reasoning { .. } => None,
         ResponseItem::FunctionCall { .. }
         | ResponseItem::CustomToolCall { .. }
         | ResponseItem::LocalShellCall { .. }
@@ -391,7 +355,6 @@ fn ambient_json_chunk(role: &str, item: &ResponseItem) -> Option<AmbientReasonin
         .map(|content| AmbientReasoningContentChunk {
             role: role.to_string(),
             content,
-            reasoning: None,
         })
 }
 
@@ -596,5 +559,41 @@ impl Stream for ResponseStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.rx_event.poll_recv(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::models::ReasoningItemContent;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn ambient_input_does_not_replay_reasoning_items() {
+        let input = vec![
+            ResponseItem::Reasoning {
+                id: Some("rs_1".to_string()),
+                summary: Vec::new(),
+                content: Some(vec![ReasoningItemContent::ReasoningText {
+                    text: "private chain of thought".to_string(),
+                }]),
+                encrypted_content: None,
+                metadata: None,
+            },
+            ResponseItem::Message {
+                id: Some("msg_1".to_string()),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "inspect StakeHub".to_string(),
+                }],
+                phase: None,
+                metadata: None,
+            },
+        ];
+
+        assert_eq!(
+            ambient_input_from_response_items(&input),
+            "inspect StakeHub".to_string()
+        );
     }
 }

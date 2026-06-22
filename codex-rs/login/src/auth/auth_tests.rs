@@ -2250,3 +2250,81 @@ async fn missing_plan_type_maps_to_unknown() {
 
     pretty_assertions::assert_eq!(auth.account_plan_type(), Some(AccountPlanType::Unknown));
 }
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn provider_api_key_login_is_provider_scoped_and_not_primary_auth() {
+    let _access_token_guard = remove_access_token_env_var();
+    let _codex_api_key_guard = EnvVarGuard::remove(CODEX_API_KEY_ENV_VAR);
+    let _ambient_api_key_guard = EnvVarGuard::remove(AMBIENT_API_KEY_ENV_VAR);
+    let _zai_api_key_guard = EnvVarGuard::remove("ZAI_API_KEY");
+    let codex_home = tempdir().unwrap();
+
+    super::login_with_provider_api_key(
+        codex_home.path(),
+        "ZAI_API_KEY",
+        "zai-test-key",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("provider API key should save");
+
+    let stored = super::provider_api_key_from_auth_storage(
+        codex_home.path(),
+        "ZAI_API_KEY",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("provider API key should load");
+    assert_eq!(stored.as_deref(), Some("zai-test-key"));
+
+    let auth = super::load_auth(
+        codex_home.path(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
+        /*chatgpt_base_url*/ None,
+        AuthKeyringBackendKind::default(),
+        /*agent_identity_authapi_base_url*/ None,
+    )
+    .await
+    .expect("primary auth load should succeed");
+    assert!(auth.is_none());
+
+    let auth_manager = AuthManager::new(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
+        /*chatgpt_base_url*/ None,
+        AuthKeyringBackendKind::default(),
+    )
+    .await;
+    assert!(auth_manager.auth_cached().is_none());
+    assert_eq!(
+        auth_manager
+            .provider_api_key("ZAI_API_KEY")
+            .expect("provider API key should resolve")
+            .as_deref(),
+        Some("zai-test-key")
+    );
+
+    assert!(
+        super::logout(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )
+        .expect("logout should remove provider auth")
+    );
+    assert_eq!(
+        super::provider_api_key_from_auth_storage(
+            codex_home.path(),
+            "ZAI_API_KEY",
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )
+        .expect("provider auth storage should still be readable"),
+        None
+    );
+}

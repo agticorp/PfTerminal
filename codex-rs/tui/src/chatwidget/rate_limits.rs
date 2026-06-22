@@ -254,6 +254,7 @@ impl ChatWidget {
                 && !has_workspace_credits
                 && !self.rate_limit_switch_prompt_hidden()
                 && self.current_model() != NUDGE_MODEL_SLUG
+                && self.lower_cost_preset().is_some()
                 && !matches!(
                     self.rate_limit_switch_prompt,
                     RateLimitSwitchPromptState::Shown

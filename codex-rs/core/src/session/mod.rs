@@ -1445,7 +1445,13 @@ impl Session {
         updates: SessionSettingsUpdate,
     ) -> ConstraintResult<()> {
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
-        let (previous_config, new_config, permission_profile_changed) = {
+        let (
+            previous_config,
+            new_config,
+            permission_profile_changed,
+            model_client_configuration,
+            stale_startup_prewarm,
+        ) = {
             let mut state = self.state.lock().await;
             let updated = match state.session_configuration.apply(&updates) {
                 Ok(updated) => updated,
@@ -1463,21 +1469,70 @@ impl Session {
             let updated_permission_profile = updated.permission_profile();
             let permission_profile_changed =
                 previous_permission_profile != updated_permission_profile;
+            let model_provider_changed = state
+                .session_configuration
+                .original_config_do_not_use
+                .model_provider_id
+                != updated.original_config_do_not_use.model_provider_id;
+            let model_client_configuration = model_provider_changed.then(|| updated.clone());
+            let stale_startup_prewarm = if model_provider_changed {
+                state.take_session_startup_prewarm()
+            } else {
+                None
+            };
             if updates.environments.is_some() {
                 self.services
                     .turn_environments
                     .update_selections(updated.environment_selections());
             }
             state.session_configuration = updated;
-            (previous_config, new_config, permission_profile_changed)
+            (
+                previous_config,
+                new_config,
+                permission_profile_changed,
+                model_client_configuration,
+                stale_startup_prewarm,
+            )
         };
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
+        if let Some(configuration) = model_client_configuration {
+            self.services
+                .replace_model_client(self.build_model_client_for_configuration(&configuration));
+        }
+        if let Some(startup_prewarm) = stale_startup_prewarm {
+            startup_prewarm.abort().await;
+        }
         if permission_profile_changed {
             self.refresh_managed_network_proxy_for_current_permission_profile()
                 .await;
         }
 
         Ok(())
+    }
+
+    fn build_model_client_for_configuration(
+        &self,
+        configuration: &SessionConfiguration,
+    ) -> ModelClient {
+        let config = configuration.original_config_do_not_use.as_ref();
+        ModelClient::new(
+            Some(Arc::clone(&self.services.auth_manager)),
+            self.thread_id,
+            configuration.provider.clone(),
+            configuration.session_source.clone(),
+            config.model_verbosity,
+            config.features.enabled(Feature::EnableRequestCompression),
+            config.features.enabled(Feature::RuntimeMetrics),
+            Self::build_model_client_beta_features_header(config),
+            /*item_ids_enabled*/ config.features.enabled(Feature::ItemIds),
+            self.services.attestation_provider.clone(),
+        )
+        .with_prompt_cache_key_override(
+            crate::guardian::prompt_cache_key_override_for_review_session(
+                &configuration.session_source,
+                configuration.parent_thread_id,
+            ),
+        )
     }
 
     pub(crate) async fn preview_settings(

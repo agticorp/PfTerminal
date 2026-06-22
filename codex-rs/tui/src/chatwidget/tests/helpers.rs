@@ -140,6 +140,50 @@ pub(super) fn test_model_catalog(_config: &Config) -> Arc<ModelCatalog> {
     ))
 }
 
+fn set_config_provider_for_test_model(config: &mut Config, model: &str) {
+    let trimmed = model.trim();
+    let provider = if trimmed == codex_model_provider_info::AMBIENT_DEFAULT_MODEL
+        || trimmed.starts_with("ambient/")
+        || trimmed.starts_with("zai-org/")
+    {
+        Some((
+            codex_model_provider_info::AMBIENT_PROVIDER_ID.to_string(),
+            codex_model_provider_info::ModelProviderInfo::create_ambient_provider(),
+        ))
+    } else if trimmed == codex_model_provider_info::ZAI_DEFAULT_MODEL || trimmed.starts_with("glm-")
+    {
+        Some((
+            codex_model_provider_info::ZAI_PROVIDER_ID.to_string(),
+            codex_model_provider_info::ModelProviderInfo::create_zai_provider(),
+        ))
+    } else if matches!(
+        trimmed,
+        codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID
+            | codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID
+    ) {
+        Some((
+            codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID.to_string(),
+            codex_model_provider_info::ModelProviderInfo::create_amazon_bedrock_provider(
+                /*aws*/ None,
+            ),
+        ))
+    } else if trimmed.starts_with("gpt-") || trimmed.starts_with("codex-auto-") {
+        Some((
+            codex_model_provider_info::OPENAI_PROVIDER_ID.to_string(),
+            codex_model_provider_info::ModelProviderInfo::create_openai_provider(
+                /*base_url*/ None,
+            ),
+        ))
+    } else {
+        None
+    };
+
+    if let Some((provider_id, provider)) = provider {
+        config.model_provider_id = provider_id;
+        config.model_provider = provider;
+    }
+}
+
 // --- Helpers for tests that need direct construction and event draining ---
 pub(super) async fn make_chatwidget_manual(
     model_override: Option<&str>,
@@ -175,6 +219,7 @@ pub(super) async fn make_chatwidget_manual_with_auth(
     if let Some(model) = model_override {
         cfg.model = Some(model.to_string());
     }
+    set_config_provider_for_test_model(&mut cfg, &resolved_model);
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let model_catalog = test_model_catalog(&cfg);
     let common = ChatWidgetInit {
@@ -201,7 +246,7 @@ pub(super) async fn make_chatwidget_manual_with_auth(
     let mut widget = ChatWidget::new_with_op_target(common, super::CodexOpTarget::Direct(op_tx));
     widget.transcript.active_cell = None;
     widget.transcript.active_cell_revision = 0;
-    widget.normal_placeholder_text = "Ask Codex to do anything".to_string();
+    widget.normal_placeholder_text = "Ask PFTerminal to do anything".to_string();
     widget.side_placeholder_text =
         "Check recently modified functions for compatibility".to_string();
     widget
@@ -247,6 +292,11 @@ pub(super) fn assert_no_submit_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiv
 pub(crate) fn set_chatgpt_auth(chat: &mut ChatWidget) {
     chat.has_chatgpt_account = true;
     chat.has_codex_backend_auth = true;
+    chat.config.model_provider_id = codex_model_provider_info::OPENAI_PROVIDER_ID.to_string();
+    chat.config.model_provider =
+        codex_model_provider_info::ModelProviderInfo::create_openai_provider(
+            /*base_url*/ None,
+        );
     chat.model_catalog = test_model_catalog(&chat.config);
 }
 

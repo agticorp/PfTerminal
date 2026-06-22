@@ -181,7 +181,7 @@ impl SessionStartupPrewarmHandle {
 
 impl Session {
     pub(crate) async fn schedule_startup_prewarm(self: &Arc<Self>, base_instructions: String) {
-        if !self.services.model_client.responses_websocket_enabled() {
+        if !self.services.responses_websocket_enabled() {
             return;
         }
 
@@ -277,7 +277,7 @@ async fn schedule_startup_prewarm_inner(
             window_id,
             CodexResponsesRequestKind::Prewarm,
         );
-    let mut client_session = session.services.model_client.new_session();
+    let mut client_session = session.services.new_model_client_session();
     let websocket_warmup_started_at = Instant::now();
     client_session
         .prewarm_websocket(

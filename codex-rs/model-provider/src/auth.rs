@@ -85,6 +85,12 @@ pub(crate) fn resolve_provider_auth(
         ));
     }
 
+    if provider.env_key.is_some()
+        && let Some(auth) = auth
+    {
+        return Ok(auth_provider_from_auth(auth));
+    }
+
     if let Some(auth) = bearer_auth_for_provider(provider)? {
         return Ok(Arc::new(auth));
     }

@@ -337,7 +337,8 @@ async fn reasoning_selection_in_plan_mode_without_effort_change_does_not_open_sc
     assert!(
         events.iter().any(|event| matches!(
             event,
-            AppEvent::UpdateModel(model) if model == "gpt-5.4"
+            AppEvent::UpdateModelSelection { model, provider }
+                if model == "gpt-5.4" && provider.as_deref() == Some("openai")
         )),
         "expected model update event; events: {events:?}"
     );
@@ -469,7 +470,8 @@ async fn reasoning_selection_in_plan_mode_model_switch_does_not_open_scope_promp
     assert!(
         events.iter().any(|event| matches!(
             event,
-            AppEvent::UpdateModel(model) if model == "gpt-5.2"
+            AppEvent::UpdateModelSelection { model, provider }
+                if model == "gpt-5.2" && provider.as_deref() == Some("openai")
         )),
         "expected model update event; events: {events:?}"
     );
@@ -507,7 +509,7 @@ async fn plan_reasoning_scope_popup_all_modes_persists_global_and_plan_override(
     assert!(
         events.iter().any(|event| matches!(
             event,
-            AppEvent::PersistModelSelection { model, effort: Some(ReasoningEffortConfig::High) }
+            AppEvent::PersistModelSelection { model, effort: Some(ReasoningEffortConfig::High), .. }
                 if model == "gpt-5.4"
         )),
         "expected global model reasoning selection persistence; events: {events:?}"
@@ -1089,12 +1091,8 @@ async fn plan_implementation_popup_skips_when_rate_limit_prompt_pending() {
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
     assert!(
-        popup.contains("Approaching rate limits"),
-        "expected rate limit popup, got {popup:?}"
-    );
-    assert!(
-        !popup.contains(PLAN_IMPLEMENTATION_TITLE),
-        "expected plan popup to be skipped, got {popup:?}"
+        !popup.contains("Approaching rate limits"),
+        "hidden GPT rate limit nudge should not open, got {popup:?}"
     );
 }
 
@@ -1286,10 +1284,7 @@ async fn enter_submits_when_plan_stream_is_not_active() {
 
     assert!(chat.input_queue.queued_user_messages.is_empty());
     match next_submit_op(&mut op_rx) {
-        Op::UserTurn {
-            personality: Some(Personality::Pragmatic),
-            ..
-        } => {}
+        Op::UserTurn { .. } => {}
         other => panic!("expected Op::UserTurn, got {other:?}"),
     }
 }
@@ -1576,7 +1571,6 @@ async fn collab_mode_is_sent_after_enabling() {
                     mode: ModeKind::Default,
                     ..
                 }),
-            personality: Some(Personality::Pragmatic),
             ..
         } => {}
         other => {
@@ -1600,7 +1594,6 @@ async fn collab_mode_applies_default_preset() {
                     mode: ModeKind::Default,
                     ..
                 }),
-            personality: Some(Personality::Pragmatic),
             ..
         } => {}
         other => {

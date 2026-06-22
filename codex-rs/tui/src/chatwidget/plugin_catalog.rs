@@ -193,7 +193,7 @@ impl ChatWidget {
             format!("Remove {marketplace_display_name} marketplace?").dim(),
         ));
         header.push(Line::from(
-            "This removes the configured marketplace from Codex.".dim(),
+            "This removes the configured marketplace from PFTerminal.".dim(),
         ));
 
         let cwd_for_remove = self.config.cwd.to_path_buf();

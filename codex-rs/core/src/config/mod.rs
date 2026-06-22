@@ -81,6 +81,8 @@ use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
+use codex_model_provider_info::ZAI_DEFAULT_MODEL;
+use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_models_manager::ModelsManagerConfig;
@@ -2425,17 +2427,20 @@ fn resolve_web_search_config(config_toml: &ConfigToml) -> Option<WebSearchConfig
 }
 
 fn resolve_model_for_provider(model: Option<String>, model_provider_id: &str) -> Option<String> {
-    if model_provider_id != AMBIENT_PROVIDER_ID {
-        return model;
-    }
-
-    match model {
-        Some(model)
-            if model.trim().starts_with("ambient/") || model.trim().starts_with("zai-org/") =>
-        {
+    match model_provider_id {
+        AMBIENT_PROVIDER_ID => match model {
             Some(model)
-        }
-        _ => Some(AMBIENT_DEFAULT_MODEL.to_string()),
+                if model.trim().starts_with("ambient/") || model.trim().starts_with("zai-org/") =>
+            {
+                Some(model)
+            }
+            _ => Some(AMBIENT_DEFAULT_MODEL.to_string()),
+        },
+        ZAI_PROVIDER_ID => match model {
+            Some(model) if model.trim().starts_with("glm-") => Some(model),
+            _ => Some(ZAI_DEFAULT_MODEL.to_string()),
+        },
+        _ => model,
     }
 }
 
@@ -3480,12 +3485,13 @@ impl Config {
             .filter(|values| !values.is_empty());
 
         let ambient_provider_selected = model_provider_id == AMBIENT_PROVIDER_ID;
+        let zai_provider_selected = model_provider_id == ZAI_PROVIDER_ID;
         let forced_login_method = cfg
             .forced_login_method
             .or_else(|| ambient_provider_selected.then_some(ForcedLoginMethod::Api));
 
         let model = resolve_model_for_provider(model.or(cfg.model), &model_provider_id);
-        let model_reasoning_effort = if ambient_provider_selected {
+        let model_reasoning_effort = if ambient_provider_selected || zai_provider_selected {
             cfg.model_reasoning_effort
                 .map(normalize_ambient_reasoning_effort)
         } else {

@@ -198,6 +198,7 @@ pub(super) fn apply_accepted_model_migration(
     )));
     app_event_tx.send(AppEvent::PersistModelSelection {
         model: target_model,
+        provider: None,
         effort: Some(target_default_effort),
     });
 }

@@ -17,6 +17,7 @@ use Hunk::*;
 use ParseError::*;
 
 const ENVIRONMENT_ID_MARKER: &str = "*** Environment ID:";
+const NO_NEWLINE_AT_END_OF_FILE_MARKER: &str = "\\ No newline at end of file";
 
 #[derive(Debug, Default, Clone)]
 pub struct StreamingPatchParser {
@@ -307,6 +308,11 @@ impl StreamingPatchParser {
                         if let Some(chunk) = chunks.last_mut() {
                             chunk.is_end_of_file = true;
                         }
+                        self.state.mode = StreamingParserMode::UpdateFile { hunk_line_number };
+                        return Ok(());
+                    }
+
+                    if update_line == NO_NEWLINE_AT_END_OF_FILE_MARKER {
                         self.state.mode = StreamingParserMode::UpdateFile { hunk_line_number };
                         return Ok(());
                     }

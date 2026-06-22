@@ -601,7 +601,8 @@ fn ps_output_empty_snapshot() {
 
 #[tokio::test]
 async fn session_info_uses_availability_nux_tooltip_override() {
-    let config = test_config().await;
+    let mut config = test_config().await;
+    config.show_tooltips = true;
     let cell = new_session_info(
         &config,
         "gpt-5",
@@ -624,6 +625,7 @@ async fn session_info_uses_availability_nux_tooltip_override() {
 async fn session_info_availability_nux_tooltip_snapshot() {
     let mut config = test_config().await;
     config.cwd = test_path_buf("/tmp/project").abs();
+    config.show_tooltips = true;
     let cell = new_session_info(
         &config,
         "gpt-5",

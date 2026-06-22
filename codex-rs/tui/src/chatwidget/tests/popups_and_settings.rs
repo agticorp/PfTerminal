@@ -10,6 +10,7 @@ use codex_app_server_protocol::PluginAvailability;
 use codex_features::Stage;
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
+use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -2560,7 +2561,7 @@ async fn memories_reset_confirmation_sends_event_on_confirm() {
 
 #[tokio::test]
 async fn model_selection_popup_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some(AMBIENT_DEFAULT_MODEL)).await;
     chat.thread_id = Some(ThreadId::new());
     chat.open_model_popup();
 
@@ -2589,7 +2590,7 @@ async fn skills_menu_default_mentions_shortcut_snapshot() {
 
 #[tokio::test]
 async fn model_picker_hides_show_in_picker_false_models_from_cache() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("test-visible-model")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some(AMBIENT_DEFAULT_MODEL)).await;
     chat.thread_id = Some(ThreadId::new());
     let preset = |slug: &str, show_in_picker: bool| ModelPreset {
         id: slug.to_string(),
@@ -2614,29 +2615,33 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
     };
 
     chat.open_model_popup_with_presets(vec![
-        preset("test-visible-model", true),
-        preset("test-hidden-model", false),
+        preset(AMBIENT_DEFAULT_MODEL, true),
+        preset(ZAI_DEFAULT_MODEL, false),
     ]);
     let popup = render_bottom_popup(&chat, /*width*/ 80);
     assert_chatwidget_snapshot!("model_picker_filters_hidden_models", popup);
     assert!(
-        popup.contains("test-visible-model"),
+        popup.contains(AMBIENT_DEFAULT_MODEL),
         "expected visible model to appear in picker:\n{popup}"
     );
     assert!(
-        !popup.contains("test-hidden-model"),
+        !popup.contains(ZAI_DEFAULT_MODEL),
         "expected hidden model to be excluded from picker:\n{popup}"
     );
 }
 
 #[tokio::test]
-async fn ambient_model_picker_only_shows_ambient_model_with_reasoning() {
+async fn model_picker_hides_fake_openai_models_and_shows_glm_models() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some(AMBIENT_DEFAULT_MODEL)).await;
     chat.thread_id = Some(ThreadId::new());
 
     assert_eq!(chat.config.model_provider_id, AMBIENT_PROVIDER_ID);
 
-    chat.open_model_popup();
+    let presets = chat
+        .model_catalog
+        .try_list_models()
+        .expect("model catalog should load");
+    chat.open_all_models_popup(presets);
     let popup = render_bottom_popup(&chat, /*width*/ 100);
 
     assert!(
@@ -2648,8 +2653,12 @@ async fn ambient_model_picker_only_shows_ambient_model_with_reasoning() {
         "expected Ambient model description in /model picker:\n{popup}"
     );
     assert!(
+        popup.contains(ZAI_DEFAULT_MODEL),
+        "expected direct Z.AI GLM model in /model picker:\n{popup}"
+    );
+    assert!(
         !popup.contains("gpt-"),
-        "expected OpenAI models to be hidden for Ambient provider:\n{popup}"
+        "expected fake OpenAI models to be hidden from /model picker:\n{popup}"
     );
 
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
@@ -2753,7 +2762,7 @@ async fn model_reasoning_selection_popup_applies_custom_effort() {
     let selected_effort_events = std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|event| match event {
             AppEvent::UpdateReasoningEffort(effort) => Some((None, effort)),
-            AppEvent::PersistModelSelection { model, effort } => Some((Some(model), effort)),
+            AppEvent::PersistModelSelection { model, effort, .. } => Some((Some(model), effort)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -2795,9 +2804,13 @@ async fn assert_reasoning_shortcuts_update_effort(
         let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
         if expect_model_update {
             assert!(
-                events.iter().any(
-                    |event| matches!(event, AppEvent::UpdateModel(model) if model == "gpt-5.4")
-                ),
+                events.iter().any(|event| {
+                    matches!(event, AppEvent::UpdateModel(model) if model == "gpt-5.4")
+                        || matches!(
+                            event,
+                            AppEvent::UpdateModelSelection { model, .. } if model == "gpt-5.4"
+                        )
+                }),
                 "expected model update event for {key_event:?}; events: {events:?}"
             );
         }

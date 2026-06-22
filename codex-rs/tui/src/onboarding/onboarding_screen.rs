@@ -28,6 +28,8 @@ use ratatui::style::Color;
 use ratatui::widgets::Clear;
 use ratatui::widgets::WidgetRef;
 
+use codex_model_provider_info::AMBIENT_PROVIDER_ID;
+use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_protocol::config_types::ForcedLoginMethod;
 
 use crate::LoginStatus;
@@ -37,6 +39,7 @@ use crate::config_update::write_trusted_project;
 use crate::key_hint::KeyBindingListExt;
 use crate::legacy_core::config::Config;
 use crate::onboarding::auth::ApiKeyInputState;
+use crate::onboarding::auth::ApiKeyProviderOption;
 use crate::onboarding::auth::AuthModeWidget;
 use crate::onboarding::auth::SignInOption;
 use crate::onboarding::auth::SignInState;
@@ -102,6 +105,39 @@ struct ApiKeyEntryContext {
     has_text: bool,
 }
 
+fn provider_api_key_options(config: &Config) -> Vec<ApiKeyProviderOption> {
+    let mut options: Vec<ApiKeyProviderOption> = config
+        .model_providers
+        .iter()
+        .filter_map(|(id, provider)| {
+            if provider.requires_openai_auth {
+                return None;
+            }
+            Some(ApiKeyProviderOption {
+                id: id.clone(),
+                name: provider.name.clone(),
+                env_var: provider.env_key.clone()?,
+            })
+        })
+        .collect();
+
+    options.sort_by(|a, b| {
+        provider_api_key_sort_rank(&a.id)
+            .cmp(&provider_api_key_sort_rank(&b.id))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    options
+}
+
+fn provider_api_key_sort_rank(provider_id: &str) -> usize {
+    match provider_id {
+        AMBIENT_PROVIDER_ID => 0,
+        ZAI_PROVIDER_ID => 1,
+        _ => 2,
+    }
+}
+
 impl OnboardingScreen {
     pub(crate) async fn new(tui: &mut Tui, args: OnboardingScreenArgs) -> Self {
         let OnboardingScreenArgs {
@@ -113,6 +149,28 @@ impl OnboardingScreen {
         } = args;
         let cwd = config.cwd.to_path_buf();
         let forced_login_method = config.forced_login_method;
+        let mut api_key_provider_id = config.model_provider_id.clone();
+        let mut api_key_provider_name = config.model_provider.name.clone();
+        let mut api_key_env_var = config.model_provider.env_key.clone();
+        let api_key_provider_options = provider_api_key_options(&config);
+        let selected_provider_index = if api_key_provider_options.is_empty() {
+            None
+        } else {
+            Some(
+                api_key_provider_options
+                    .iter()
+                    .position(|provider| provider.id == api_key_provider_id)
+                    .unwrap_or(0),
+            )
+        };
+        if let Some(index) = selected_provider_index
+            && (api_key_env_var.is_none() || config.model_provider.requires_openai_auth)
+            && let Some(provider) = api_key_provider_options.get(index)
+        {
+            api_key_provider_id = provider.id.clone();
+            api_key_provider_name = provider.name.clone();
+            api_key_env_var = Some(provider.env_var.clone());
+        }
         let mut steps: Vec<Step> = Vec::new();
         steps.push(Step::Welcome(WelcomeWidget::new(
             !matches!(login_status, LoginStatus::NotAuthenticated),
@@ -120,15 +178,22 @@ impl OnboardingScreen {
             config.animations,
         )));
         if show_login_screen {
-            let highlighted_mode = match forced_login_method {
-                Some(ForcedLoginMethod::Api) => SignInOption::ApiKey,
-                _ => SignInOption::ChatGpt,
-            };
-            let initial_sign_in_state = match forced_login_method {
-                Some(ForcedLoginMethod::Api) => {
-                    SignInState::ApiKeyEntry(ApiKeyInputState::from_env())
+            let has_multiple_provider_options = api_key_provider_options.len() > 1;
+            let highlighted_mode = if has_multiple_provider_options {
+                SignInOption::ProviderApiKey(selected_provider_index.unwrap_or(0))
+            } else {
+                match forced_login_method {
+                    Some(ForcedLoginMethod::Api) => SignInOption::ApiKey,
+                    _ => SignInOption::ChatGpt,
                 }
-                _ => SignInState::PickMode,
+            };
+            let initial_sign_in_state = if !has_multiple_provider_options
+                && (matches!(forced_login_method, Some(ForcedLoginMethod::Api))
+                    || api_key_env_var.is_some())
+            {
+                SignInState::ApiKeyEntry(ApiKeyInputState::from_env(api_key_env_var.as_deref()))
+            } else {
+                SignInState::PickMode
             };
             if let Some(app_server_request_handle) = app_server_request_handle {
                 steps.push(Step::Auth(AuthModeWidget {
@@ -139,6 +204,10 @@ impl OnboardingScreen {
                     login_status,
                     app_server_request_handle,
                     forced_login_method,
+                    api_key_provider_id,
+                    api_key_provider_name,
+                    api_key_env_var,
+                    api_key_provider_options,
                     animations_enabled: config.animations,
                     animations_suppressed: std::cell::Cell::new(false),
                 }));

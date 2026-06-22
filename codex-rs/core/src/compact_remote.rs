@@ -239,7 +239,7 @@ async fn run_remote_compact_task_inner_impl(
     );
     let mut new_history = sess
         .services
-        .model_client
+        .model_client()
         .compact_conversation_history(
             &prompt,
             &turn_context.model_info,

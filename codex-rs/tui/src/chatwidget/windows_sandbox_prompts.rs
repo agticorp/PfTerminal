@@ -351,11 +351,11 @@ impl ChatWidget {
         lines.push(line![""]);
         if allow_unelevated {
             lines.push(line![
-                "You can still use Codex in a non-admin sandbox. It carries greater risk if prompt injected."
+                "You can still use PFTerminal in a non-admin sandbox. It carries greater risk if prompt injected."
             ]);
         } else {
             lines.push(line![
-                "Your organization requires the default sandbox before Codex can continue."
+                "Your organization requires the default sandbox before PFTerminal can continue."
             ]);
         }
         lines.push(line![

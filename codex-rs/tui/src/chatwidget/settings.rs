@@ -255,6 +255,16 @@ impl ChatWidget {
         self.refresh_model_dependent_surfaces();
     }
 
+    pub(crate) fn set_model_provider(
+        &mut self,
+        model_provider_id: String,
+        model_provider: codex_model_provider_info::ModelProviderInfo,
+    ) {
+        self.config.model_provider_id = model_provider_id;
+        self.config.model_provider = model_provider;
+        self.refresh_model_dependent_surfaces();
+    }
+
     pub(crate) fn current_model(&self) -> &str {
         if !self.collaboration_modes_enabled() {
             return self.current_collaboration_mode.model();

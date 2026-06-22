@@ -903,7 +903,16 @@ mod tests {
         use std::os::unix::net::UnixListener;
         use std::thread;
 
-        let tempdir = tempfile::tempdir().expect("tempdir");
+        let tempdir = tempfile::Builder::new()
+            .prefix("codex-ipc-test-")
+            .tempdir()
+            .expect("tempdir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(tempdir.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("set private tempdir permissions");
+        }
         let socket_path = tempdir.path().join("codex-ipc.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind socket");
 

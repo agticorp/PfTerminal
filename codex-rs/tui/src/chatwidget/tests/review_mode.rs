@@ -577,7 +577,7 @@ async fn item_completed_only_pops_front_pending_steer() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn item_completed_pops_pending_steer_with_local_image_and_text_elements() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     chat.thread_id = Some(ThreadId::new());
     chat.on_task_started();
 

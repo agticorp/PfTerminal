@@ -4,8 +4,14 @@
 //! into another, especially while Plan mode is active.
 
 use super::*;
+use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID;
+use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID;
+use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_model_provider_info::ZAI_DEFAULT_MODEL;
+use codex_model_provider_info::ZAI_PROVIDER_ID;
 
 impl ChatWidget {
     /// Open a popup to choose a quick auto model. Selecting "All models"
@@ -29,7 +35,7 @@ impl ChatWidget {
                 return;
             }
         };
-        self.open_model_popup_with_presets(self.filter_model_presets_for_current_provider(presets));
+        self.open_model_popup_with_presets(presets);
     }
 
     fn model_menu_header(&self, title: &str, subtitle: &str) -> Box<dyn Renderable> {
@@ -74,7 +80,7 @@ impl ChatWidget {
     pub(crate) fn open_model_popup_with_presets(&mut self, presets: Vec<ModelPreset>) {
         let presets: Vec<ModelPreset> = presets
             .into_iter()
-            .filter(|preset| preset.show_in_picker)
+            .filter(Self::show_in_pfterminal_model_picker)
             .collect();
 
         let current_model = self.current_model();
@@ -156,22 +162,31 @@ impl ChatWidget {
         });
     }
 
-    fn filter_model_presets_for_current_provider(
-        &self,
-        presets: Vec<ModelPreset>,
-    ) -> Vec<ModelPreset> {
-        if self.config.model_provider_id != AMBIENT_PROVIDER_ID {
-            return presets;
-        }
-
-        presets
-            .into_iter()
-            .filter(|preset| preset.model == AMBIENT_DEFAULT_MODEL)
-            .collect()
-    }
-
     fn is_auto_model(model: &str) -> bool {
         model.starts_with("codex-auto-")
+    }
+
+    fn model_provider_for_selection(model: &str) -> Option<String> {
+        let trimmed = model.trim();
+        if trimmed == AMBIENT_DEFAULT_MODEL
+            || trimmed.starts_with("ambient/")
+            || trimmed.starts_with("zai-org/")
+        {
+            return Some(AMBIENT_PROVIDER_ID.to_string());
+        }
+        if trimmed == ZAI_DEFAULT_MODEL || trimmed.starts_with("glm-") {
+            return Some(ZAI_PROVIDER_ID.to_string());
+        }
+        if matches!(
+            trimmed,
+            AMAZON_BEDROCK_GPT_5_5_MODEL_ID | AMAZON_BEDROCK_GPT_5_4_MODEL_ID
+        ) {
+            return Some(AMAZON_BEDROCK_PROVIDER_ID.to_string());
+        }
+        if trimmed.starts_with("gpt-") || trimmed.starts_with("codex-auto-") {
+            return Some(OPENAI_PROVIDER_ID.to_string());
+        }
+        None
     }
 
     fn auto_model_order(model: &str) -> usize {
@@ -184,6 +199,11 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_all_models_popup(&mut self, presets: Vec<ModelPreset>) {
+        let presets: Vec<ModelPreset> = presets
+            .into_iter()
+            .filter(Self::show_in_pfterminal_model_picker)
+            .collect();
+
         if presets.is_empty() {
             self.add_info_message(
                 "No additional models are available right now.".to_string(),
@@ -219,7 +239,7 @@ impl ChatWidget {
 
         let header = self.model_menu_header(
             "Select Model and Effort",
-            "Access legacy models by running codex -m <model_name> or in your config.toml",
+            "Access hidden models by running pfterminal -m <model_name> or in your config.toml",
         );
         self.bottom_pane.show_selection_view(SelectionViewParams {
             footer_hint: Some(self.bottom_pane.standard_popup_hint_line()),
@@ -229,11 +249,23 @@ impl ChatWidget {
         });
     }
 
+    fn show_in_pfterminal_model_picker(preset: &ModelPreset) -> bool {
+        if !preset.show_in_picker {
+            return false;
+        }
+
+        matches!(
+            Self::model_provider_for_selection(&preset.model).as_deref(),
+            Some(AMBIENT_PROVIDER_ID | ZAI_PROVIDER_ID)
+        )
+    }
+
     fn model_selection_actions(
         model_for_action: String,
         effort_for_action: Option<ReasoningEffortConfig>,
         should_prompt_plan_mode_scope: bool,
     ) -> Vec<SelectionAction> {
+        let provider_for_action = Self::model_provider_for_selection(&model_for_action);
         vec![Box::new(move |tx| {
             if should_prompt_plan_mode_scope {
                 tx.send(AppEvent::OpenPlanReasoningScopePrompt {
@@ -243,10 +275,14 @@ impl ChatWidget {
                 return;
             }
 
-            tx.send(AppEvent::UpdateModel(model_for_action.clone()));
+            tx.send(AppEvent::UpdateModelSelection {
+                model: model_for_action.clone(),
+                provider: provider_for_action.clone(),
+            });
             tx.send(AppEvent::UpdateReasoningEffort(effort_for_action.clone()));
             tx.send(AppEvent::PersistModelSelection {
                 model: model_for_action.clone(),
+                provider: provider_for_action.clone(),
                 effort: effort_for_action.clone(),
             });
         })]
@@ -319,19 +355,28 @@ impl ChatWidget {
         let plan_only_actions: Vec<SelectionAction> = vec![Box::new({
             let model = model.clone();
             let effort = effort.clone();
+            let provider = Self::model_provider_for_selection(&model);
             move |tx| {
-                tx.send(AppEvent::UpdateModel(model.clone()));
+                tx.send(AppEvent::UpdateModelSelection {
+                    model: model.clone(),
+                    provider: provider.clone(),
+                });
                 tx.send(AppEvent::UpdatePlanModeReasoningEffort(effort.clone()));
                 tx.send(AppEvent::PersistPlanModeReasoningEffort(effort.clone()));
             }
         })];
+        let provider = Self::model_provider_for_selection(&model);
         let all_modes_actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-            tx.send(AppEvent::UpdateModel(model.clone()));
+            tx.send(AppEvent::UpdateModelSelection {
+                model: model.clone(),
+                provider: provider.clone(),
+            });
             tx.send(AppEvent::UpdateReasoningEffort(effort.clone()));
             tx.send(AppEvent::UpdatePlanModeReasoningEffort(effort.clone()));
             tx.send(AppEvent::PersistPlanModeReasoningEffort(effort.clone()));
             tx.send(AppEvent::PersistModelSelection {
                 model: model.clone(),
+                provider: provider.clone(),
                 effort: effort.clone(),
             });
         })];
@@ -369,7 +414,7 @@ impl ChatWidget {
         let supported = preset.supported_reasoning_efforts;
         let in_plan_mode =
             self.collaboration_modes_enabled() && self.active_mode_kind() == ModeKind::Plan;
-        let uses_ambient_reasoning_modes = preset.model == AMBIENT_DEFAULT_MODEL;
+        let uses_ambient_reasoning_modes = Self::uses_glm_reasoning_modes(&preset.model);
 
         let warn_effort = if supported
             .iter()
@@ -469,6 +514,7 @@ impl ChatWidget {
 
             let model_for_action = model_slug.clone();
             let choice_effort = Some(effort);
+            let provider_for_action = Self::model_provider_for_selection(&model_for_action);
             let should_prompt_plan_mode_scope = self.should_prompt_plan_mode_reasoning_scope(
                 model_slug.as_str(),
                 choice_effort.clone(),
@@ -480,10 +526,14 @@ impl ChatWidget {
                         effort: choice_effort.clone(),
                     });
                 } else {
-                    tx.send(AppEvent::UpdateModel(model_for_action.clone()));
+                    tx.send(AppEvent::UpdateModelSelection {
+                        model: model_for_action.clone(),
+                        provider: provider_for_action.clone(),
+                    });
                     tx.send(AppEvent::UpdateReasoningEffort(choice_effort.clone()));
                     tx.send(AppEvent::PersistModelSelection {
                         model: model_for_action.clone(),
+                        provider: provider_for_action.clone(),
                         effort: choice_effort.clone(),
                     });
                 }
@@ -520,7 +570,7 @@ impl ChatWidget {
     }
 
     fn reasoning_effort_label_for_model(model: &str, effort: &ReasoningEffortConfig) -> String {
-        if model == AMBIENT_DEFAULT_MODEL {
+        if Self::uses_glm_reasoning_modes(model) {
             return match effort {
                 ReasoningEffortConfig::High | ReasoningEffortConfig::XHigh => "Deep".to_string(),
                 ReasoningEffortConfig::Custom(value)
@@ -536,6 +586,10 @@ impl ChatWidget {
         }
 
         Self::reasoning_effort_label(effort)
+    }
+
+    fn uses_glm_reasoning_modes(model: &str) -> bool {
+        model == AMBIENT_DEFAULT_MODEL || model == ZAI_DEFAULT_MODEL
     }
 
     pub(super) fn reasoning_effort_label(effort: &ReasoningEffortConfig) -> String {
@@ -562,14 +616,45 @@ impl ChatWidget {
         model: String,
         effort: Option<ReasoningEffortConfig>,
     ) {
-        self.app_event_tx.send(AppEvent::UpdateModel(model));
+        let provider = Self::model_provider_for_selection(&model);
+        self.app_event_tx
+            .send(AppEvent::UpdateModelSelection { model, provider });
         self.app_event_tx
             .send(AppEvent::UpdateReasoningEffort(effort));
     }
 
     fn apply_model_and_effort(&self, model: String, effort: Option<ReasoningEffortConfig>) {
         self.apply_model_and_effort_without_persist(model.clone(), effort.clone());
-        self.app_event_tx
-            .send(AppEvent::PersistModelSelection { model, effort });
+        let provider = Self::model_provider_for_selection(&model);
+        self.app_event_tx.send(AppEvent::PersistModelSelection {
+            model,
+            provider,
+            effort,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_provider_for_selection_maps_cross_provider_models() {
+        assert_eq!(
+            ChatWidget::model_provider_for_selection(AMBIENT_DEFAULT_MODEL).as_deref(),
+            Some(AMBIENT_PROVIDER_ID)
+        );
+        assert_eq!(
+            ChatWidget::model_provider_for_selection(ZAI_DEFAULT_MODEL).as_deref(),
+            Some(ZAI_PROVIDER_ID)
+        );
+        assert_eq!(
+            ChatWidget::model_provider_for_selection("gpt-5.5").as_deref(),
+            Some(OPENAI_PROVIDER_ID)
+        );
+        assert_eq!(
+            ChatWidget::model_provider_for_selection(AMAZON_BEDROCK_GPT_5_5_MODEL_ID).as_deref(),
+            Some(AMAZON_BEDROCK_PROVIDER_ID)
+        );
     }
 }

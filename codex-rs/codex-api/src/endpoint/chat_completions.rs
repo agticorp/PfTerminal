@@ -15,6 +15,8 @@ use codex_client::HttpTransport;
 use codex_client::RequestTelemetry;
 use codex_client::StreamResponse;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TokenUsage;
@@ -177,6 +179,7 @@ struct ChatChoice {
 #[derive(Debug, Default, Deserialize)]
 struct ChatDelta {
     content: Option<String>,
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ChatToolCallDelta>,
 }
@@ -272,6 +275,9 @@ struct ChatStreamState {
     message_added: bool,
     message_text: String,
     emitted_text_len: usize,
+    reasoning_added: bool,
+    reasoning_done: bool,
+    reasoning_text: String,
     tool_calls: BTreeMap<usize, PendingToolCall>,
     token_usage: Option<TokenUsage>,
     response_id_hint: Option<String>,
@@ -285,6 +291,9 @@ impl ChatStreamState {
             message_added: false,
             message_text: String::new(),
             emitted_text_len: 0,
+            reasoning_added: false,
+            reasoning_done: false,
+            reasoning_text: String::new(),
             tool_calls: BTreeMap::new(),
             token_usage: None,
             response_id_hint,
@@ -316,9 +325,37 @@ impl ChatStreamState {
         }
 
         for choice in chunk.choices {
+            if let Some(delta) = choice.delta.reasoning_content
+                && !delta.is_empty()
+            {
+                if self.reasoning_done || self.message_added {
+                    trace!(
+                        "dropping late chat completions reasoning_content after visible output started"
+                    );
+                } else {
+                    if !self.ensure_reasoning_item_added(tx_event).await {
+                        return false;
+                    }
+                    self.reasoning_text.push_str(&delta);
+                    if tx_event
+                        .send(Ok(ResponseEvent::ReasoningContentDelta {
+                            delta,
+                            content_index: 0,
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
+            }
+
             if let Some(delta) = choice.delta.content
                 && !delta.is_empty()
             {
+                if !self.finish_reasoning_item(tx_event).await {
+                    return false;
+                }
                 self.message_text.push_str(&delta);
                 if !self.should_delay_text_delta() && !self.emit_pending_text_delta(tx_event).await
                 {
@@ -349,6 +386,10 @@ impl ChatStreamState {
         let response_id = self.response_id();
         let message_id = format!("msg_{response_id}");
         let token_usage = self.token_usage.take();
+
+        if !self.finish_reasoning_item(tx_event).await {
+            return;
+        }
 
         if !self.message_text.is_empty() {
             match parse_serialized_function_call_text(&self.message_text) {
@@ -443,6 +484,67 @@ impl ChatStreamState {
             .clone()
             .or_else(|| self.response_id_hint.clone())
             .unwrap_or_else(|| "chatcmpl-unknown".to_string())
+    }
+
+    fn reasoning_id(&self) -> String {
+        format!("rs_{}", self.response_id())
+    }
+
+    async fn ensure_reasoning_item_added(
+        &mut self,
+        tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
+    ) -> bool {
+        if self.reasoning_added {
+            return true;
+        }
+
+        let item = ResponseItem::Reasoning {
+            id: Some(self.reasoning_id()),
+            summary: Vec::new(),
+            content: Some(Vec::new()),
+            encrypted_content: None,
+            metadata: None,
+        };
+        if tx_event
+            .send(Ok(ResponseEvent::OutputItemAdded(item)))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        self.reasoning_added = true;
+        true
+    }
+
+    async fn finish_reasoning_item(
+        &mut self,
+        tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
+    ) -> bool {
+        if !self.reasoning_added || self.reasoning_done {
+            return true;
+        }
+
+        let content = (!self.reasoning_text.is_empty()).then(|| {
+            vec![ReasoningItemContent::ReasoningText {
+                text: self.reasoning_text.clone(),
+            }]
+        });
+        let item = ResponseItem::Reasoning {
+            id: Some(self.reasoning_id()),
+            summary: Vec::<ReasoningItemReasoningSummary>::new(),
+            content,
+            encrypted_content: None,
+            metadata: None,
+        };
+        if tx_event
+            .send(Ok(ResponseEvent::OutputItemDone(item)))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        self.reasoning_done = true;
+        true
     }
 
     fn should_delay_text_delta(&self) -> bool {
@@ -781,6 +883,65 @@ mod tests {
             Ok(ResponseEvent::Completed { response_id, .. }) if response_id == "chatcmpl-2"
         );
         assert_eq!(events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn parses_reasoning_content_without_leaking_as_text() {
+        let events = collect_events(&[
+            br#"data: {"id":"chatcmpl-reasoning","choices":[{"delta":{"reasoning_content":"private thought "}}]}"#,
+            b"\n\n",
+            br#"data: {"id":"chatcmpl-reasoning","choices":[{"delta":{"reasoning_content":"trace"}}]}"#,
+            b"\n\n",
+            br#"data: {"id":"chatcmpl-reasoning","choices":[{"delta":{"content":"visible answer"}}]}"#,
+            b"\n\n",
+            b"data: [DONE]\n\n",
+        ])
+        .await;
+
+        assert_matches!(
+            &events[0],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::Reasoning { id: Some(id), .. }))
+                if id == "rs_chatcmpl-reasoning"
+        );
+        assert_matches!(
+            &events[1],
+            Ok(ResponseEvent::ReasoningContentDelta { delta, content_index })
+                if delta == "private thought " && *content_index == 0
+        );
+        assert_matches!(
+            &events[2],
+            Ok(ResponseEvent::ReasoningContentDelta { delta, content_index })
+                if delta == "trace" && *content_index == 0
+        );
+        assert_matches!(
+            &events[3],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+                content: Some(content),
+                ..
+            })) if content == &vec![ReasoningItemContent::ReasoningText {
+                text: "private thought trace".to_string(),
+            }]
+        );
+        assert_matches!(
+            &events[4],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { .. }))
+        );
+        assert_matches!(
+            &events[5],
+            Ok(ResponseEvent::OutputTextDelta(delta)) if delta == "visible answer"
+        );
+        assert_matches!(
+            &events[6],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. }))
+                if content == &vec![ContentItem::OutputText {
+                    text: "visible answer".to_string(),
+                }]
+        );
+        assert_matches!(
+            &events[7],
+            Ok(ResponseEvent::Completed { response_id, .. }) if response_id == "chatcmpl-reasoning"
+        );
+        assert_eq!(events.len(), 8);
     }
 
     #[tokio::test]

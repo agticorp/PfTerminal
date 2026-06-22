@@ -2,4 +2,4 @@
 source: tui/src/chatwidget/tests/slash_commands.rs
 expression: rendered
 ---
-■ Sign in with ChatGPT to use /usage.
+■ Sign in with ChatGPT to view OpenAI usage with /usage.

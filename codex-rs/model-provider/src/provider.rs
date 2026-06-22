@@ -10,6 +10,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_models_manager::manager::OpenAiModelsManager;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_models_manager::manager::StaticModelsManager;
@@ -226,6 +227,12 @@ impl ModelProvider for ConfiguredModelProvider {
                 image_generation: false,
                 web_search: false,
             }
+        } else if self.info.is_zai() {
+            ProviderCapabilities {
+                namespace_tools: false,
+                image_generation: false,
+                web_search: true,
+            }
         } else {
             ProviderCapabilities::default()
         }
@@ -234,6 +241,8 @@ impl ModelProvider for ConfiguredModelProvider {
     fn approval_review_preferred_model(&self) -> &'static str {
         if self.info.is_ambient() {
             AMBIENT_DEFAULT_MODEL
+        } else if self.info.is_zai() {
+            ZAI_DEFAULT_MODEL
         } else {
             DEFAULT_APPROVAL_REVIEW_PREFERRED_MODEL
         }
@@ -242,6 +251,8 @@ impl ModelProvider for ConfiguredModelProvider {
     fn memory_extraction_preferred_model(&self) -> &'static str {
         if self.info.is_ambient() {
             AMBIENT_DEFAULT_MODEL
+        } else if self.info.is_zai() {
+            ZAI_DEFAULT_MODEL
         } else {
             DEFAULT_MEMORY_EXTRACTION_PREFERRED_MODEL
         }
@@ -250,6 +261,8 @@ impl ModelProvider for ConfiguredModelProvider {
     fn memory_consolidation_preferred_model(&self) -> &'static str {
         if self.info.is_ambient() {
             AMBIENT_DEFAULT_MODEL
+        } else if self.info.is_zai() {
+            ZAI_DEFAULT_MODEL
         } else {
             DEFAULT_MEMORY_CONSOLIDATION_PREFERRED_MODEL
         }
@@ -268,15 +281,36 @@ impl ModelProvider for ConfiguredModelProvider {
 
     fn auth(&self) -> ModelProviderFuture<'_, Option<CodexAuth>> {
         Box::pin(async move {
-            match self.auth_manager.as_ref() {
-                Some(auth_manager) => auth_manager.auth().await,
-                None => None,
+            let Some(auth_manager) = self.auth_manager.as_ref() else {
+                return None;
+            };
+
+            if let Some(provider_key_id) = self.info.env_key.as_deref() {
+                return auth_manager
+                    .provider_api_key(provider_key_id)
+                    .ok()
+                    .flatten()
+                    .map(|api_key| CodexAuth::from_api_key(&api_key));
             }
+
+            auth_manager.auth().await
         })
     }
 
     fn account_state(&self) -> ProviderAccountResult {
-        let account = if self.info.requires_openai_auth {
+        let account = if let Some(provider_key_id) = self.info.env_key.as_deref() {
+            let stored_key = self
+                .auth_manager
+                .as_ref()
+                .and_then(|auth_manager| auth_manager.provider_api_key(provider_key_id).ok())
+                .flatten();
+            let env_key = self.info.api_key().ok().flatten();
+            if stored_key.is_some() || env_key.is_some() {
+                Some(ProviderAccount::ApiKey)
+            } else {
+                None
+            }
+        } else if self.info.requires_openai_auth {
             self.auth_manager
                 .as_ref()
                 .and_then(|auth_manager| {
@@ -478,6 +512,23 @@ mod tests {
         assert_eq!(
             provider.memory_consolidation_preferred_model(),
             AMBIENT_DEFAULT_MODEL
+        );
+    }
+
+    #[test]
+    fn zai_provider_exposes_native_web_search_only() {
+        let provider = create_model_provider(
+            ModelProviderInfo::create_zai_provider(),
+            /*auth_manager*/ None,
+        );
+
+        assert_eq!(
+            provider.capabilities(),
+            ProviderCapabilities {
+                namespace_tools: false,
+                image_generation: false,
+                web_search: true,
+            }
         );
     }
 

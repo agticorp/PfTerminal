@@ -1,11 +1,12 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
-assertion_line: 2568
+assertion_line: 2569
 expression: popup
 ---
   Select Model and Effort
-  Access legacy models by running codex -m <model_name> or in your config.toml
+  Access hidden models by running pfterminal -m <model_name> or in your config
 
-› 1. zai-org/GLM-5.2-FP8 (default)  Ambient's default GLM 5.2 coding model.
+› 1. zai-org/GLM-5.2-FP8 (current)  Ambient's default GLM 5.2 coding model.
+  2. glm-5.2                        GLM 5.2 through the Z.AI coding plan API.
 
   Press enter to confirm or esc to go back

@@ -6,6 +6,7 @@ use crate::SkillsService;
 use crate::agent::AgentControl;
 use crate::attestation::AttestationProvider;
 use crate::client::ModelClient;
+use crate::client::ModelClientSession;
 use crate::config::NetworkProxyAuditMetadata;
 use crate::config::StartedNetworkProxy;
 use crate::current_time::TimeProvider;
@@ -82,13 +83,33 @@ pub(crate) struct SessionServices {
     pub(crate) attestation_provider: Option<Arc<dyn AttestationProvider>>,
     pub(crate) time_provider: Arc<dyn TimeProvider>,
     /// Session-scoped model client shared across turns.
-    pub(crate) model_client: ModelClient,
+    ///
+    /// The model provider can change at runtime through thread settings, so the
+    /// client is reloadable while each turn keeps using the snapshot it started
+    /// with.
+    pub(crate) model_client: ArcSwap<ModelClient>,
     pub(crate) code_mode_service: CodeModeService,
     pub(crate) tool_search_handler_cache: ToolSearchHandlerCache,
     pub(crate) turn_environments: Arc<ThreadEnvironments>,
 }
 
 impl SessionServices {
+    pub(crate) fn model_client(&self) -> ModelClient {
+        self.model_client.load_full().as_ref().clone()
+    }
+
+    pub(crate) fn new_model_client_session(&self) -> ModelClientSession {
+        self.model_client().new_session()
+    }
+
+    pub(crate) fn responses_websocket_enabled(&self) -> bool {
+        self.model_client().responses_websocket_enabled()
+    }
+
+    pub(crate) fn replace_model_client(&self, model_client: ModelClient) {
+        self.model_client.store(Arc::new(model_client));
+    }
+
     /// Installs the manager before validating required servers so startup-time elicitation can
     /// resolve through the session's manager while validation waits.
     pub(crate) async fn install_mcp_connection_manager(

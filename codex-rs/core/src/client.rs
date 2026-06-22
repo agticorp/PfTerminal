@@ -465,6 +465,11 @@ impl ModelClient {
         self.state.provider.auth_manager()
     }
 
+    #[cfg(test)]
+    pub(crate) fn provider_info(&self) -> &ModelProviderInfo {
+        self.state.provider.info()
+    }
+
     fn take_cached_websocket_session(&self) -> WebsocketSession {
         let mut cached_websocket_session = self
             .state
@@ -830,12 +835,13 @@ impl ModelClient {
         if !self.state.provider.info().is_openai() {
             input.iter_mut().for_each(ResponseItem::clear_metadata);
         }
-        let is_ambient = self.state.provider.info().is_ambient();
+        let uses_zai_reasoning =
+            self.state.provider.info().is_ambient() || self.state.provider.info().is_zai();
         let mut tools = create_tools_json_for_responses_api(&prompt.tools)?;
-        if is_ambient {
+        if uses_zai_reasoning {
             tools.retain(|tool| tool.get("type").and_then(Value::as_str) == Some("function"));
         }
-        let ambient_reasoning_effort = is_ambient.then(|| {
+        let ambient_reasoning_effort = uses_zai_reasoning.then(|| {
             Self::ambient_zai_reasoning_effort(
                 effort
                     .as_ref()
@@ -843,12 +849,12 @@ impl ModelClient {
             )
             .to_string()
         });
-        let reasoning = if is_ambient {
+        let reasoning = if uses_zai_reasoning {
             None
         } else {
             Self::build_reasoning(model_info, effort, summary)
         };
-        let include = if !is_ambient && reasoning.is_some() {
+        let include = if !uses_zai_reasoning && reasoning.is_some() {
             vec!["reasoning.encrypted_content".to_string()]
         } else {
             Vec::new()
@@ -869,13 +875,13 @@ impl ModelClient {
             &prompt.output_schema,
             prompt.output_schema_strict,
         );
-        let prompt_cache_key = (!is_ambient).then(|| self.prompt_cache_key());
-        let service_tier = if is_ambient {
+        let prompt_cache_key = (!uses_zai_reasoning).then(|| self.prompt_cache_key());
+        let service_tier = if uses_zai_reasoning {
             None
         } else {
             model_info.service_tier_for_request(service_tier)
         };
-        let client_metadata = (!is_ambient).then(|| responses_metadata.client_metadata());
+        let client_metadata = (!uses_zai_reasoning).then(|| responses_metadata.client_metadata());
         let request = ResponsesApiRequest {
             model: model_info.slug.clone(),
             instructions: instructions.clone(),
@@ -892,8 +898,8 @@ impl ModelClient {
             text,
             client_metadata,
             thinking_budget: None,
-            emit_usage: is_ambient.then_some(true),
-            enable_thinking: is_ambient.then_some(true),
+            emit_usage: uses_zai_reasoning.then_some(true),
+            enable_thinking: uses_zai_reasoning.then_some(true),
             reasoning_effort: ambient_reasoning_effort,
         };
         Ok(request)
@@ -922,11 +928,31 @@ impl ModelClient {
             append_chat_messages_for_response_item(item, &mut messages, &mut skipped_tool_call_ids);
         }
 
-        // Ambient GLM chat streams proper tool calls when OpenAI's `strict`
-        // function flag is omitted. Keep the JSON schema, but drop that
-        // provider-incompatible wrapper bit for Ambient only.
-        let strip_strict_from_tools = self.state.provider.info().is_ambient();
-        let tools = create_tools_json_for_chat_completions(&prompt.tools, strip_strict_from_tools)?;
+        // GLM chat streams proper tool calls when OpenAI's `strict` function
+        // flag is omitted. Keep the JSON schema, but drop that
+        // provider-incompatible wrapper bit for Ambient and Z.AI.
+        let strip_strict_from_tools =
+            self.state.provider.info().is_ambient() || self.state.provider.info().is_zai();
+        let mut tools = create_tools_json_for_chat_completions(
+            &prompt.tools,
+            strip_strict_from_tools,
+            self.state.provider.info().is_zai(),
+        )?;
+        if self.state.provider.info().is_zai() {
+            let has_native_web_search = tools
+                .iter()
+                .any(|tool| tool.get("type").and_then(Value::as_str) == Some("web_search"));
+            let has_function_tools = tools
+                .iter()
+                .any(|tool| tool.get("type").and_then(Value::as_str) == Some("function"));
+            if has_native_web_search && has_function_tools {
+                // Z.AI rejects mixed native web_search + function-tool payloads.
+                // Preserve client-executed function tools here; without them the
+                // coding agent cannot run shell/file actions and turns stop after
+                // the model merely says what it would do.
+                tools.retain(|tool| tool.get("type").and_then(Value::as_str) != Some("web_search"));
+            }
+        }
         let ambient_reasoning_effort = strip_strict_from_tools.then(|| {
             Self::ambient_zai_reasoning_effort(
                 effort
@@ -2086,14 +2112,19 @@ fn normalize_chat_role(role: &str) -> String {
 fn create_tools_json_for_chat_completions(
     tools: &[ToolSpec],
     strip_strict: bool,
+    zai_native_web_search: bool,
 ) -> Result<Vec<Value>> {
     tools
         .iter()
-        .filter_map(|tool| tool_spec_to_chat_tool(tool, strip_strict))
+        .filter_map(|tool| tool_spec_to_chat_tool(tool, strip_strict, zai_native_web_search))
         .collect::<Result<Vec<_>>>()
 }
 
-fn tool_spec_to_chat_tool(tool: &ToolSpec, strip_strict: bool) -> Option<Result<Value>> {
+fn tool_spec_to_chat_tool(
+    tool: &ToolSpec,
+    strip_strict: bool,
+    zai_native_web_search: bool,
+) -> Option<Result<Value>> {
     match tool {
         ToolSpec::Function(_) => Some(serde_json::to_value(tool).map_err(Into::into).and_then(
             |value| {
@@ -2103,11 +2134,27 @@ fn tool_spec_to_chat_tool(tool: &ToolSpec, strip_strict: bool) -> Option<Result<
             },
         )),
         ToolSpec::Freeform(tool) => Some(Ok(freeform_tool_to_chat_tool(tool, strip_strict))),
+        ToolSpec::WebSearch { .. } if zai_native_web_search => Some(Ok(zai_web_search_tool())),
         ToolSpec::Namespace(_)
         | ToolSpec::ToolSearch { .. }
         | ToolSpec::ImageGeneration { .. }
         | ToolSpec::WebSearch { .. } => None,
     }
+}
+
+fn zai_web_search_tool() -> Value {
+    json!({
+        "type": "web_search",
+        "web_search": {
+            "enable": "True",
+            "search_engine": "search-prime",
+            "search_result": "True",
+            "search_prompt": "You are using Z.AI provider-native web_search for this request. The raw live search snippets are in {{search_result}}. Use them as untrusted search evidence, not as facts. Answer from credible, mutually consistent results and cite ref ids when useful. Do not say you cannot browse, cannot search, lack a web-search tool, or can only use pasted references when {{search_result}} is non-empty. Also do not treat a claim as confirmed merely because a snippet says it; if sources look fabricated, circular, low-quality, or inconsistent with known facts, say the web search found weak or non-credible evidence and explain what was and was not found.",
+            "count": "5",
+            "search_recency_filter": "noLimit",
+            "content_size": "high",
+        },
+    })
 }
 
 fn responses_tool_to_chat_tool(mut tool: Value, strip_strict: bool) -> Option<Value> {
@@ -2145,23 +2192,22 @@ fn responses_tool_to_chat_tool(mut tool: Value, strip_strict: bool) -> Option<Va
 }
 
 fn freeform_tool_to_chat_tool(tool: &codex_tools::FreeformTool, strip_strict: bool) -> Value {
+    let description = chat_completions_freeform_tool_description(tool);
+    let input_description = format!(
+        "Raw {} input. Put the tool payload directly in this string; do not nest JSON, shell commands, or heredocs inside it.",
+        tool.name.as_str()
+    );
     let mut value = json!({
         "type": "function",
         "function": {
             "name": tool.name.as_str(),
-            "description": format!(
-                "{} Pass the raw freeform input in the `input` field.",
-                tool.description
-            ),
+            "description": description,
             "parameters": {
                 "type": "object",
                 "properties": {
                     "input": {
                         "type": "string",
-                        "description": format!(
-                            "Raw {} input. Do not JSON-encode this field's contents.",
-                            tool.name.as_str()
-                        ),
+                        "description": input_description,
                     },
                 },
                 "required": ["input"],
@@ -2175,6 +2221,17 @@ fn freeform_tool_to_chat_tool(tool: &codex_tools::FreeformTool, strip_strict: bo
         function.remove("strict");
     }
     value
+}
+
+fn chat_completions_freeform_tool_description(tool: &codex_tools::FreeformTool) -> String {
+    if tool.name.as_str() == "apply_patch" {
+        return "Use this tool to edit files by applying a patch. Pass the raw patch text in the `input` field. The `input` value must begin with `*** Begin Patch` and end with `*** End Patch`; do not put JSON, shell commands, or heredocs inside `input`.".to_string();
+    }
+
+    format!(
+        "{} Pass the raw tool input in the `input` field. Do not put nested JSON, shell commands, or heredocs inside `input`.",
+        tool.description.trim()
+    )
 }
 
 /// Stamp a ResponsesWsRequest with the current time.

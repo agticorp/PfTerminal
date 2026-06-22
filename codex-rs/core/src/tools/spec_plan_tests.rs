@@ -8,6 +8,8 @@ use codex_mcp::ToolInfo;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::openai_models::ApplyPatchToolType;
@@ -250,6 +252,7 @@ fn set_web_search_mode(turn: &mut TurnContext, mode: WebSearchMode) {
 }
 
 fn use_chatgpt_auth(turn: &mut TurnContext) {
+    use_openai_provider(turn);
     turn.auth_manager = Some(AuthManager::from_auth_for_testing(
         CodexAuth::create_dummy_chatgpt_auth_for_testing(),
     ));
@@ -259,10 +262,28 @@ fn use_chatgpt_auth(turn: &mut TurnContext) {
     );
 }
 
+fn use_openai_provider(turn: &mut TurnContext) {
+    let provider_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    update_config(turn, |config| {
+        config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
 fn use_bedrock_provider(turn: &mut TurnContext) {
     let provider_info = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
     update_config(turn, |config| {
         config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
+fn use_zai_provider(turn: &mut TurnContext) {
+    let provider_info = ModelProviderInfo::create_zai_provider();
+    update_config(turn, |config| {
+        config.model_provider_id = ZAI_PROVIDER_ID.to_string();
         config.model_provider = provider_info.clone();
     });
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
@@ -1433,6 +1454,7 @@ async fn hosted_tools_follow_provider_auth_model_and_config_gates() {
     extension_flag_without_imagegen_tool.assert_visible_lacks(&["image_gen"]);
 
     let live_web_search = probe(|turn| {
+        use_openai_provider(turn);
         set_web_search_mode(turn, WebSearchMode::Live);
         turn.model_info.web_search_tool_type = WebSearchToolType::TextAndImage;
     })
@@ -1448,6 +1470,23 @@ async fn hosted_tools_follow_provider_auth_model_and_config_gates() {
             search_content_types: Some(vec!["text".to_string(), "image".to_string()]),
         }
     );
+
+    let zai_native_web_search = probe(|turn| {
+        use_zai_provider(turn);
+        set_web_search_mode(turn, WebSearchMode::Live);
+        turn.model_info.supports_search_tool = false;
+    })
+    .await;
+    zai_native_web_search.assert_visible_contains(&["web_search"]);
+
+    let zai_native_web_search_for_responses_lite = probe(|turn| {
+        use_zai_provider(turn);
+        set_web_search_mode(turn, WebSearchMode::Live);
+        turn.model_info.supports_search_tool = false;
+        turn.model_info.use_responses_lite = true;
+    })
+    .await;
+    zai_native_web_search_for_responses_lite.assert_visible_contains(&["web_search"]);
 
     let code_mode_only = probe(|turn| {
         use_chatgpt_auth(turn);
@@ -1477,6 +1516,7 @@ async fn hosted_tools_follow_provider_auth_model_and_config_gates() {
     );
 
     let standalone_web_search_without_web_run = probe(|turn| {
+        use_openai_provider(turn);
         set_feature(turn, Feature::StandaloneWebSearch, /*enabled*/ true);
         set_web_search_mode(turn, WebSearchMode::Live);
     })
@@ -1485,6 +1525,7 @@ async fn hosted_tools_follow_provider_auth_model_and_config_gates() {
 
     let standalone_web_search = probe_with(
         |turn| {
+            use_openai_provider(turn);
             set_feature(turn, Feature::StandaloneWebSearch, /*enabled*/ true);
             set_web_search_mode(turn, WebSearchMode::Live);
         },

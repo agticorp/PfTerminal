@@ -287,8 +287,10 @@ fn test_create_ambient_provider() {
         ModelProviderInfo {
             name: "Ambient".to_string(),
             base_url: Some(AMBIENT_BASE_URL.to_string()),
-            env_key: None,
-            env_key_instructions: None,
+            env_key: Some(AMBIENT_API_KEY_ENV_VAR.to_string()),
+            env_key_instructions: Some(format!(
+                "Set {AMBIENT_API_KEY_ENV_VAR} to your Ambient API key."
+            )),
             experimental_bearer_token: None,
             auth: None,
             aws: None,
@@ -300,11 +302,40 @@ fn test_create_ambient_provider() {
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
             websocket_connect_timeout_ms: None,
-            requires_openai_auth: true,
+            requires_openai_auth: false,
             supports_websockets: false,
         }
     );
     assert_eq!(AMBIENT_DEFAULT_MODEL, "zai-org/GLM-5.2-FP8");
+}
+
+#[test]
+fn test_create_zai_provider() {
+    assert_eq!(
+        ModelProviderInfo::create_zai_provider(),
+        ModelProviderInfo {
+            name: "Z.AI".to_string(),
+            base_url: Some(ZAI_BASE_URL.to_string()),
+            env_key: Some(ZAI_API_KEY_ENV_VAR.to_string()),
+            env_key_instructions: Some(format!(
+                "Set {ZAI_API_KEY_ENV_VAR} to your Z.AI Plan API key."
+            )),
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Chat,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    );
+    assert_eq!(ZAI_DEFAULT_MODEL, "glm-5.2");
 }
 
 #[test]
@@ -342,6 +373,18 @@ fn test_built_in_model_providers_include_ambient() {
         providers
             .get(AMBIENT_PROVIDER_ID)
             .map(ModelProviderInfo::is_ambient),
+        Some(true)
+    );
+}
+
+#[test]
+fn test_built_in_model_providers_include_zai() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    assert_eq!(
+        providers
+            .get(ZAI_PROVIDER_ID)
+            .map(ModelProviderInfo::is_zai),
         Some(true)
     );
 }

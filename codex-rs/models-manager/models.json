@@ -83,6 +83,52 @@
       "supports_reasoning_summaries": false,
       "supports_search_tool": false
     },
+    {
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "input_modalities": [
+        "text"
+      ],
+      "supports_image_detail_original": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "context_window": 1000000,
+      "max_context_window": 1000000,
+      "auto_compact_token_limit": null,
+      "default_reasoning_summary": "none",
+      "slug": "glm-5.2",
+      "display_name": "Z.AI GLM 5.2",
+      "description": "GLM 5.2 through the Z.AI coding plan API.",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "medium",
+          "description": "Standard. Normal Z.AI reasoning mode; sends reasoning_effort=high."
+        },
+        {
+          "effort": "xhigh",
+          "description": "Deep. Harder Z.AI reasoning mode; sends reasoning_effort=max."
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "availability_nux": null,
+      "upgrade": null,
+      "priority": 0,
+      "base_instructions": "You are PFTerminal, a coding agent. Help the user complete software tasks in the current workspace. Be direct, inspect the code before changing it, keep edits scoped, and verify your work when practical. When searching, use rg or rg --files first. Never run recursive grep over a repo root; if rg is unavailable, restrict grep to source directories and exclude .git, target, node_modules, dist, build, .next, and vendor.",
+      "model_messages": null,
+      "experimental_supported_tools": [],
+      "service_tiers": [],
+      "additional_speed_tiers": [],
+      "supports_reasoning_summaries": false,
+      "supports_search_tool": false
+    },
     { 
       "prefer_websockets": true,
       "support_verbosity": true,
@@ -127,7 +173,7 @@
         }
       ],
       "shell_type": "shell_command",
-      "visibility": "list",
+      "visibility": "hide",
       "minimal_client_version": "0.124.0",
       "supported_in_api": true,
       "availability_nux": null,
@@ -219,7 +265,7 @@
         }
       ],
       "shell_type": "shell_command",
-      "visibility": "list",
+      "visibility": "hide",
       "minimal_client_version": "0.98.0",
       "supported_in_api": true,
       "availability_nux": null,
@@ -308,7 +354,7 @@
         }
       ],
       "shell_type": "shell_command",
-      "visibility": "list",
+      "visibility": "hide",
       "minimal_client_version": "0.98.0",
       "supported_in_api": true,
       "availability_nux": null,
@@ -392,7 +438,7 @@
         }
       ],
       "shell_type": "shell_command",
-      "visibility": "list",
+      "visibility": "hide",
       "minimal_client_version": "0.98.0",
       "supported_in_api": true,
       "availability_nux": null,
@@ -476,7 +522,7 @@
         }
       ],
       "shell_type": "shell_command",
-      "visibility": "list",
+      "visibility": "hide",
       "minimal_client_version": "0.0.1",
       "supported_in_api": true,
       "availability_nux": null,

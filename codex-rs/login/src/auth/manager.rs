@@ -4,9 +4,11 @@ use serde::Deserialize;
 use serde::Serialize;
 #[cfg(test)]
 use serial_test::serial;
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Debug;
 use std::future::Future;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -768,6 +770,15 @@ pub fn read_codex_access_token_from_env() -> Option<String> {
     read_non_empty_env_var(CODEX_ACCESS_TOKEN_ENV_VAR)
 }
 
+fn auth_uses_api_key_from_env(auth: &CodexAuth) -> bool {
+    let Some(api_key) = auth.api_key() else {
+        return false;
+    };
+
+    read_codex_api_key_from_env().as_deref() == Some(api_key)
+        || read_ambient_api_key_from_env().as_deref() == Some(api_key)
+}
+
 fn read_non_empty_env_var(key: &str) -> Option<String> {
     env::var(key)
         .ok()
@@ -787,7 +798,9 @@ pub fn logout(
         auth_credentials_store_mode,
         keyring_backend_kind,
     );
-    storage.delete()
+    let removed_auth = storage.delete()?;
+    let removed_provider = delete_provider_auth_if_exists(codex_home)?;
+    Ok(removed_auth || removed_provider)
 }
 
 pub async fn logout_with_revoke(
@@ -838,6 +851,32 @@ pub fn login_with_api_key(
         auth_credentials_store_mode,
         keyring_backend_kind,
     )
+}
+
+pub fn login_with_provider_api_key(
+    codex_home: &Path,
+    provider_key_id: &str,
+    api_key: &str,
+    _auth_credentials_store_mode: AuthCredentialsStoreMode,
+    _keyring_backend_kind: AuthKeyringBackendKind,
+) -> std::io::Result<()> {
+    let provider_key_id = provider_key_id.trim();
+    if provider_key_id.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "provider key id cannot be empty",
+        ));
+    }
+
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "provider API key cannot be empty",
+        ));
+    }
+
+    save_provider_api_key(codex_home, provider_key_id, api_key)
 }
 
 /// Writes an `auth.json` that contains only the access token.
@@ -951,6 +990,85 @@ pub fn load_auth_dot_json(
     storage.load()
 }
 
+pub fn provider_api_key_from_auth_storage(
+    codex_home: &Path,
+    provider_key_id: &str,
+    _auth_credentials_store_mode: AuthCredentialsStoreMode,
+    _keyring_backend_kind: AuthKeyringBackendKind,
+) -> std::io::Result<Option<String>> {
+    Ok(load_provider_auth(codex_home)?
+        .api_keys
+        .get(provider_key_id)
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string))
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ProviderAuthDotJson {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    api_keys: HashMap<String, String>,
+}
+
+fn provider_auth_file(codex_home: &Path) -> PathBuf {
+    codex_home.join("provider_auth.json")
+}
+
+fn delete_provider_auth_if_exists(codex_home: &Path) -> std::io::Result<bool> {
+    match std::fs::remove_file(provider_auth_file(codex_home)) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+fn load_provider_auth(codex_home: &Path) -> std::io::Result<ProviderAuthDotJson> {
+    let provider_auth_file = provider_auth_file(codex_home);
+    let contents = match std::fs::read_to_string(provider_auth_file) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ProviderAuthDotJson::default());
+        }
+        Err(err) => return Err(err),
+    };
+
+    serde_json::from_str(&contents).map_err(std::io::Error::other)
+}
+
+fn save_provider_auth(
+    codex_home: &Path,
+    provider_auth: &ProviderAuthDotJson,
+) -> std::io::Result<()> {
+    let provider_auth_file = provider_auth_file(codex_home);
+    if let Some(parent) = provider_auth_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let json_data = serde_json::to_string_pretty(provider_auth)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.truncate(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(provider_auth_file)?;
+    file.write_all(json_data.as_bytes())?;
+    file.flush()
+}
+
+fn save_provider_api_key(
+    codex_home: &Path,
+    provider_key_id: &str,
+    api_key: &str,
+) -> std::io::Result<()> {
+    let mut provider_auth = load_provider_auth(codex_home)?;
+    provider_auth
+        .api_keys
+        .insert(provider_key_id.to_string(), api_key.to_string());
+    save_provider_auth(codex_home, &provider_auth)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthConfig {
     pub codex_home: PathBuf,
@@ -1012,6 +1130,9 @@ async fn enforce_login_restrictions_with_agent_identity_authapi_base_url(
         };
 
         if let Some(message) = method_violation {
+            if auth_uses_api_key_from_env(&auth) {
+                return Err(std::io::Error::other(message));
+            }
             return logout_and_continue(
                 &config.codex_home,
                 message,
@@ -1120,11 +1241,13 @@ fn logout_all_stores(
     keyring_backend_kind: AuthKeyringBackendKind,
 ) -> std::io::Result<bool> {
     if auth_credentials_store_mode == AuthCredentialsStoreMode::Ephemeral {
-        return logout(
+        let removed_ephemeral = logout(
             codex_home,
             AuthCredentialsStoreMode::Ephemeral,
             AuthKeyringBackendKind::default(),
-        );
+        )?;
+        let removed_provider = delete_provider_auth_if_exists(codex_home)?;
+        return Ok(removed_ephemeral || removed_provider);
     }
     let removed_ephemeral = logout(
         codex_home,
@@ -1136,7 +1259,8 @@ fn logout_all_stores(
         auth_credentials_store_mode,
         keyring_backend_kind,
     )?;
-    Ok(removed_ephemeral || removed_managed)
+    let removed_provider = delete_provider_auth_if_exists(codex_home)?;
+    Ok(removed_ephemeral || removed_managed || removed_provider)
 }
 
 async fn load_auth(
@@ -1152,7 +1276,7 @@ async fn load_auth(
     if enable_codex_api_key_env && let Some(api_key) = read_codex_api_key_from_env() {
         return Ok(Some(CodexAuth::from_api_key(api_key.as_str())));
     }
-    if let Some(api_key) = read_ambient_api_key_from_env() {
+    if enable_codex_api_key_env && let Some(api_key) = read_ambient_api_key_from_env() {
         return Ok(Some(CodexAuth::from_api_key(api_key.as_str())));
     }
 
@@ -1163,7 +1287,9 @@ async fn load_auth(
         AuthCredentialsStoreMode::Ephemeral,
         AuthKeyringBackendKind::default(),
     );
-    if let Some(auth_dot_json) = ephemeral_storage.load()? {
+    if let Some(auth_dot_json) = ephemeral_storage.load()?
+        && auth_dot_json.has_primary_auth_material()
+    {
         let auth = CodexAuth::from_auth_dot_json(
             codex_home,
             auth_dot_json,
@@ -1213,6 +1339,9 @@ async fn load_auth(
         Some(auth) => auth,
         None => return Ok(None),
     };
+    if !auth_dot_json.has_primary_auth_material() {
+        return Ok(None);
+    }
 
     let auth = CodexAuth::from_auth_dot_json(
         codex_home,
@@ -1416,6 +1545,18 @@ impl AuthDotJson {
             personal_access_token: None,
             bedrock_api_key: None,
         })
+    }
+
+    fn has_primary_auth_material(&self) -> bool {
+        self.auth_mode.is_some()
+            || self.openai_api_key.is_some()
+            || self.tokens.is_some()
+            || self
+                .agent_identity
+                .as_ref()
+                .is_some_and(AgentIdentityStorage::has_auth_material)
+            || self.personal_access_token.is_some()
+            || self.bedrock_api_key.is_some()
     }
 
     fn from_external_access_token(
@@ -2382,6 +2523,15 @@ impl AuthManager {
             return Some(AuthMode::ApiKey);
         }
         self.auth_cached().as_ref().map(CodexAuth::auth_mode)
+    }
+
+    pub fn provider_api_key(&self, provider_key_id: &str) -> std::io::Result<Option<String>> {
+        provider_api_key_from_auth_storage(
+            &self.codex_home,
+            provider_key_id,
+            self.auth_credentials_store_mode,
+            self.keyring_backend_kind,
+        )
     }
 
     pub fn current_auth_uses_codex_backend(&self) -> bool {

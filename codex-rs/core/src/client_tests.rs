@@ -200,6 +200,7 @@ fn chat_completions_wraps_freeform_tools_as_functions() {
             },
         })],
         false,
+        false,
     )
     .expect("chat tools");
 
@@ -209,13 +210,13 @@ fn chat_completions_wraps_freeform_tools_as_functions() {
             "type": "function",
             "function": {
                 "name": "apply_patch",
-                "description": "Apply a patch Pass the raw freeform input in the `input` field.",
+                "description": "Use this tool to edit files by applying a patch. Pass the raw patch text in the `input` field. The `input` value must begin with `*** Begin Patch` and end with `*** End Patch`; do not put JSON, shell commands, or heredocs inside `input`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "input": {
                             "type": "string",
-                            "description": "Raw apply_patch input. Do not JSON-encode this field's contents.",
+                            "description": "Raw apply_patch input. Put the tool payload directly in this string; do not nest JSON, shell commands, or heredocs inside it.",
                         },
                     },
                     "required": ["input"],
@@ -257,6 +258,7 @@ fn ambient_chat_completions_strips_strict_from_tools() {
     let tools = super::create_tools_json_for_chat_completions(
         &[freeform, function],
         /*strip_strict*/ true,
+        /*zai_native_web_search*/ false,
     )
     .expect("chat tools");
 
@@ -279,6 +281,47 @@ fn ambient_chat_completions_strips_strict_from_tools() {
             .and_then(|value| value.as_bool()),
         Some(false)
     );
+}
+
+#[test]
+fn zai_chat_completions_serializes_native_web_search_tool() {
+    let tools = super::create_tools_json_for_chat_completions(
+        &[ToolSpec::WebSearch {
+            external_web_access: Some(true),
+            index_gated_web_access: None,
+            filters: None,
+            user_location: None,
+            search_context_size: None,
+            search_content_types: None,
+        }],
+        /*strip_strict*/ true,
+        /*zai_native_web_search*/ true,
+    )
+    .expect("chat tools");
+
+    assert_eq!(tools.len(), 1);
+    let tool = &tools[0];
+    assert_eq!(
+        tool.pointer("/type").and_then(|value| value.as_str()),
+        Some("web_search")
+    );
+    assert_eq!(
+        tool.pointer("/web_search/enable")
+            .and_then(|value| value.as_str()),
+        Some("True")
+    );
+    assert_eq!(
+        tool.pointer("/web_search/search_result")
+            .and_then(|value| value.as_str()),
+        Some("True")
+    );
+    let search_prompt = tool
+        .pointer("/web_search/search_prompt")
+        .and_then(|value| value.as_str())
+        .expect("search_prompt");
+    assert!(search_prompt.contains("{{search_result}}"));
+    assert!(search_prompt.contains("provider-native web_search"));
+    assert!(search_prompt.contains("Do not say you cannot browse"));
 }
 
 #[test]
@@ -510,6 +553,132 @@ fn ambient_chat_completions_request_uses_zai_reasoning_fields() {
     assert_eq!(deep.enable_thinking, Some(true));
     assert_eq!(deep.emit_usage, Some(true));
     assert_eq!(deep.reasoning_effort.as_deref(), Some("max"));
+}
+
+#[test]
+fn zai_chat_completions_preserves_function_tools_when_web_search_is_available() {
+    let provider_info = ModelProviderInfo::create_zai_provider();
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        provider_info,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*item_ids_enabled*/ false,
+        /*attestation_provider*/ None,
+    );
+    let tools = vec![
+        ToolSpec::Function(ResponsesApiTool {
+            name: "exec_command".to_string(),
+            description: "Run a command.".to_string(),
+            strict: true,
+            defer_loading: None,
+            parameters: JsonSchema::object(
+                BTreeMap::from([(
+                    "cmd".to_string(),
+                    JsonSchema::string(Some("Command to run.".to_string())),
+                )]),
+                Some(vec!["cmd".to_string()]),
+                Some(false.into()),
+            ),
+            output_schema: None,
+        }),
+        ToolSpec::WebSearch {
+            external_web_access: Some(true),
+            index_gated_web_access: None,
+            filters: None,
+            user_location: None,
+            search_context_size: None,
+            search_content_types: None,
+        },
+    ];
+    let model_info = test_ambient_model_info();
+
+    let mixed_prompt = super::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Run pwd.".to_string(),
+            }],
+            phase: None,
+            metadata: None,
+        }],
+        tools: tools.clone(),
+        ..Default::default()
+    };
+    let mixed_request = client
+        .build_chat_completions_request(&mixed_prompt, &model_info, None)
+        .expect("mixed request");
+    assert_eq!(
+        mixed_request
+            .tools
+            .iter()
+            .map(|tool| {
+                (
+                    tool.get("type").and_then(serde_json::Value::as_str),
+                    tool.pointer("/function/name")
+                        .and_then(serde_json::Value::as_str),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![(Some("function"), Some("exec_command"))]
+    );
+    assert_eq!(
+        mixed_request
+            .messages
+            .iter()
+            .filter(|message| message.role == "system")
+            .count(),
+        1,
+        "Z.AI mixed-tool request shaping must not inject prompt guidance: {:?}",
+        mixed_request.messages
+    );
+
+    let search_only_prompt = super::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Use web search for Z.AI docs".to_string(),
+            }],
+            phase: None,
+            metadata: None,
+        }],
+        tools: vec![ToolSpec::WebSearch {
+            external_web_access: Some(true),
+            index_gated_web_access: None,
+            filters: None,
+            user_location: None,
+            search_context_size: None,
+            search_content_types: None,
+        }],
+        ..Default::default()
+    };
+    let search_only_request = client
+        .build_chat_completions_request(&search_only_prompt, &model_info, None)
+        .expect("search-only request");
+    assert_eq!(
+        search_only_request
+            .tools
+            .iter()
+            .map(|tool| tool.get("type").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>(),
+        vec![Some("web_search")]
+    );
+    assert_eq!(
+        search_only_request
+            .messages
+            .iter()
+            .filter(|message| message.role == "system")
+            .count(),
+        1,
+        "Z.AI web search request shaping must not inject prompt guidance: {:?}",
+        search_only_request.messages
+    );
 }
 
 #[derive(Default)]

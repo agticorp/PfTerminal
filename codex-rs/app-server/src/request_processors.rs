@@ -366,6 +366,7 @@ use codex_login::ShutdownHandle;
 use codex_login::auth::login_with_chatgpt_auth_tokens;
 use codex_login::complete_device_code_login;
 use codex_login::login_with_api_key;
+use codex_login::login_with_provider_api_key;
 use codex_login::oauth_client_id;
 use codex_login::request_device_code;
 use codex_login::run_login_server;

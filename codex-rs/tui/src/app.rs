@@ -696,7 +696,7 @@ fn session_start_error(
 fn archived_session_guidance(err: &color_eyre::eyre::Report) -> Option<String> {
     let err = err.to_string();
     let message = &err[err.find("session ")?..];
-    if !message.contains(" is archived. Run `codex unarchive ") {
+    if !message.contains(" is archived. Run `pfterminal unarchive ") {
         return None;
     }
     let message = message
@@ -999,7 +999,7 @@ impl App {
             color_eyre::eyre::eyre!(
                 "Invalid `tui.keymap` configuration: {err}\n\
 Fix the config and retry.\n\
-See the Codex keymap documentation for supported actions and examples."
+See the PFTerminal keymap documentation for supported actions and examples."
             )
         })?;
         #[cfg(not(debug_assertions))]

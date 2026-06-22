@@ -290,8 +290,11 @@ fn spec_for_model_request(
 #[instrument(level = "trace", skip_all)]
 fn hosted_model_tool_specs(context: &CoreToolPlanContext<'_>) -> Vec<ToolSpec> {
     let turn_context = context.turn_context;
-    // Responses Lite accepts schemas for client-executed tools, not hosted Responses tools.
-    if turn_context.model_info.use_responses_lite {
+    // Responses Lite accepts schemas for client-executed tools, not hosted
+    // Responses tools. Z.AI is Chat Completions-based and serializes its
+    // provider-native web_search object from ToolSpec::WebSearch later.
+    let is_zai_provider = turn_context.provider.info().is_zai();
+    if turn_context.model_info.use_responses_lite && !is_zai_provider {
         return Vec::new();
     }
 
@@ -316,6 +319,10 @@ fn hosted_model_tool_specs(context: &CoreToolPlanContext<'_>) -> Vec<ToolSpec> {
     }) {
         specs.push(hosted_web_search_tool);
     }
+    if turn_context.model_info.use_responses_lite {
+        return specs;
+    }
+
     // TODO: Remove hosted image generation once the standalone extension is ready.
     if image_generation_tool_enabled(turn_context)
         && !standalone_image_generation_available(turn_context, context.extension_tool_executors)

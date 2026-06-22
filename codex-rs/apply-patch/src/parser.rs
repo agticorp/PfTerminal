@@ -16,9 +16,10 @@
 //! add_line: "+" /(.+)/ LF -> line
 //!
 //! change_move: "*** Move to: " filename LF
-//! change: (change_context | change_line)+ eof_line?
+//! change: (change_context | change_line | no_newline_marker)+ eof_line?
 //! change_context: ("@@" | "@@ " /(.+)/) LF
 //! change_line: ("+" | "-" | " ") /(.+)/ LF
+//! no_newline_marker: "\\ No newline at end of file" LF
 //! eof_line: "*** End of File" LF
 //!
 //! The parser below is a little more lenient than the explicit spec and allows for
@@ -402,6 +403,32 @@ fn test_parse_patch() {
                 change_context: None,
                 old_lines: vec!["import foo".to_string()],
                 new_lines: vec!["import foo".to_string(), "bar".to_string()],
+                is_end_of_file: false,
+            }],
+        }]
+    );
+
+    assert_eq!(
+        parse_patch_text(
+            r#"*** Begin Patch
+*** Update File: file3.py
+@@
+-old
+\ No newline at end of file
++new
+\ No newline at end of file
+*** End Patch"#,
+            ParseMode::Strict
+        )
+        .unwrap()
+        .hunks,
+        vec![UpdateFile {
+            path: PathBuf::from("file3.py"),
+            move_path: None,
+            chunks: vec![UpdateFileChunk {
+                change_context: None,
+                old_lines: vec!["old".to_string()],
+                new_lines: vec!["new".to_string()],
                 is_end_of_file: false,
             }],
         }]

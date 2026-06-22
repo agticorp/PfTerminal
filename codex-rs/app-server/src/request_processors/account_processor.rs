@@ -237,6 +237,10 @@ impl AccountRequestProcessor {
                 self.login_api_key_v2(request_id, LoginApiKeyParams { api_key })
                     .await;
             }
+            LoginAccountParams::ProviderApiKey { provider, api_key } => {
+                self.login_provider_api_key_v2(request_id, provider, api_key)
+                    .await;
+            }
             LoginAccountParams::Chatgpt {
                 codex_streamlined_login,
             } => {
@@ -311,6 +315,67 @@ impl AccountRequestProcessor {
     async fn login_api_key_v2(&self, request_id: ConnectionRequestId, params: LoginApiKeyParams) {
         let result = self
             .login_api_key_common(&params)
+            .await
+            .map(|()| LoginAccountResponse::ApiKey {});
+        let logged_in = result.is_ok();
+        self.outgoing.send_result(request_id, result).await;
+
+        if logged_in {
+            self.send_login_success_notifications(/*login_id*/ None)
+                .await;
+        }
+    }
+
+    async fn login_provider_api_key_common(
+        &self,
+        provider: &str,
+        api_key: &str,
+    ) -> std::result::Result<(), JSONRPCErrorError> {
+        if self.auth_manager.is_external_chatgpt_auth_active() {
+            return Err(self.external_auth_active_error());
+        }
+
+        let provider_info = self.config.model_providers.get(provider).ok_or_else(|| {
+            invalid_request(format!("Model provider `{provider}` is not configured."))
+        })?;
+        let Some(provider_key_id) = provider_info.env_key.as_deref() else {
+            return Err(invalid_request(format!(
+                "Model provider `{provider}` does not accept provider API key login."
+            )));
+        };
+
+        {
+            let mut guard = self.active_login.lock().await;
+            if let Some(active) = guard.take() {
+                drop(active);
+            }
+        }
+
+        match login_with_provider_api_key(
+            &self.config.codex_home,
+            provider_key_id,
+            api_key,
+            self.config.cli_auth_credentials_store_mode,
+            self.config.auth_keyring_backend_kind(),
+        ) {
+            Ok(()) => {
+                self.auth_manager.reload().await;
+                Ok(())
+            }
+            Err(err) => Err(internal_error(format!(
+                "failed to save provider API key: {err}"
+            ))),
+        }
+    }
+
+    async fn login_provider_api_key_v2(
+        &self,
+        request_id: ConnectionRequestId,
+        provider: String,
+        api_key: String,
+    ) {
+        let result = self
+            .login_provider_api_key_common(&provider, &api_key)
             .await
             .map(|()| LoginAccountResponse::ApiKey {});
         let logged_in = result.is_ok();

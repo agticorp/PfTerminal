@@ -1372,7 +1372,7 @@ async fn run_ratatui_app(
         !uses_remote_workspace && should_show_trust_screen(&initial_config);
     #[cfg(target_os = "windows")]
     let mut trust_decision_was_made = false;
-    let login_status = if initial_config.model_provider.requires_openai_auth {
+    let login_status = if provider_requires_login(&initial_config) {
         let Some(app_server) = app_server.as_mut() else {
             unreachable!("app server should exist when auth is required");
         };
@@ -1465,7 +1465,7 @@ async fn run_ratatui_app(
             resume_hint: None,
             update_action: None,
             exit_reason: ExitReason::Fatal(format!(
-                "No saved session found with ID {id_str}. Run `codex {action}` without an ID to choose from existing sessions."
+                "No saved session found with ID {id_str}. Run `pfterminal {action}` without an ID to choose from existing sessions."
             )),
         })
     };
@@ -1868,7 +1868,7 @@ async fn get_login_status(
     app_server: &mut AppServerSession,
     config: &Config,
 ) -> color_eyre::Result<LoginStatus> {
-    if !config.model_provider.requires_openai_auth {
+    if !provider_requires_login(config) {
         return Ok(LoginStatus::NotAuthenticated);
     }
 
@@ -1984,13 +1984,17 @@ fn should_show_onboarding(
 }
 
 fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool {
-    // Only show the login screen for providers that actually require OpenAI auth
-    // (OpenAI or equivalents). For OSS/other providers, skip login entirely.
-    if !config.model_provider.requires_openai_auth {
+    // Only show the login screen for providers that require OpenAI auth or an
+    // explicit provider API key. For OSS/other providers, skip login entirely.
+    if !provider_requires_login(config) {
         return false;
     }
 
     login_status == LoginStatus::NotAuthenticated
+}
+
+fn provider_requires_login(config: &Config) -> bool {
+    config.model_provider.requires_openai_auth || config.model_provider.env_key.is_some()
 }
 
 #[cfg(test)]

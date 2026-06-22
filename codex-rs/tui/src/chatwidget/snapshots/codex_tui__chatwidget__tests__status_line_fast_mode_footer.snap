@@ -1,9 +1,10 @@
 ---
 source: tui/src/chatwidget/tests/status_and_layout.rs
+assertion_line: 2298
 expression: normalized_backend_snapshot(terminal.backend())
 ---
 "                                                                                "
 "                                                                                "
-"› Ask Codex to do anything                                                      "
+"› Ask PFTerminal to do anything                                                 "
 "                                                                                "
-"  Fast on                                                                       "
+"  Fast off                                                                      "
