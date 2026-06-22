@@ -250,11 +250,16 @@ fn check_start_and_end_lines_strict(
         (Some(first), Some(last)) if first == BEGIN_PATCH_MARKER && last == END_PATCH_MARKER => {
             Ok(())
         }
-        (Some(first), _) if first != BEGIN_PATCH_MARKER => Err(InvalidPatchError(String::from(
-            "The first line of the patch must be '*** Begin Patch'",
+        (Some(first), _) if first != BEGIN_PATCH_MARKER => Err(InvalidPatchError(format!(
+            "The first line of the patch must be '*** Begin Patch' but got: '{first}'"
         ))),
-        _ => Err(InvalidPatchError(String::from(
-            "The last line of the patch must be '*** End Patch'",
+        (Some(_), None) | (None, _) => Err(InvalidPatchError(String::from(
+            "The patch is incomplete; it must start with '*** Begin Patch' and end with '*** End Patch'",
+        ))),
+        (Some(_), Some(last)) => Err(InvalidPatchError(format!(
+            "The last line of the patch must be '*** End Patch' but got: '{last}'. \
+             Note: file directives like 'Update File:', 'Add File:', and the end marker 'End Patch' \
+             must be on the same line as '***', not on a separate line."
         ))),
     }
 }
@@ -264,14 +269,42 @@ fn test_parse_patch() {
     assert_eq!(
         parse_patch_text("bad", ParseMode::Strict),
         Err(InvalidPatchError(
-            "The first line of the patch must be '*** Begin Patch'".to_string()
+            "The first line of the patch must be '*** Begin Patch' but got: 'bad'".to_string()
         ))
     );
     assert_eq!(
         parse_patch_text("*** Begin Patch\nbad", ParseMode::Strict),
         Err(InvalidPatchError(
-            "The last line of the patch must be '*** End Patch'".to_string()
+            "The last line of the patch must be '*** End Patch' but got: 'bad'. Note: file directives like 'Update File:', 'Add File:', and the end marker 'End Patch' must be on the same line as '***', not on a separate line.".to_string()
         ))
+    );
+
+    // A common error: putting the end marker on two lines instead of one.
+    assert_eq!(
+        parse_patch_text(
+            "*** Begin Patch\n*** Update File: foo\n@@\n-old\n+new\n***\nEnd Patch",
+            ParseMode::Strict
+        ),
+        Err(InvalidPatchError(
+            "The last line of the patch must be '*** End Patch' but got: 'End Patch'. \
+             Note: file directives like 'Update File:', 'Add File:', and the end marker 'End Patch' \
+             must be on the same line as '***', not on a separate line."
+                .to_string()
+        ))
+    );
+
+    // Putting a bare separator line where a hunk header is expected.
+    assert_eq!(
+        parse_patch_text(
+            "*** Begin Patch\n***\nUpdate File: foo\n@@\n-old\n+new\n*** End Patch",
+            ParseMode::Strict
+        ),
+        Err(InvalidHunkError {
+            message: "'***' is not a valid hunk header. Valid hunk headers: \
+             '*** Add File: {path}', '*** Delete File: {path}', '*** Update File: {path}'"
+                .to_string(),
+            line_number: 2,
+        })
     );
 
     assert_eq!(
@@ -578,13 +611,16 @@ fn test_parse_patch_lenient() {
             is_end_of_file: false,
         }],
     }];
-    let expected_error =
-        InvalidPatchError("The first line of the patch must be '*** Begin Patch'".to_string());
+    let expected_first_line_error = |first_line: &str| {
+        InvalidPatchError(format!(
+            "The first line of the patch must be '*** Begin Patch' but got: '{first_line}'"
+        ))
+    };
 
     let patch_text_in_heredoc = format!("<<EOF\n{patch_text}\nEOF\n");
     assert_eq!(
         parse_patch_text(&patch_text_in_heredoc, ParseMode::Strict),
-        Err(expected_error.clone())
+        Err(expected_first_line_error("<<EOF"))
     );
     assert_eq!(
         parse_patch_text(&patch_text_in_heredoc, ParseMode::Lenient),
@@ -599,7 +635,7 @@ fn test_parse_patch_lenient() {
     let patch_text_in_single_quoted_heredoc = format!("<<'EOF'\n{patch_text}\nEOF\n");
     assert_eq!(
         parse_patch_text(&patch_text_in_single_quoted_heredoc, ParseMode::Strict),
-        Err(expected_error.clone())
+        Err(expected_first_line_error("<<'EOF'"))
     );
     assert_eq!(
         parse_patch_text(&patch_text_in_single_quoted_heredoc, ParseMode::Lenient),
@@ -614,7 +650,7 @@ fn test_parse_patch_lenient() {
     let patch_text_in_double_quoted_heredoc = format!("<<\"EOF\"\n{patch_text}\nEOF\n");
     assert_eq!(
         parse_patch_text(&patch_text_in_double_quoted_heredoc, ParseMode::Strict),
-        Err(expected_error.clone())
+        Err(expected_first_line_error("<<\"EOF\""))
     );
     assert_eq!(
         parse_patch_text(&patch_text_in_double_quoted_heredoc, ParseMode::Lenient),
@@ -629,25 +665,25 @@ fn test_parse_patch_lenient() {
     let patch_text_in_mismatched_quotes_heredoc = format!("<<\"EOF'\n{patch_text}\nEOF\n");
     assert_eq!(
         parse_patch_text(&patch_text_in_mismatched_quotes_heredoc, ParseMode::Strict),
-        Err(expected_error.clone())
+        Err(expected_first_line_error("<<\"EOF'"))
     );
     assert_eq!(
         parse_patch_text(&patch_text_in_mismatched_quotes_heredoc, ParseMode::Lenient),
-        Err(expected_error.clone())
+        Err(expected_first_line_error("<<\"EOF'"))
     );
 
     let patch_text_with_missing_closing_heredoc =
         "<<EOF\n*** Begin Patch\n*** Update File: file2.py\nEOF\n".to_string();
     assert_eq!(
         parse_patch_text(&patch_text_with_missing_closing_heredoc, ParseMode::Strict),
-        Err(expected_error)
+        Err(expected_first_line_error("<<EOF"))
     );
     assert_eq!(
-        parse_patch_text(&patch_text_with_missing_closing_heredoc, ParseMode::Lenient),
-        Err(InvalidPatchError(
-            "The last line of the patch must be '*** End Patch'".to_string()
-        ))
-    );
+       parse_patch_text(&patch_text_with_missing_closing_heredoc, ParseMode::Lenient),
+       Err(InvalidPatchError(
+            "The last line of the patch must be '*** End Patch' but got: '*** Update File: file2.py'. Note: file directives like 'Update File:', 'Add File:', and the end marker 'End Patch' must be on the same line as '***', not on a separate line.".to_string()
+       ))
+   );
 }
 
 #[test]
