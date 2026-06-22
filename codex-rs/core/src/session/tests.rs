@@ -28,7 +28,9 @@ use codex_core_skills::HostSkillsSnapshot;
 use core_test_support::test_codex::local_selections;
 
 use codex_features::Feature;
+use codex_login::AMBIENT_API_KEY_ENV_VAR;
 use codex_login::CodexAuth;
+use codex_login::login_with_provider_api_key;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
@@ -3773,6 +3775,22 @@ fn text_block(s: &str) -> serde_json::Value {
     })
 }
 
+/// Writes a dummy Ambient provider API key so the default Ambient provider can
+/// authenticate in tests. The default Ambient provider resolves auth from
+/// `provider_auth.json` (not from the auth manager's cached `CodexAuth`), so
+/// tests that trigger model requests (e.g. guardian review subagents) need this
+/// file to exist on disk.
+fn write_test_provider_auth(codex_home: &Path) {
+    login_with_provider_api_key(
+        codex_home,
+        AMBIENT_API_KEY_ENV_VAR,
+        "test-ambient-api-key",
+        codex_login::AuthCredentialsStoreMode::File,
+        codex_login::AuthKeyringBackendKind::default(),
+    )
+    .expect("write test provider API key");
+}
+
 async fn build_test_config(codex_home: &Path) -> Config {
     ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.to_path_buf())
@@ -4870,7 +4888,10 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
     config.zsh_path = None;
     let config = Arc::new(config);
 
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let auth_manager = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("Test API Key"),
+        config.codex_home.to_path_buf(),
+    );
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
         auth_manager.clone(),
@@ -4972,13 +4993,15 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
 }
 
 // todo: use online model info
-pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+async fn make_session_and_context_for_home(codex_home: &Path) -> (Session, TurnContext) {
     let (tx_event, _rx_event) = async_channel::unbounded();
-    let codex_home = tempfile::tempdir().expect("create temp dir");
-    let config = build_test_config(codex_home.path()).await;
+    let config = build_test_config(codex_home).await;
     let config = Arc::new(config);
     let thread_id = ThreadId::default();
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let auth_manager = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("Test API Key"),
+        config.codex_home.to_path_buf(),
+    );
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
         auth_manager.clone(),
@@ -5204,6 +5227,20 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     (session, turn_context)
 }
 
+pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    make_session_and_context_for_home(codex_home.path()).await
+}
+
+pub(crate) type ProviderAuthSessionContext = (Session, TurnContext, tempfile::TempDir);
+
+pub(crate) async fn make_session_and_context_with_provider_auth() -> ProviderAuthSessionContext {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    write_test_provider_auth(codex_home.path());
+    let (session, turn_context) = make_session_and_context_for_home(codex_home.path()).await;
+    (session, turn_context, codex_home)
+}
+
 async fn make_session_with_config(
     mutator: impl FnOnce(&mut Config),
 ) -> anyhow::Result<Arc<Session>> {
@@ -5228,7 +5265,10 @@ async fn make_session_with_config_and_rx(
     let mut config = build_test_config(codex_home.path()).await;
     mutator(&mut config);
     let config = Arc::new(config);
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let auth_manager = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("Test API Key"),
+        config.codex_home.to_path_buf(),
+    );
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
         auth_manager.clone(),
@@ -5335,7 +5375,10 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
     let mut config = build_test_config(codex_home.path()).await;
     config.ephemeral = true;
     let config = Arc::new(config);
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let auth_manager = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("Test API Key"),
+        config.codex_home.to_path_buf(),
+    );
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
         auth_manager.clone(),
@@ -7038,7 +7081,8 @@ where
     let state_db = None;
     let config = Arc::new(config);
     let thread_id = ThreadId::default();
-    let auth_manager = AuthManager::from_auth_for_testing(auth);
+    let auth_manager =
+        AuthManager::from_auth_for_testing_with_home(auth, config.codex_home.to_path_buf());
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
         auth_manager.clone(),
