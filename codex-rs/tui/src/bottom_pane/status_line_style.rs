@@ -25,6 +25,7 @@ enum StatusLineAccent {
     Mode,
     Thread,
     Progress,
+    Brand,
 }
 
 impl StatusLineAccent {
@@ -51,6 +52,7 @@ impl StatusLineAccent {
             StatusLineItem::ApprovalMode => Self::Mode,
             StatusLineItem::ThreadTitle => Self::Thread,
             StatusLineItem::TaskProgress => Self::Progress,
+            StatusLineItem::Brand => Self::Brand,
         }
     }
 
@@ -66,6 +68,7 @@ impl StatusLineAccent {
             Self::Mode => &["storage.modifier", "keyword.operator"],
             Self::Thread => &["markup.heading", "entity.name.section"],
             Self::Progress => &["markup.inserted", "constant.numeric"],
+            Self::Brand => &["entity.name.section", "markup.heading"],
         }
     }
 
@@ -73,7 +76,7 @@ impl StatusLineAccent {
         match self {
             Self::Model | Self::State | Self::Metadata | Self::Mode => Style::default().cyan(),
             Self::Path | Self::Usage | Self::Progress => Style::default().green(),
-            Self::Branch | Self::Limit | Self::Thread => Style::default().magenta(),
+            Self::Branch | Self::Limit | Self::Thread | Self::Brand => Style::default().magenta(),
         }
     }
 }

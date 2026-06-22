@@ -2097,6 +2097,27 @@ async fn status_line_invalid_items_warn_once() {
 }
 
 #[tokio::test]
+async fn default_status_line_includes_product_brand() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    assert_eq!(
+        chat.configured_status_line_items(),
+        vec![
+            "model-with-reasoning".to_string(),
+            "current-dir".to_string(),
+            "brand".to_string(),
+        ]
+    );
+
+    chat.refresh_status_line();
+
+    assert_eq!(
+        status_line_text(&chat),
+        Some("zai-org/GLM-5.2-FP8 standard · /tmp/project · Post Fiat Terminal".to_string())
+    );
+}
+
+#[tokio::test]
 async fn status_line_context_used_renders_labeled_percent() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
