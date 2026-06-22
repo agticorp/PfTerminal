@@ -156,7 +156,7 @@ jobs:
 
   argument_comment_lint_prebuilt:
     name: Argument comment lint - ${{ matrix.name }}
-    runs-on: ${{ matrix.runs_on || matrix.runner }}
+    runs-on: ${{ github.event_name == 'pull_request' && matrix.pr == false && 'ubuntu-24.04' || matrix.runner }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     needs: changed
     environment:
@@ -169,14 +169,24 @@ jobs:
           - name: Linux
             runner: ubuntu-24.04
             timeout_minutes: 30
+            pr: true
           - name: macOS
             runner: macos-15-xlarge
             timeout_minutes: 30
+            pr: false
           - name: Windows
             runner: windows-2022
             timeout_minutes: 30
+            pr: false
     steps:
+      - name: Skip unavailable PR platform runner
+        if: ${{ github.event_name == 'pull_request' && matrix.pr == false }}
+        shell: bash
+        run: |
+          echo "Skipping ${{ matrix.name }} argument-comment-lint on pull_request because this repository's macOS/Windows billing is unavailable."
+
       - name: Check whether argument comment lint should run
+        if: ${{ github.event_name != 'pull_request' || matrix.pr != false }}
         id: argument_comment_lint_gate
         shell: bash
         env:
@@ -191,12 +201,12 @@ jobs:
           echo "No argument-comment-lint relevant changes."
           echo "run=false" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        if: ${{ steps.argument_comment_lint_gate.outputs.run == 'true' }}
+        if: ${{ (github.event_name != 'pull_request' || matrix.pr != false) && steps.argument_comment_lint_gate.outputs.run == 'true' }}
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Run argument comment lint on codex-rs via Bazel
-        if: ${{ steps.argument_comment_lint_gate.outputs.run == 'true' }}
+        if: ${{ (github.event_name != 'pull_request' || matrix.pr != false) && steps.argument_comment_lint_gate.outputs.run == 'true' }}
         uses: ./.github/actions/run-argument-comment-lint
         with:
           target: ${{ runner.os }}
