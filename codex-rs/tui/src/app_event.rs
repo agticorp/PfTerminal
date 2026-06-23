@@ -741,6 +741,11 @@ pub(crate) enum AppEvent {
     /// Open the masked vault credential-entry overlay.
     OpenVaultCredentialAdd,
 
+    /// Open the per-credential vault action menu.
+    OpenVaultCredentialActions {
+        label: String,
+    },
+
     /// Copy a vault credential secret to the clipboard without writing it to history.
     OpenVaultCopySecret {
         label: String,

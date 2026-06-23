@@ -936,6 +936,9 @@ impl App {
             AppEvent::OpenVaultCredentialAdd => {
                 self.chat_widget.open_vault_credential_add();
             }
+            AppEvent::OpenVaultCredentialActions { label } => {
+                self.chat_widget.open_vault_credential_actions(label);
+            }
             AppEvent::OpenVaultCopySecret { label } => {
                 self.chat_widget.copy_vault_secret_to_clipboard(label);
             }
