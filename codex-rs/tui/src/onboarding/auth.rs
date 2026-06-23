@@ -591,7 +591,11 @@ impl AuthModeWidget {
                 SignInOption::ProviderApiKey(provider_index) => {
                     if let Some(provider) = self.api_key_provider_options.get(provider_index) {
                         let description = format!("Use a key stored as {}", provider.env_var);
-                        lines.extend(create_mode_item(idx, option, &provider.name, &description));
+                        let text =
+                            crate::onboarding::onboarding_screen::provider_api_key_display_name(
+                                provider,
+                            );
+                        lines.extend(create_mode_item(idx, option, &text, &description));
                     }
                 }
             }
@@ -1286,8 +1290,14 @@ mod tests {
         widget.render_pick_mode(area, &mut buf);
         let rendered = buffer_text(&buf, area);
 
-        assert!(rendered.contains("Ambient"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Z.AI"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("Provider: Ambient API Key"),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Provider: Z.AI API Key"),
+            "rendered:\n{rendered}"
+        );
         assert!(!rendered.contains("ChatGPT"), "rendered:\n{rendered}");
         assert!(!rendered.contains("Device Code"), "rendered:\n{rendered}");
     }

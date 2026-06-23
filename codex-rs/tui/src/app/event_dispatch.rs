@@ -933,8 +933,18 @@ impl App {
             AppEvent::OpenAllModelsPopup { models } => {
                 self.chat_widget.open_all_models_popup(models);
             }
+            AppEvent::OpenProviderApiKeyAdd {
+                provider_name,
+                env_key,
+            } => {
+                self.chat_widget
+                    .open_provider_api_key_add(provider_name, env_key);
+            }
             AppEvent::OpenVaultCredentialAdd => {
                 self.chat_widget.open_vault_credential_add();
+            }
+            AppEvent::OpenVaultCredentialsList => {
+                self.chat_widget.open_vault_credentials_list();
             }
             AppEvent::OpenVaultCredentialActions { label } => {
                 self.chat_widget.open_vault_credential_actions(label);

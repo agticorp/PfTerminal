@@ -483,6 +483,9 @@ impl ChatWidget {
                 // path and still render command output.
                 self.open_vault_menu();
             }
+            SlashCommand::Providers => {
+                self.open_provider_credentials_menu();
+            }
             SlashCommand::Mcp => {
                 self.add_mcp_output(McpServerStatusDetail::ToolsAndAuthOnly);
             }
@@ -1079,6 +1082,7 @@ impl ChatWidget {
             | SlashCommand::Mcp
             | SlashCommand::Apps
             | SlashCommand::Plugins
+            | SlashCommand::Providers
             | SlashCommand::Rollout
             | SlashCommand::Vault
             | SlashCommand::Copy

@@ -738,8 +738,17 @@ pub(crate) enum AppEvent {
         models: Vec<ModelPreset>,
     },
 
+    /// Open masked entry for a provider API key.
+    OpenProviderApiKeyAdd {
+        provider_name: String,
+        env_key: String,
+    },
+
     /// Open the masked vault credential-entry overlay.
     OpenVaultCredentialAdd,
+
+    /// Open the vault credential list.
+    OpenVaultCredentialsList,
 
     /// Open the per-credential vault action menu.
     OpenVaultCredentialActions {

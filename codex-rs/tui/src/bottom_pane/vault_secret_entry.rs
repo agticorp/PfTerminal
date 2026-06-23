@@ -38,6 +38,7 @@ use super::textarea::TextAreaState;
 pub(crate) type VaultSecretSubmitted = Box<dyn FnOnce(String, String) + Send + Sync>;
 
 const MASK_CHAR: char = '•';
+const DEFAULT_TITLE: &str = "Add vault credential";
 const LABEL_PROMPT: &str = "Label (for example: ambient/prod)";
 const SECRET_PROMPT: &str = "Secret value (masked — not shown, not stored in chat)";
 
@@ -51,7 +52,11 @@ enum Field {
 /// Two-field masked secret-entry overlay (label, then secret).
 pub(crate) struct VaultSecretEntryView {
     field: Field,
+    fixed_label: bool,
+    title: String,
     label: String,
+    label_prompt: String,
+    secret_prompt: String,
     on_submit: VaultSecretSubmitted,
     textarea: TextArea,
     textarea_state: RefCell<TextAreaState>,
@@ -65,7 +70,33 @@ impl VaultSecretEntryView {
     pub(crate) fn new(on_submit: VaultSecretSubmitted) -> Self {
         Self {
             field: Field::Label,
+            fixed_label: false,
+            title: DEFAULT_TITLE.to_string(),
             label: String::new(),
+            label_prompt: LABEL_PROMPT.to_string(),
+            secret_prompt: SECRET_PROMPT.to_string(),
+            on_submit,
+            textarea: TextArea::new(),
+            textarea_state: RefCell::new(TextAreaState::default()),
+            paste_burst: PasteBurst::default(),
+            completion: None,
+        }
+    }
+
+    /// Build a one-field secret-entry view for a known label, such as a provider API key.
+    pub(crate) fn new_fixed_secret(
+        label: String,
+        title: String,
+        secret_prompt: String,
+        on_submit: VaultSecretSubmitted,
+    ) -> Self {
+        Self {
+            field: Field::Secret,
+            fixed_label: true,
+            title,
+            label,
+            label_prompt: LABEL_PROMPT.to_string(),
+            secret_prompt,
             on_submit,
             textarea: TextArea::new(),
             textarea_state: RefCell::new(TextAreaState::default()),
@@ -136,10 +167,10 @@ impl VaultSecretEntryView {
         self.textarea_state = RefCell::new(TextAreaState::default());
     }
 
-    fn active_prompt(&self) -> &'static str {
+    fn active_prompt(&self) -> &str {
         match self.field {
-            Field::Label => LABEL_PROMPT,
-            Field::Secret => SECRET_PROMPT,
+            Field::Label => &self.label_prompt,
+            Field::Secret => &self.secret_prompt,
         }
     }
 
@@ -190,7 +221,7 @@ impl Renderable for VaultSecretEntryView {
         }
 
         // Title line
-        Paragraph::new(Line::from(vec![gutter(), "Add vault credential".bold()])).render(
+        Paragraph::new(Line::from(vec![gutter(), self.title.as_str().bold()])).render(
             Rect {
                 x: area.x,
                 y: area.y,
@@ -204,6 +235,7 @@ impl Renderable for VaultSecretEntryView {
         let status_y = area.y.saturating_add(1);
         let status = match self.field {
             Field::Label => "1/2 — label",
+            Field::Secret if self.fixed_label => "API key — masked",
             Field::Secret => "2/2 — secret (masked)",
         };
         Paragraph::new(Line::from(vec![gutter(), Span::from(status).cyan()])).render(

@@ -5,6 +5,8 @@ mod rate_limit_resets;
 // Duration before a browser ChatGPT login attempt is abandoned.
 const LOGIN_CHATGPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const ACCOUNT_TOKEN_USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 10);
+const OPENROUTER_PROVIDER_ID: &str = "openrouter";
+const OPENROUTER_API_KEY_ENV_VAR: &str = "OPENROUTER_API_KEY";
 // The override is intentionally available only in debug builds, matching the login path below.
 #[cfg(debug_assertions)]
 const LOGIN_ISSUER_OVERRIDE_ENV_VAR: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
@@ -335,12 +337,19 @@ impl AccountRequestProcessor {
             return Err(self.external_auth_active_error());
         }
 
-        let provider_info = self.config.model_providers.get(provider).ok_or_else(|| {
-            invalid_request(format!("Model provider `{provider}` is not configured."))
-        })?;
-        let Some(provider_key_id) = provider_info.env_key.as_deref() else {
+        let provider_key_id = if let Some(provider_info) = self.config.model_providers.get(provider)
+        {
+            let Some(provider_key_id) = provider_info.env_key.as_deref() else {
+                return Err(invalid_request(format!(
+                    "Model provider `{provider}` does not accept provider API key login."
+                )));
+            };
+            provider_key_id
+        } else if provider == OPENROUTER_PROVIDER_ID {
+            OPENROUTER_API_KEY_ENV_VAR
+        } else {
             return Err(invalid_request(format!(
-                "Model provider `{provider}` does not accept provider API key login."
+                "Model provider `{provider}` is not configured."
             )));
         };
 

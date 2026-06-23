@@ -420,6 +420,7 @@ use self::tps::TpsEstimator;
 mod turn_lifecycle;
 mod turn_runtime;
 use self::turn_lifecycle::TurnLifecycleState;
+mod provider_credentials;
 mod usage;
 mod user_messages;
 mod vault_menu;

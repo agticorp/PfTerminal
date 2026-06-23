@@ -150,3 +150,26 @@ fn all_whitespace_secret_is_rejected() {
     assert!(capture.taken().is_none());
     assert!(!view.is_complete());
 }
+
+#[test]
+fn fixed_secret_mode_submits_known_label_without_label_step() {
+    let capture = Capture::default();
+    let mut view = VaultSecretEntryView::new_fixed_secret(
+        "provider/zai_api_key".to_string(),
+        "Add Provider: Z.AI API Key".to_string(),
+        "ZAI_API_KEY (masked)".to_string(),
+        capture.clone().callback(),
+    );
+    assert_eq!(view.field, Field::Secret);
+
+    for c in "zai-secret".chars() {
+        view.handle_key_event(char_event(c));
+    }
+    view.handle_key_event(enter_event());
+
+    assert_eq!(
+        capture.taken(),
+        Some(("provider/zai_api_key".to_string(), "zai-secret".to_string()))
+    );
+    assert!(view.is_complete());
+}

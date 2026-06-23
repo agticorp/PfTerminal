@@ -36,6 +36,7 @@ use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::CLIENT_ID_OVERRIDE_ENV_VAR;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
+use codex_login::auth::provider_api_key_from_auth_storage;
 use codex_login::login_with_api_key;
 use codex_login::login_with_bedrock_api_key;
 use codex_protocol::account::AmazonBedrockCredentialSource;
@@ -958,6 +959,49 @@ async fn login_account_api_key_succeeds_and_notifies() -> Result<()> {
     pretty_assertions::assert_eq!(payload.plan_type, None);
 
     assert!(codex_home.path().join("auth.json").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn login_account_openrouter_provider_key_succeeds_without_configured_provider() -> Result<()>
+{
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let req_id = mcp
+        .send_login_account_provider_api_key_request("openrouter", "openrouter-test-key")
+        .await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let login: LoginAccountResponse = to_response(resp)?;
+    assert_eq!(login, LoginAccountResponse::ApiKey {});
+
+    let note = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/login/completed"),
+    )
+    .await??;
+    let parsed: ServerNotification = note.try_into()?;
+    let ServerNotification::AccountLoginCompleted(payload) = parsed else {
+        bail!("unexpected notification: {parsed:?}");
+    };
+    pretty_assertions::assert_eq!(payload.success, true);
+    pretty_assertions::assert_eq!(payload.error, None);
+
+    let stored = provider_api_key_from_auth_storage(
+        codex_home.path(),
+        "OPENROUTER_API_KEY",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )?;
+    assert_eq!(stored.as_deref(), Some("openrouter-test-key"));
+
     Ok(())
 }
 

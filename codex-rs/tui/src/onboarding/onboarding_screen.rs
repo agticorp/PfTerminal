@@ -28,7 +28,9 @@ use ratatui::style::Color;
 use ratatui::widgets::Clear;
 use ratatui::widgets::WidgetRef;
 
+use codex_model_provider_info::AMBIENT_API_KEY_ENV_VAR;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
+use codex_model_provider_info::ZAI_API_KEY_ENV_VAR;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_protocol::config_types::ForcedLoginMethod;
 
@@ -105,6 +107,20 @@ struct ApiKeyEntryContext {
     has_text: bool,
 }
 
+const OPENROUTER_PROVIDER_ID: &str = "openrouter";
+const OPENROUTER_PROVIDER_NAME: &str = "OpenRouter";
+const OPENROUTER_API_KEY_ENV_VAR: &str = "OPENROUTER_API_KEY";
+
+const RECOMMENDED_PROVIDER_API_KEY_OPTIONS: &[(&str, &str, &str)] = &[
+    (AMBIENT_PROVIDER_ID, "Ambient", AMBIENT_API_KEY_ENV_VAR),
+    (ZAI_PROVIDER_ID, "Z.AI", ZAI_API_KEY_ENV_VAR),
+    (
+        OPENROUTER_PROVIDER_ID,
+        OPENROUTER_PROVIDER_NAME,
+        OPENROUTER_API_KEY_ENV_VAR,
+    ),
+];
+
 fn provider_api_key_options(config: &Config) -> Vec<ApiKeyProviderOption> {
     let mut options: Vec<ApiKeyProviderOption> = config
         .model_providers
@@ -121,6 +137,17 @@ fn provider_api_key_options(config: &Config) -> Vec<ApiKeyProviderOption> {
         })
         .collect();
 
+    for (id, name, env_var) in RECOMMENDED_PROVIDER_API_KEY_OPTIONS {
+        if options.iter().any(|option| option.env_var == *env_var) {
+            continue;
+        }
+        options.push(ApiKeyProviderOption {
+            id: (*id).to_string(),
+            name: (*name).to_string(),
+            env_var: (*env_var).to_string(),
+        });
+    }
+
     options.sort_by(|a, b| {
         provider_api_key_sort_rank(&a.id)
             .cmp(&provider_api_key_sort_rank(&b.id))
@@ -134,7 +161,17 @@ fn provider_api_key_sort_rank(provider_id: &str) -> usize {
     match provider_id {
         AMBIENT_PROVIDER_ID => 0,
         ZAI_PROVIDER_ID => 1,
-        _ => 2,
+        OPENROUTER_PROVIDER_ID => 2,
+        _ => 3,
+    }
+}
+
+pub(crate) fn provider_api_key_display_name(provider: &ApiKeyProviderOption) -> String {
+    match provider.env_var.as_str() {
+        AMBIENT_API_KEY_ENV_VAR => "Provider: Ambient API Key".to_string(),
+        ZAI_API_KEY_ENV_VAR => "Provider: Z.AI API Key".to_string(),
+        OPENROUTER_API_KEY_ENV_VAR => "Provider: OpenRouter API Key".to_string(),
+        _ => format!("Provider: {} {}", provider.name, provider.env_var),
     }
 }
 
