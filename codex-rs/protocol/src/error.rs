@@ -442,7 +442,7 @@ impl std::fmt::Display for RetryLimitReachedError {
         if self.status == StatusCode::TOO_MANY_REQUESTS {
             return write!(
                 f,
-                "rate limited by provider after retry limit ({}). Wait before continuing; immediate retry may fail again{}",
+                "rate limited by provider ({}). Wait before continuing; immediate retry may fail again{}",
                 self.status, request_id
             );
         }

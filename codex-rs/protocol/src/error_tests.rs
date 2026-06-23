@@ -199,7 +199,7 @@ fn retry_limit_429_message_tells_user_to_wait() {
 
     assert_eq!(
         err.to_string(),
-        "rate limited by provider after retry limit (429 Too Many Requests). Wait before continuing; immediate retry may fail again, request id: req-429"
+        "rate limited by provider (429 Too Many Requests). Wait before continuing; immediate retry may fail again, request id: req-429"
     );
 }
 

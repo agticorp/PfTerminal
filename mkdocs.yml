@@ -50,6 +50,7 @@ nav:
       - Overview: current-sprint/index.md
       - Credential Store: current-sprint/authentication.md
       - GLM 5.2 Tool Compatibility: current-sprint/glm-52-tool-compatibility.md
+      - Hammer Reduction Process: current-sprint/hammer-reduction-process.md
   - Integrations:
       - Overview: integrations/index.md
       - Ambient: integrations/ambient.md

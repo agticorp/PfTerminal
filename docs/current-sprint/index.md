@@ -16,6 +16,7 @@ credentials, created automatically on login/startup and usable through
 | Provider key path | Codex already has provider API-key storage, but it is not a general credential store. | `codex-rs/login/src/auth/manager.rs` |
 | Vault/auth design | Active sprint spec defines automatic vault initialization, secure credential entry, labels, lock/unlock behavior, and provider-key use by label. | [Credential Store](authentication.md) |
 | GLM 5.2 tool compatibility | Current sprint logs and OpenCode source show GLM-class models should be routed to structured edit/write tools instead of forced through strict `apply_patch`. | [GLM 5.2 Tool Compatibility](glm-52-tool-compatibility.md) |
+| Hammer reduction | Current sprint study compares PFTerminal/Codex, OpenCode, Hermes Agent, Kilo Code, and Cline to reduce repeated large provider requests, 429 loops, and context bloat. | [Hammer Reduction Process](hammer-reduction-process.md) |
 
 ## Sprint Reading Path
 
@@ -28,8 +29,12 @@ credentials, created automatically on login/startup and usable through
 4. Read [GLM 5.2 Tool Compatibility](glm-52-tool-compatibility.md) for the
    proposal to make open-source coding models reliable inside PFTerminal's
    tool loop.
+5. Read [Hammer Reduction Process](hammer-reduction-process.md) for the current
+   sprint plan to reduce provider hammering, context bloat, and repeated
+   high-input retries.
 
 ## Boundary
 
 This sprint is not automatic transaction execution, hosted custody, MPC, or a
-StakeHub replacement. It is a credential store.
+StakeHub replacement. It is a credential store plus the harness hardening
+needed to use third-party coding providers without wasteful request loops.
