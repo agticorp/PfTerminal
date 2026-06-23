@@ -66,6 +66,7 @@ nav:
       - AGENTS.md: agents_md.md
   - Project:
       - Contributing: contributing.md
+      - CI Coverage: ci.md
       - CLA: CLA.md
       - Open Source Fund: open-source-fund.md
       - License: license.md
