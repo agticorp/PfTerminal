@@ -10,6 +10,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_models_manager::manager::OpenAiModelsManager;
 use codex_models_manager::manager::SharedModelsManager;
@@ -233,6 +234,12 @@ impl ModelProvider for ConfiguredModelProvider {
                 image_generation: false,
                 web_search: true,
             }
+        } else if self.info.is_openrouter() {
+            ProviderCapabilities {
+                namespace_tools: false,
+                image_generation: false,
+                web_search: false,
+            }
         } else {
             ProviderCapabilities::default()
         }
@@ -243,6 +250,8 @@ impl ModelProvider for ConfiguredModelProvider {
             AMBIENT_DEFAULT_MODEL
         } else if self.info.is_zai() {
             ZAI_DEFAULT_MODEL
+        } else if self.info.is_openrouter() {
+            OPENROUTER_DEFAULT_MODEL
         } else {
             DEFAULT_APPROVAL_REVIEW_PREFERRED_MODEL
         }
@@ -253,6 +262,8 @@ impl ModelProvider for ConfiguredModelProvider {
             AMBIENT_DEFAULT_MODEL
         } else if self.info.is_zai() {
             ZAI_DEFAULT_MODEL
+        } else if self.info.is_openrouter() {
+            OPENROUTER_DEFAULT_MODEL
         } else {
             DEFAULT_MEMORY_EXTRACTION_PREFERRED_MODEL
         }
@@ -263,6 +274,8 @@ impl ModelProvider for ConfiguredModelProvider {
             AMBIENT_DEFAULT_MODEL
         } else if self.info.is_zai() {
             ZAI_DEFAULT_MODEL
+        } else if self.info.is_openrouter() {
+            OPENROUTER_DEFAULT_MODEL
         } else {
             DEFAULT_MEMORY_CONSOLIDATION_PREFERRED_MODEL
         }
@@ -281,9 +294,7 @@ impl ModelProvider for ConfiguredModelProvider {
 
     fn auth(&self) -> ModelProviderFuture<'_, Option<CodexAuth>> {
         Box::pin(async move {
-            let Some(auth_manager) = self.auth_manager.as_ref() else {
-                return None;
-            };
+            let auth_manager = self.auth_manager.as_ref()?;
 
             if let Some(provider_key_id) = self.info.env_key.as_deref() {
                 return auth_manager
@@ -383,6 +394,7 @@ mod tests {
     use codex_login::auth::BedrockApiKeyAuth;
     use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
     use codex_model_provider_info::ModelProviderAwsAuthInfo;
+    use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
     use codex_model_provider_info::WireApi;
     use codex_models_manager::manager::RefreshStrategy;
     use codex_protocol::config_types::ModelProviderAuthInfo;
@@ -529,6 +541,35 @@ mod tests {
                 image_generation: false,
                 web_search: true,
             }
+        );
+    }
+
+    #[test]
+    fn openrouter_provider_disables_hosted_tools_and_uses_openrouter_defaults() {
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openrouter_provider(),
+            /*auth_manager*/ None,
+        );
+
+        assert_eq!(
+            provider.capabilities(),
+            ProviderCapabilities {
+                namespace_tools: false,
+                image_generation: false,
+                web_search: false,
+            }
+        );
+        assert_eq!(
+            provider.approval_review_preferred_model(),
+            OPENROUTER_DEFAULT_MODEL
+        );
+        assert_eq!(
+            provider.memory_extraction_preferred_model(),
+            OPENROUTER_DEFAULT_MODEL
+        );
+        assert_eq!(
+            provider.memory_consolidation_preferred_model(),
+            OPENROUTER_DEFAULT_MODEL
         );
     }
 

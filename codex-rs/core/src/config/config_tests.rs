@@ -69,7 +69,11 @@ use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
+use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
+use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
 use codex_model_provider_info::WireApi;
+use codex_model_provider_info::ZAI_DEFAULT_MODEL;
+use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_models_manager::bundled_models_response;
 use codex_network_proxy::NetworkMode;
 use codex_protocol::config_types::ForcedLoginMethod;
@@ -735,6 +739,56 @@ wire_api = "responses"
     assert_eq!(config.model_provider_id, AMBIENT_PROVIDER_ID);
     assert_eq!(config.model.as_deref(), Some("ambient/large"));
     assert_eq!(config.model_provider.wire_api, WireApi::Chat);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_openrouter_provider_uses_api_login() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "openrouter"
+model = "z-ai/glm-5.2"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, OPENROUTER_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(OPENROUTER_DEFAULT_MODEL));
+    assert_eq!(config.model_provider.wire_api, WireApi::Chat);
+    assert_eq!(config.forced_login_method, Some(ForcedLoginMethod::Api));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_zai_provider_uses_api_login() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "zai"
+model = "glm-5.2"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, ZAI_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(ZAI_DEFAULT_MODEL));
+    assert_eq!(config.model_provider.wire_api, WireApi::Chat);
+    assert_eq!(config.forced_login_method, Some(ForcedLoginMethod::Api));
 
     Ok(())
 }

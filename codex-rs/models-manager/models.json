@@ -129,6 +129,163 @@
       "supports_reasoning_summaries": false,
       "supports_search_tool": false
     },
+    {
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "input_modalities": [
+        "text"
+      ],
+      "supports_image_detail_original": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "auto_compact_token_limit": null,
+      "default_reasoning_summary": "none",
+      "slug": "z-ai/glm-5.2",
+      "display_name": "OpenRouter GLM 5.2",
+      "description": "OpenRouter: GLM 5.2 - $0.98/M input, $3.08/M output.",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        {
+          "effort": "high",
+          "description": "High. OpenRouter GLM reasoning_effort=high."
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high. OpenRouter GLM reasoning_effort=xhigh."
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "availability_nux": null,
+      "upgrade": null,
+      "priority": 1,
+      "base_instructions": "You are PFTerminal, a coding agent. Help the user complete software tasks in the current workspace. Be direct, inspect the code before changing it, keep edits scoped, and verify your work when practical. When searching, use rg or rg --files first. Never run recursive grep over a repo root; if rg is unavailable, restrict grep to source directories and exclude .git, target, node_modules, dist, build, .next, and vendor.",
+      "model_messages": null,
+      "experimental_supported_tools": [],
+      "service_tiers": [],
+      "additional_speed_tiers": [],
+      "supports_reasoning_summaries": false,
+      "supports_search_tool": false
+    },
+    {
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "input_modalities": [
+        "text"
+      ],
+      "supports_image_detail_original": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "auto_compact_token_limit": null,
+      "default_reasoning_summary": "none",
+      "slug": "minimax/minimax-m3",
+      "display_name": "OpenRouter MiniMax M3",
+      "description": "OpenRouter: MiniMax M3 - $0.30/M input, $1.20/M output.",
+      "default_reasoning_level": null,
+      "supported_reasoning_levels": [],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "availability_nux": null,
+      "upgrade": null,
+      "priority": 2,
+      "base_instructions": "You are PFTerminal, a coding agent. Help the user complete software tasks in the current workspace. Be direct, inspect the code before changing it, keep edits scoped, and verify your work when practical. When searching, use rg or rg --files first. Never run recursive grep over a repo root; if rg is unavailable, restrict grep to source directories and exclude .git, target, node_modules, dist, build, .next, and vendor.",
+      "model_messages": null,
+      "experimental_supported_tools": [],
+      "service_tiers": [],
+      "additional_speed_tiers": [],
+      "supports_reasoning_summaries": false,
+      "supports_search_tool": false
+    },
+    {
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "input_modalities": [
+        "text"
+      ],
+      "supports_image_detail_original": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "context_window": 1048756,
+      "max_context_window": 1048756,
+      "auto_compact_token_limit": null,
+      "default_reasoning_summary": "none",
+      "slug": "openrouter/owl-alpha",
+      "display_name": "OpenRouter Owl Alpha",
+      "description": "OpenRouter: Owl Alpha - $0/M input, $0/M output.",
+      "default_reasoning_level": null,
+      "supported_reasoning_levels": [],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "availability_nux": null,
+      "upgrade": null,
+      "priority": 3,
+      "base_instructions": "You are PFTerminal, a coding agent. Help the user complete software tasks in the current workspace. Be direct, inspect the code before changing it, keep edits scoped, and verify your work when practical. When searching, use rg or rg --files first. Never run recursive grep over a repo root; if rg is unavailable, restrict grep to source directories and exclude .git, target, node_modules, dist, build, .next, and vendor.",
+      "model_messages": null,
+      "experimental_supported_tools": [],
+      "service_tiers": [],
+      "additional_speed_tiers": [],
+      "supports_reasoning_summaries": false,
+      "supports_search_tool": false
+    },
+    {
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "input_modalities": [
+        "text"
+      ],
+      "supports_image_detail_original": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "auto_compact_token_limit": null,
+      "default_reasoning_summary": "none",
+      "slug": "google/gemini-3.5-flash",
+      "display_name": "OpenRouter Gemini 3.5 Flash",
+      "description": "OpenRouter: Gemini 3.5 Flash - $1.50/M input, $9.00/M output.",
+      "default_reasoning_level": null,
+      "supported_reasoning_levels": [],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "availability_nux": null,
+      "upgrade": null,
+      "priority": 4,
+      "base_instructions": "You are PFTerminal, a coding agent. Help the user complete software tasks in the current workspace. Be direct, inspect the code before changing it, keep edits scoped, and verify your work when practical. When searching, use rg or rg --files first. Never run recursive grep over a repo root; if rg is unavailable, restrict grep to source directories and exclude .git, target, node_modules, dist, build, .next, and vendor.",
+      "model_messages": null,
+      "experimental_supported_tools": [],
+      "service_tiers": [],
+      "additional_speed_tiers": [],
+      "supports_reasoning_summaries": false,
+      "supports_search_tool": false
+    },
     { 
       "prefer_websockets": true,
       "support_verbosity": true,

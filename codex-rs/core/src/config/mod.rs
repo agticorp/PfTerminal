@@ -81,6 +81,7 @@ use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
+use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
@@ -3485,10 +3486,14 @@ impl Config {
             .filter(|values| !values.is_empty());
 
         let ambient_provider_selected = model_provider_id == AMBIENT_PROVIDER_ID;
+        let openrouter_provider_selected = model_provider_id == OPENROUTER_PROVIDER_ID;
         let zai_provider_selected = model_provider_id == ZAI_PROVIDER_ID;
         let forced_login_method = cfg
             .forced_login_method
-            .or_else(|| ambient_provider_selected.then_some(ForcedLoginMethod::Api));
+            .or_else(|| {
+                (ambient_provider_selected || openrouter_provider_selected || zai_provider_selected)
+                    .then_some(ForcedLoginMethod::Api)
+            });
 
         let model = resolve_model_for_provider(model.or(cfg.model), &model_provider_id);
         let model_reasoning_effort = if ambient_provider_selected || zai_provider_selected {

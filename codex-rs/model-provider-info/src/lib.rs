@@ -45,6 +45,11 @@ pub const ZAI_PROVIDER_ID: &str = "zai";
 pub const ZAI_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
 pub const ZAI_DEFAULT_MODEL: &str = "glm-5.2";
 pub const ZAI_API_KEY_ENV_VAR: &str = "ZAI_API_KEY";
+const OPENROUTER_PROVIDER_NAME: &str = "OpenRouter";
+pub const OPENROUTER_PROVIDER_ID: &str = "openrouter";
+pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+pub const OPENROUTER_DEFAULT_MODEL: &str = "z-ai/glm-5.2";
+pub const OPENROUTER_API_KEY_ENV_VAR: &str = "OPENROUTER_API_KEY";
 const AMAZON_BEDROCK_PROVIDER_NAME: &str = "Amazon Bedrock";
 pub const AMAZON_BEDROCK_PROVIDER_ID: &str = "amazon-bedrock";
 pub const AMAZON_BEDROCK_GPT_5_5_MODEL_ID: &str = "openai.gpt-5.5";
@@ -421,6 +426,30 @@ impl ModelProviderInfo {
         }
     }
 
+    pub fn create_openrouter_provider() -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: OPENROUTER_PROVIDER_NAME.into(),
+            base_url: Some(OPENROUTER_BASE_URL.into()),
+            env_key: Some(OPENROUTER_API_KEY_ENV_VAR.into()),
+            env_key_instructions: Some(format!(
+                "Set {OPENROUTER_API_KEY_ENV_VAR} to your OpenRouter API key."
+            )),
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Chat,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    }
+
     pub fn create_amazon_bedrock_provider(
         aws: Option<ModelProviderAwsAuthInfo>,
     ) -> ModelProviderInfo {
@@ -463,6 +492,10 @@ impl ModelProviderInfo {
         self.name == ZAI_PROVIDER_NAME
     }
 
+    pub fn is_openrouter(&self) -> bool {
+        self.name == OPENROUTER_PROVIDER_NAME
+    }
+
     pub fn is_amazon_bedrock(&self) -> bool {
         self.name == AMAZON_BEDROCK_PROVIDER_NAME
     }
@@ -490,15 +523,16 @@ pub fn built_in_model_providers(
     let openai_provider = P::create_openai_provider(openai_base_url);
     let ambient_provider = P::create_ambient_provider();
     let zai_provider = P::create_zai_provider();
+    let openrouter_provider = P::create_openrouter_provider();
     let amazon_bedrock_provider = P::create_amazon_bedrock_provider(/*aws*/ None);
 
-    // We do not want to be in the business of adjucating which third-party
-    // providers are bundled with Codex CLI, so we only include the OpenAI and
-    // open source ("oss") providers by default. Users are encouraged to add to
-    // `model_providers` in config.toml to add their own providers.
+    // PFTerminal bundles the first-party OpenAI provider, the local OSS
+    // providers, and the curated third-party coding providers exposed in the
+    // login/model picker UX. Users can still add more providers in config.toml.
     [
         (AMBIENT_PROVIDER_ID, ambient_provider),
         (ZAI_PROVIDER_ID, zai_provider),
+        (OPENROUTER_PROVIDER_ID, openrouter_provider),
         (OPENAI_PROVIDER_ID, openai_provider),
         (AMAZON_BEDROCK_PROVIDER_ID, amazon_bedrock_provider),
         (

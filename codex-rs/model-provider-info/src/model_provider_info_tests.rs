@@ -390,6 +390,23 @@ fn test_built_in_model_providers_include_zai() {
 }
 
 #[test]
+fn test_built_in_model_providers_include_openrouter() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    let openrouter = providers
+        .get(OPENROUTER_PROVIDER_ID)
+        .expect("OpenRouter provider should be built in");
+    assert!(openrouter.is_openrouter());
+    assert_eq!(openrouter.base_url.as_deref(), Some(OPENROUTER_BASE_URL));
+    assert_eq!(
+        openrouter.env_key.as_deref(),
+        Some(OPENROUTER_API_KEY_ENV_VAR)
+    );
+    assert_eq!(openrouter.wire_api, WireApi::Chat);
+    assert!(!openrouter.requires_openai_auth);
+}
+
+#[test]
 fn test_merge_configured_model_providers_adds_custom_provider() {
     let custom_provider = ModelProviderInfo {
         name: "Custom".to_string(),

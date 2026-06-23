@@ -30,6 +30,8 @@ use ratatui::widgets::WidgetRef;
 
 use codex_model_provider_info::AMBIENT_API_KEY_ENV_VAR;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
+use codex_model_provider_info::OPENROUTER_API_KEY_ENV_VAR;
+use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
 use codex_model_provider_info::ZAI_API_KEY_ENV_VAR;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_protocol::config_types::ForcedLoginMethod;
@@ -108,9 +110,7 @@ struct ApiKeyEntryContext {
     has_text: bool,
 }
 
-const OPENROUTER_PROVIDER_ID: &str = "openrouter";
 const OPENROUTER_PROVIDER_NAME: &str = "OpenRouter";
-const OPENROUTER_API_KEY_ENV_VAR: &str = "OPENROUTER_API_KEY";
 
 const RECOMMENDED_PROVIDER_API_KEY_OPTIONS: &[(&str, &str, &str)] = &[
     (AMBIENT_PROVIDER_ID, "Ambient", AMBIENT_API_KEY_ENV_VAR),

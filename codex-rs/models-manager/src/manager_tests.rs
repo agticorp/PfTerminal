@@ -1007,3 +1007,49 @@ fn bundled_models_json_contains_ambient_models() {
     );
     assert!(!ambient.used_fallback_model_metadata);
 }
+
+#[test]
+fn bundled_models_json_contains_openrouter_models() {
+    let response = crate::bundled_models_response()
+        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+
+    let openrouter_glm = response
+        .models
+        .iter()
+        .find(|model| model.slug == "z-ai/glm-5.2")
+        .expect("bundled models.json should include OpenRouter GLM 5.2");
+
+    assert_eq!(openrouter_glm.display_name, "OpenRouter GLM 5.2");
+    assert_eq!(openrouter_glm.context_window, Some(1_048_576));
+    assert_eq!(
+        openrouter_glm.default_reasoning_level,
+        Some(ReasoningEffort::High)
+    );
+    assert_eq!(
+        openrouter_glm
+            .supported_reasoning_levels
+            .iter()
+            .map(|level| level.effort.clone())
+            .collect::<Vec<_>>(),
+        vec![ReasoningEffort::High, ReasoningEffort::XHigh]
+    );
+    assert_eq!(openrouter_glm.visibility, ModelVisibility::List);
+    assert!(
+        openrouter_glm
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("$0.98/M input, $3.08/M output")
+    );
+
+    for slug in [
+        "minimax/minimax-m3",
+        "openrouter/owl-alpha",
+        "google/gemini-3.5-flash",
+    ] {
+        assert!(
+            response.models.iter().any(|model| model.slug == slug),
+            "bundled models.json should include {slug}"
+        );
+    }
+}

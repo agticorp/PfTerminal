@@ -10,6 +10,7 @@ use codex_app_server_protocol::PluginAvailability;
 use codex_features::Stage;
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
+use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use pretty_assertions::assert_eq;
 
@@ -2631,7 +2632,7 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
 }
 
 #[tokio::test]
-async fn model_picker_hides_fake_openai_models_and_shows_glm_models() {
+async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some(AMBIENT_DEFAULT_MODEL)).await;
     chat.thread_id = Some(ThreadId::new());
 
@@ -2649,12 +2650,44 @@ async fn model_picker_hides_fake_openai_models_and_shows_glm_models() {
         "expected Ambient GLM 5.2 in /model picker:\n{popup}"
     );
     assert!(
+        popup.contains("Coding Plans"),
+        "expected Coding Plans section in /model picker:\n{popup}"
+    );
+    assert!(
         popup.contains("Ambient's default GLM 5.2 coding model."),
         "expected Ambient model description in /model picker:\n{popup}"
     );
     assert!(
         popup.contains(ZAI_DEFAULT_MODEL),
         "expected direct Z.AI GLM model in /model picker:\n{popup}"
+    );
+    assert!(
+        popup.contains("Pay Per API Call"),
+        "expected Pay Per API Call section in /model picker:\n{popup}"
+    );
+    assert!(
+        popup.contains(OPENROUTER_DEFAULT_MODEL),
+        "expected OpenRouter GLM 5.2 in /model picker:\n{popup}"
+    );
+    assert!(
+        popup.contains("OpenRouter: GLM 5.2 - $0.98/M input, $3.08/M output."),
+        "expected OpenRouter GLM price description in /model picker:\n{popup}"
+    );
+    assert!(
+        popup.contains("minimax/minimax-m3"),
+        "expected MiniMax M3 in /model picker:\n{popup}"
+    );
+    assert!(
+        popup.contains("OpenRouter: MiniMax M3 - $0.30/M input, $1.20/M output."),
+        "expected MiniMax M3 price description in /model picker:\n{popup}"
+    );
+    assert!(
+        popup.contains("openrouter/owl-alpha"),
+        "expected Owl Alpha in /model picker:\n{popup}"
+    );
+    assert!(
+        popup.contains("google/gemini-3.5-flash"),
+        "expected Gemini 3.5 Flash in /model picker:\n{popup}"
     );
     assert!(
         !popup.contains("gpt-"),

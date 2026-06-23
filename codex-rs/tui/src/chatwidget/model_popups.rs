@@ -10,8 +10,14 @@ use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
+use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
+
+const OPENROUTER_MINIMAX_M3_MODEL: &str = "minimax/minimax-m3";
+const OPENROUTER_OWL_ALPHA_MODEL: &str = "openrouter/owl-alpha";
+const OPENROUTER_GEMINI_3_5_FLASH_MODEL: &str = "google/gemini-3.5-flash";
 
 impl ChatWidget {
     /// Open a popup to choose a quick auto model. Selecting "All models"
@@ -177,6 +183,9 @@ impl ChatWidget {
         if trimmed == ZAI_DEFAULT_MODEL || trimmed.starts_with("glm-") {
             return Some(ZAI_PROVIDER_ID.to_string());
         }
+        if Self::is_openrouter_model(trimmed) {
+            return Some(OPENROUTER_PROVIDER_ID.to_string());
+        }
         if matches!(
             trimmed,
             AMAZON_BEDROCK_GPT_5_5_MODEL_ID | AMAZON_BEDROCK_GPT_5_4_MODEL_ID
@@ -187,6 +196,16 @@ impl ChatWidget {
             return Some(OPENAI_PROVIDER_ID.to_string());
         }
         None
+    }
+
+    fn is_openrouter_model(model: &str) -> bool {
+        matches!(
+            model,
+            OPENROUTER_DEFAULT_MODEL
+                | OPENROUTER_MINIMAX_M3_MODEL
+                | OPENROUTER_OWL_ALPHA_MODEL
+                | OPENROUTER_GEMINI_3_5_FLASH_MODEL
+        )
     }
 
     fn auto_model_order(model: &str) -> usize {
@@ -212,29 +231,32 @@ impl ChatWidget {
             return;
         }
 
-        let mut items: Vec<SelectionItem> = Vec::new();
+        let mut coding_plan_items: Vec<SelectionItem> = Vec::new();
+        let mut pay_per_api_call_items: Vec<SelectionItem> = Vec::new();
         for preset in presets.into_iter() {
-            let description =
-                (!preset.description.is_empty()).then_some(preset.description.to_string());
-            let is_current = preset.model.as_str() == self.current_model();
-            let single_supported_effort = preset.supported_reasoning_efforts.len() == 1;
-            let preset_for_action = preset.clone();
-            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                let preset_for_event = preset_for_action.clone();
-                tx.send(AppEvent::OpenReasoningPopup {
-                    model: preset_for_event,
-                });
-            })];
-            items.push(SelectionItem {
-                name: preset.model.clone(),
-                description,
-                is_current,
-                is_default: preset.is_default,
-                actions,
-                dismiss_on_select: single_supported_effort,
-                dismiss_parent_on_child_accept: !single_supported_effort,
-                ..Default::default()
-            });
+            let provider = Self::model_provider_for_selection(&preset.model);
+            let item = self.model_picker_item(preset);
+            match provider.as_deref() {
+                Some(AMBIENT_PROVIDER_ID | ZAI_PROVIDER_ID) => coding_plan_items.push(item),
+                Some(OPENROUTER_PROVIDER_ID) => pay_per_api_call_items.push(item),
+                _ => {}
+            }
+        }
+
+        let mut items: Vec<SelectionItem> = Vec::new();
+        if !coding_plan_items.is_empty() {
+            items.push(Self::model_picker_section_header(
+                "Coding Plans",
+                "Ambient and Z.AI plan-backed models",
+            ));
+            items.append(&mut coding_plan_items);
+        }
+        if !pay_per_api_call_items.is_empty() {
+            items.push(Self::model_picker_section_header(
+                "Pay Per API Call",
+                "OpenRouter metered models",
+            ));
+            items.append(&mut pay_per_api_call_items);
         }
 
         let header = self.model_menu_header(
@@ -249,6 +271,40 @@ impl ChatWidget {
         });
     }
 
+    fn model_picker_item(&self, preset: ModelPreset) -> SelectionItem {
+        let description =
+            (!preset.description.is_empty()).then_some(preset.description.to_string());
+        let is_current = preset.model.as_str() == self.current_model();
+        let single_supported_effort = preset.supported_reasoning_efforts.len() == 1;
+        let preset_for_action = preset.clone();
+        let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+            let preset_for_event = preset_for_action.clone();
+            tx.send(AppEvent::OpenReasoningPopup {
+                model: preset_for_event,
+            });
+        })];
+        SelectionItem {
+            name: preset.model.clone(),
+            description,
+            is_current,
+            is_default: preset.is_default,
+            actions,
+            dismiss_on_select: single_supported_effort,
+            dismiss_parent_on_child_accept: !single_supported_effort,
+            ..Default::default()
+        }
+    }
+
+    fn model_picker_section_header(name: &str, description: &str) -> SelectionItem {
+        SelectionItem {
+            name: name.to_string(),
+            description: Some(description.to_string()),
+            is_disabled: true,
+            search_value: Some(format!("{name} {description}")),
+            ..Default::default()
+        }
+    }
+
     fn show_in_pfterminal_model_picker(preset: &ModelPreset) -> bool {
         if !preset.show_in_picker {
             return false;
@@ -256,7 +312,7 @@ impl ChatWidget {
 
         matches!(
             Self::model_provider_for_selection(&preset.model).as_deref(),
-            Some(AMBIENT_PROVIDER_ID | ZAI_PROVIDER_ID)
+            Some(AMBIENT_PROVIDER_ID | ZAI_PROVIDER_ID | OPENROUTER_PROVIDER_ID)
         )
     }
 
@@ -647,6 +703,14 @@ mod tests {
         assert_eq!(
             ChatWidget::model_provider_for_selection(ZAI_DEFAULT_MODEL).as_deref(),
             Some(ZAI_PROVIDER_ID)
+        );
+        assert_eq!(
+            ChatWidget::model_provider_for_selection(OPENROUTER_DEFAULT_MODEL).as_deref(),
+            Some(OPENROUTER_PROVIDER_ID)
+        );
+        assert_eq!(
+            ChatWidget::model_provider_for_selection("minimax/minimax-m3").as_deref(),
+            Some(OPENROUTER_PROVIDER_ID)
         );
         assert_eq!(
             ChatWidget::model_provider_for_selection("gpt-5.5").as_deref(),

@@ -158,6 +158,17 @@ fn set_config_provider_for_test_model(config: &mut Config, model: &str) {
         ))
     } else if matches!(
         trimmed,
+        codex_model_provider_info::OPENROUTER_DEFAULT_MODEL
+            | "minimax/minimax-m3"
+            | "openrouter/owl-alpha"
+            | "google/gemini-3.5-flash"
+    ) {
+        Some((
+            codex_model_provider_info::OPENROUTER_PROVIDER_ID.to_string(),
+            codex_model_provider_info::ModelProviderInfo::create_openrouter_provider(),
+        ))
+    } else if matches!(
+        trimmed,
         codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID
             | codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID
     ) {
