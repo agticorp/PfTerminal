@@ -2,239 +2,117 @@
 
 ## Complete
 
-- [x] Captured PFTerminal/Codex session evidence showing repeated high-input
-  requests after small user nudges.
-- [x] Confirmed PFTerminal inherits Codex's prompt assembly, retry, compaction,
-  and edit-tool behavior because it is a Codex fork.
-- [x] Downloaded and reviewed local OpenCode, Hermes Agent, Kilo Code, and Cline
-  source snapshots.
-- [x] Compared provider retry handling, context compaction, edit primitives, and
-  loop guards across the studied harnesses.
+- [x] Captured PFTerminal/Codex session evidence showing repeated high-input requests after small user nudges.
+- [x] Confirmed PFTerminal is a Codex fork and inherits Codex prompt assembly, retry, compaction, token display, and edit-tool behavior unless changed deliberately.
+- [x] Downloaded and reviewed local OpenCode, Hermes Agent, Kilo Code, and Cline source snapshots.
+- [x] Compared provider retry handling, context compaction, edit primitives, request-size controls, and loop guards across the studied harnesses.
+- [x] Confirmed the current edit-tool split: strict `apply_patch` remains available for Codex-native profiles, while structured edit/write exists for selected profiles.
 
 ## To Do
 
-- [ ] Add a provider/model/key cooldown circuit breaker so immediate retries
-  after `429` do not send another full request.
-- [ ] Add a cross-process request lease so multiple PFTerminal agents do not
-  hammer the same provider credential at once.
-- [ ] Add request preflight telemetry for input tokens, cached tokens, serialized
-  request bytes, and provider cooldown state.
-- [ ] Add aggressive third-party-provider compaction/pruning defaults before the
-  request reaches provider rate or context limits.
-- [ ] Add loop guards for repeated identical tool calls and repeated failed edit
-  attempts.
+- [ ] P0 - Add request preflight telemetry and a shared `provider_request_state` store. Measure estimated input tokens, cached input tokens, serialized request bytes, provider/model/key fingerprint, cooldown state, and lease state before dispatch.
+- [ ] P0 - Enforce a provider/model/key cooldown circuit breaker after `429`. Parse provider reset headers when present; otherwise use local exponential cooldown such as 30s, 60s, 120s, capped at 5m.
+- [ ] P0 - Add a cross-process request lease keyed by provider/model/key so concurrent PFTerminal agents do not send large requests through the same credential.
+- [ ] P1 - Add third-party-provider compaction and pruning profiles before requests reach provider rate, byte, or context limits.
+- [ ] P1 - Add hard loop guards for repeated identical tool calls, repeated failed edit attempts, and repeated immediate provider calls after a provider-side `429`.
 
-Status: current sprint study and implementation plan.
+Status: current sprint study and implementation plan. Evidence snapshot date: 2026-06-23.
 
-## Why This Exists
+## Executive Summary
 
-PFTerminal is Codex. It is a fork, so the behavior the user sees is inherited
-from the Codex runtime unless PFTerminal changes it deliberately.
+- User-facing problem: after a provider `429`, a user can type a tiny follow-up such as "continue" or "wat" and PFTerminal can send another full live-context request. In the observed thread, these follow-ups still carried about 35k-37k input tokens.
+- PFTerminal is a Codex fork. It inherits Codex behavior where each turn rebuilds model input from live conversation history until compaction cuts it down.
+- The observed failure was not mainly an internal automatic `429` retry loop. Generic provider config has `retry_429: false`, and the `429` surfaced at attempt 0.
+- The missing control is a local dispatch gate: preflight sizing, provider cooldown, and a cross-process lease shared by all PFTerminal workers using the same provider/model/key.
+- Prompt caching can reduce the billable-looking UI number, but it does not make the request shape small. The rollout recorded cumulative input of `888,271`, including `624,384` cached input.
+- V0 should stop hammering by default: if cooldown or lease is active, do not send; show wait time and offer wait, compact, switch provider/model, or start a fresh thread.
+- P1 should reduce future request size with earlier third-party-provider compaction, old tool-output pruning, request-byte gates, and loop guards.
+- Provider profiles should differ. Codex-native models can keep strict `apply_patch`; GLM-class and generic gateway profiles should prefer structured edit/write and tighter context controls.
 
-The problem is not only that GLM 5.2 can struggle with strict `apply_patch`.
-There is a second, separate hammering problem: a tiny follow-up message can
-trigger another large provider request because the runtime resends the live
-conversation context, tool outputs, and instructions until compaction or a new
-session cuts the history down.
+## Observed Facts
 
-The session that exposed this showed small prompts such as `continue` and `wat`
-arriving after a `429`, while each follow-up request still carried roughly
-35k-37k input tokens. The UI displayed:
+### Session Snapshot
+
+| Field | Value |
+| --- | --- |
+| `thread_id` | `019ef259-b3ac-7601-86fd-a3cd6ae9bc56` |
+| `provider` | `ambient` |
+| `model` | `zai-org/GLM-5.2-FP8` |
+| `cwd` | `/home/postfiat/repos` |
+| `rollout` | `/home/postfiat/.pfterminal/sessions/2026/06/23/rollout-2026-06-23T02-40-25-019ef259-b3ac-7601-86fd-a3cd6ae9bc56.jsonl` |
+
+### Token Accounting
+
+Raw UI line:
 
 ```text
 Token usage: total=270,204 input=263,887 (+ 624,384 cached) output=6,317
 ```
 
-That display is non-cached input plus output. The rollout trace for the same
-thread showed cumulative input of `888,271`, cached input of `624,384`, and
-output of `6,317`. In other words, prompt caching reduced the billable-looking
-number shown in the UI, but the harness was still sending a large context shape
-to the provider on each turn.
+| Metric | Value | Meaning |
+| --- | ---: | --- |
+| UI `input` | `263,887` | Non-cached input tokens. |
+| UI `+ cached` | `624,384` | Cached input tokens reported separately. |
+| UI `output` | `6,317` | Output tokens. |
+| UI `total` | `270,204` | `263,887 + 6,317`; cached input is excluded from this displayed total. |
+| Rollout cumulative input | `888,271` | `263,887 + 624,384`; the rollout still records the large cumulative input shape. |
 
-## PFTerminal/Codex Evidence
+### Request And Provider Behavior
 
-Observed thread:
-
-```text
-thread_id: 019ef259-b3ac-7601-86fd-a3cd6ae9bc56
-provider: ambient
-model: zai-org/GLM-5.2-FP8
-cwd: /home/postfiat/repos
-rollout: /home/postfiat/.pfterminal/sessions/2026/06/23/rollout-2026-06-23T02-40-25-019ef259-b3ac-7601-86fd-a3cd6ae9bc56.jsonl
-```
-
-The important pattern:
-
-| Event | Evidence |
+| Fact | Evidence |
 | --- | --- |
-| Small user follow-ups still sent large inputs | Later turns sent about `36,414`, `37,211`, and `37,492` input tokens. |
-| The rollout file was not huge | The JSONL trace was about 216 KB, so the issue was repeated accumulation, not one massive stored artifact. |
-| Provider requests were already large | Local request logs showed recent serialized request bodies around 110-160 KB. |
+| Small follow-ups still sent large inputs | Later turns sent about `36,414`, `37,211`, and `37,492` input tokens. |
+| The rollout file itself was not huge | The JSONL trace was about 216 KB, so the issue was repeated context accumulation, not one massive stored artifact. |
+| Provider request bodies were already large | Local request logs showed recent serialized request bodies around 110-160 KB. |
 | Z.AI and Ambient both returned `429` | Both providers rejected initial attempts. The logs did not show `Retry-After` headers. |
-| The runtime did not sit in an internal 429 retry loop | Generic provider `429` handling surfaced an error at attempt 0 because provider retry config has `retry_429: false`. |
+| The runtime did not sit in an internal `429` retry loop | Generic provider `429` handling surfaced an error at attempt 0 because provider retry config has `retry_429: false`. |
 
-The structural issue is therefore not "Codex retries 429 too much." The
-structural issue is that every manual follow-up can start a fresh full-context
-request, and multiple agents or sessions have no shared provider cooldown.
+## Interpretation
 
-## Codex Mechanics Inherited By PFTerminal
+### Root Cause
 
-The inherited mechanics that matter for hammer reduction are:
+PFTerminal currently lacks a shared provider dispatch gate above the inherited Codex turn loop. Codex rebuilds input from live history each turn, and auto-compaction is tied to token-window pressure, not provider `429`s or repeated tiny follow-ups.
 
-| Area | Current behavior | Source |
+The result is structural: every manual follow-up can become a new full-context request. If several PFTerminal processes run in tmux or separate shells, they also lack shared cooldown and active-request state for the same provider credential.
+
+A paid provider plan does not remove per-minute request, token, burst, or concurrency limits. Repeated full-context calls can exhaust a burst bucket even when daily or monthly quota is healthy.
+
+### Codex Mechanics Inherited By PFTerminal
+
+| Area | Current inherited behavior | Source |
 | --- | --- | --- |
 | Prompt assembly | Each turn builds model input from cloned live history through `for_prompt(...)`. | `codex-rs/core/src/session/turn.rs` |
-| Retry policy | Generic provider config sets `retry_429: false`; transport and 5xx are retryable, 429 generally is not. | `codex-rs/model-provider-info/src/lib.rs`, `codex-rs/codex-client/src/retry.rs` |
+| Retry policy | Generic provider config sets `retry_429: false`; transport and 5xx errors are retryable, while 429 generally is not. | `codex-rs/model-provider-info/src/lib.rs`, `codex-rs/codex-client/src/retry.rs` |
 | Stream retry | Dropped streams can be retried separately from initial HTTP 429 handling. | `codex-rs/core/src/responses_retry.rs` |
 | Error mapping | Non-OpenAI 429 maps to a retry-limit style provider error unless it matches OpenAI usage-limit payloads. | `codex-rs/codex-api/src/api_bridge.rs` |
-| Auto compaction | Compaction is tied to token-window pressure, not to provider 429s or repeated small follow-ups. | `codex-rs/core/src/session/turn.rs` |
-| Token display | UI total uses non-cached input plus output, while cumulative traces still record cached input separately. | `codex-rs/protocol/src/protocol.rs` |
-| Edit tool choice | PFTerminal now has structured edit/write for selected profiles, otherwise Codex-native models can keep strict `apply_patch`. | `codex-rs/core/src/tools/spec_plan.rs` |
+| Auto compaction | Compaction is tied to token-window pressure, not provider 429s or repeated small follow-ups. | `codex-rs/core/src/session/turn.rs` |
+| Token display | UI total uses non-cached input plus output, while cached input is recorded separately. | `codex-rs/protocol/src/protocol.rs` |
+| Edit tool choice | PFTerminal has structured edit/write for selected profiles; Codex-native models can keep strict `apply_patch`. | `codex-rs/core/src/tools/spec_plan.rs` |
 
-This explains why the user can have a paid provider plan and still hit `429`.
-Plans do not remove per-minute request, token, burst, or concurrency limits.
-Repeated full-context calls can exhaust a burst bucket even when total daily or
-monthly quota is healthy.
+### Reference Harness Lessons
 
-## Harness Comparison
+| Harness | Useful behavior | Lesson for PFTerminal |
+| --- | --- | --- |
+| PFTerminal/Codex | Sends full live history until compaction thresholds are reached. Prompt caching helps cost but does not remove large request bodies. | Add preflight, cooldown, and cross-process rate state around the inherited loop. |
+| OpenCode | Shows context usage, reserves usable context, compacts before overflow, prunes tool outputs, and gates `apply_patch` by model family. | Use structured edit/write for non-Codex-native models and expose context/retry state before dispatch. |
+| Hermes Agent | Compresses around 50 percent of context, targets a 20 percent summary ratio, protects first and recent turns, prunes old tool output, uses jittered backoff, and caps concurrency. | Compact earlier for third-party providers and keep intermediate tool chatter out of prompt context. |
+| Kilo Code | Productizes auto compaction, threshold percent, pruning, keep/buffer settings, request-byte pruning, bounded retry, and doom-loop detection. | Make hammer-reduction controls explicit settings and add byte gates, not only token-window gates. |
+| Cline | CLI exposes `basic`, `agentic`, and `off` compaction; VS Code path uses safety buffers, provider-specific output caps, retry reset parsing, and repeated-tool notices. | Keep a cheap non-LLM compaction fallback and tune provider-specific output headroom. |
 
-| Harness | Context strategy | Retry/rate-limit behavior | Edit/tool-loop behavior | Lesson for PFTerminal |
-| --- | --- | --- | --- | --- |
-| PFTerminal/Codex | Sends full live history until compaction thresholds are reached. Prompt caching helps cost but does not eliminate large request bodies. | Generic provider `429` is surfaced to the user, but there is no shared cooldown preventing the next manual request. | Codex-native path uses strict `apply_patch`; PFTerminal added structured edit/write for GLM-style profiles. | Add preflight, cooldown, and cross-process rate state around the inherited Codex loop. |
-| OpenCode | Shows context usage, reserves usable context, compacts before overflow, and prunes tool outputs. | Retries with `Retry-After`/`retry-after-ms` support and visible retry status. | Primary edit tool is structured string replacement; `apply_patch` is optional and model-gated. | Copy the model-specific edit primitive and user-visible context/retry state. |
-| Hermes Agent | Defaults to compression at 50 percent of context, protects first and recent turns, targets 20 percent summary ratio, and prunes old tool outputs. | Uses jittered backoff, rate-limit header tracking, and concurrency caps for burst control. | `execute_code` keeps intermediate tool results out of LLM context and caps stdout/stderr. | Use aggressive default compaction and artifact old tool output outside the prompt. |
-| Kilo Code | Productizes compaction controls: auto compaction, threshold percent, pruning, keep/buffer settings, and request-byte pruning. | Retries 429 with `Retry-After` support and bounded backoff. | Adds doom-loop detection for repeated identical tool calls. | Add settings and hard guards instead of relying only on model discipline. |
-| Cline | CLI exposes compaction modes: `basic`, `agentic`, and `off`; VS Code path uses fixed safety buffers and context-window detection. | Retries 429 with `Retry-After`, `x-ratelimit-reset`, and exponential backoff. | Uses one-tool-per-message discipline, repeated-tool-call notices, and provider-specific caps such as Cerebras max-token headroom. | Keep a simple non-LLM compaction fallback and provider-specific output caps. |
+## Proposed Implementation
 
-## OpenCode Reference
+Implement the request path in dependency order:
 
-Local source:
+1. Measure and record request state.
+2. Block on active cooldown.
+3. Acquire a cross-process lease.
+4. Compact or prune when thresholds require it.
+5. Dispatch the provider request.
+6. Update state, release lease, and apply cooldown on provider errors.
 
-```text
-path: /home/postfiat/repos/opencode-current
-remote: https://github.com/anomalyco/opencode.git
-commit: f48f24ec4e1e26cc32c4d4953497fe2734c61ee1
-```
+### 1. Request State And Preflight
 
-OpenCode is relevant because it solves the edit-friction side of the same
-problem. It registers `edit`, `write`, and `apply_patch`, then gates patch use
-by model family. Non-GPT and OSS-style models can use structured `edit`/`write`
-instead of being forced through a strict patch grammar.
-
-Important source areas:
-
-| Source | What it shows |
-| --- | --- |
-| `packages/opencode/src/tool/registry.ts` | Model-gated exposure of `apply_patch` versus `edit`/`write`. |
-| `packages/opencode/src/tool/edit.ts` | JSON edit tool with `filePath`, `oldString`, `newString`, and `replaceAll`. |
-| `packages/opencode/src/session/retry.ts` | Retry policy with `Retry-After`, `retry-after-ms`, backoff, and visible retry state. |
-| `packages/opencode/src/session/overflow.ts` | Usable-context calculation with reserved output/compaction buffer. |
-| `packages/opencode/src/session/compaction.ts` | Recent-turn protection and old tool-output pruning. |
-
-Best practice to import: make simple structured edits the default for
-non-Codex-native models, and make context/retry state visible before another
-large request is sent.
-
-## Hermes Agent Reference
-
-Local source:
-
-```text
-path: /home/postfiat/repos/agent-harness-study/hermes-agent
-remote: https://github.com/NousResearch/hermes-agent.git
-commit: bb7ff7d
-```
-
-Hermes Agent is the strongest reference for hammer reduction itself.
-
-Important source areas:
-
-| Source | What it shows |
-| --- | --- |
-| `cli-config.yaml.example` | Compression defaults: enabled, threshold `0.50`, target ratio `0.20`, protect first 3 turns, protect recent turns, and session-search concurrency caps. |
-| `agent/context_compressor.py` | Head/tail protection, old tool-output pruning, structured summaries, iterative updates, and failure cooldown. |
-| `agent/conversation_compression.py` | Compression locks and threshold validation against the auxiliary model context window. |
-| `agent/retry_utils.py` | Jittered backoff to avoid synchronized retry spikes. |
-| `agent/rate_limit_tracker.py` | Provider rate-limit header parsing and `/usage` style visibility. |
-| `tools/code_execution_tool.py` | Tool-result isolation and stdout/stderr caps so intermediate execution chatter does not all enter the LLM context. |
-
-Best practice to import: compact much earlier for third-party providers,
-deduplicate/prune old tool output, cap burst concurrency, and show rate-limit
-state explicitly.
-
-## Kilo Code Reference
-
-Local source:
-
-```text
-path: /home/postfiat/repos/agent-harness-study/kilocode
-remote: https://github.com/Kilo-Org/kilocode.git
-commit: 0f55066
-```
-
-Kilo Code is useful because it packages these controls as user-facing product
-settings instead of burying them in the harness.
-
-Important source areas:
-
-| Source | What it shows |
-| --- | --- |
-| `packages/kilo-vscode/webview-ui/src/components/settings/ContextTab.tsx` | Auto compaction, compaction threshold, and prune-old-outputs settings. |
-| `packages/core/src/config/compaction.ts` | Compaction config fields: auto, prune, keep, and buffer. |
-| `packages/opencode/src/session/prompt.ts` | Request-byte pruning, compaction attempt caps, media stripping, and post-summary trimming. |
-| `packages/opencode/src/session/compaction.ts` | Payload-limit pruning and post-compaction tool-output pruning. |
-| `packages/opencode/src/session/processor.ts` | Doom-loop detection for repeated identical tool calls. |
-| `packages/kilo-vscode/src/util/retry.ts` | Retry-After parsing and bounded retry schedule. |
-
-Best practice to import: expose hammer-reduction controls in settings and add
-request-size gates, not just token-window gates.
-
-## Cline Reference
-
-Local source:
-
-```text
-path: /home/postfiat/repos/agent-harness-study/cline
-remote: https://github.com/cline/cline.git
-commit: 19d4248
-```
-
-Cline is open source for the CLI and VS Code extension. Its JetBrains plugin is
-not part of the open-source study.
-
-Important source areas:
-
-| Source | What it shows |
-| --- | --- |
-| `apps/cli/README.md` | CLI compaction modes: `basic`, `agentic`, and `off`; default is `basic`. |
-| `apps/cli/src/utils/compaction-mode.ts` | CLI compaction config construction. |
-| `apps/vscode/src/core/context/context-management/ContextManager.ts` | Compaction decisions based on previous API token usage and context-window info. |
-| `apps/vscode/src/core/context/context-management/context-window-utils.ts` | Fixed safety buffers below advertised context length. |
-| `apps/vscode/src/core/api/retry.ts` | Retry-After and rate-limit reset parsing. |
-| `apps/vscode/src/core/api/providers/cerebras.ts` | Provider-specific max-token cap to preserve rate-limit headroom. |
-| `apps/vscode/src/core/prompts/responses.ts` | Duplicate-read notices, repeated-tool-call notices, and guidance to break large edits into smaller chunks. |
-
-Best practice to import: provide a cheap basic compaction fallback, leave a
-large safety buffer below advertised context, and tune per-provider max output
-so reserved tokens do not exhaust rate buckets.
-
-## Provider Best Practices
-
-| Provider class | Practice |
-| --- | --- |
-| OpenAI/Codex-native | Keep strict `apply_patch` available for models trained to use it. Still track serialized bytes and non-cached/cached input so prompt caching does not hide oversized turns. |
-| Z.AI/GLM 5.2 | Prefer structured edit/write. Do not immediately retry `429` without `Retry-After`; if no header exists, apply local cooldown. Use smaller smoke-test prompts and compact before large context turns. |
-| Ambient GLM | Treat as GLM-class for edit tools and third-party-provider cooldowns. Add provider/model/key cooldown shared across tmux workers. |
-| OpenRouter and generic OpenAI-compatible gateways | Assume rate-limit headers may be missing or provider-specific. Strip unsupported tool types, cap context, and set local exponential cooldown on 429. |
-| Fast inference providers such as Cerebras/Groq | Cap max output tokens because some providers reserve quota based on requested maximum output, not only actual output. |
-| Local providers such as Ollama/LM Studio | They avoid paid API 429s, but context bloat still hurts latency. Keep pruning and loop guards enabled. |
-
-## Target PFTerminal Mechanics
-
-### Provider Cooldown
-
-Add a local provider-state table or equivalent durable store keyed by provider,
-model, and credential fingerprint:
+Add a durable local store keyed by provider, model, and credential fingerprint. Do not store raw API keys.
 
 ```text
 provider_request_state(
@@ -242,6 +120,8 @@ provider_request_state(
   model,
   key_fingerprint,
   cooldown_until,
+  lease_owner,
+  lease_until,
   last_status,
   last_request_id,
   last_input_tokens,
@@ -251,83 +131,95 @@ provider_request_state(
 )
 ```
 
-Before a request, PFTerminal should check this state. If a cooldown is active,
-it should not send the request. It should show the user the wait time and offer
-clear options: wait, compact, switch model/provider, or start a fresh thread.
-
-On `429`, PFTerminal should parse `Retry-After`, `retry-after-ms`, and
-provider reset headers. If no usable header exists, set a local exponential
-cooldown such as 30s, 60s, 120s, capped at 5m.
-
-### Cross-Process Lease
-
-Multiple PFTerminal workers can run from tmux or separate shells. They need a
-shared request lease keyed by provider/model/key so two agents do not send
-large requests through the same credential at the same time.
-
-V0 should default to one active request per provider/model/key. More aggressive
-parallelism can be a config option after telemetry proves it is safe.
-
-### Request Preflight
-
-Before sending to the provider, compute and display:
+Before dispatch, compute and display:
 
 - last user message size;
 - estimated input tokens;
 - cached input tokens from the previous response, when known;
-- serialized request bytes;
+- serialized request bytes after provider-specific formatting;
 - provider/model/key fingerprint;
-- active cooldown or lease holder;
+- active cooldown state;
+- active lease holder, if any;
 - whether compaction is recommended or required.
 
-If the user sends a tiny follow-up while the current context is still tens of
-thousands of tokens, the UI should make that obvious before another provider
-call goes out.
+If the last user message is tiny but the live context is still tens of thousands of tokens, the UI should make that obvious before another provider call goes out.
 
-### Compaction And Pruning
+### 2. Provider Cooldown Circuit Breaker
 
-For third-party providers, default to earlier compaction than the Codex-native
-path:
+On `429`, parse `Retry-After`, `retry-after-ms`, `x-ratelimit-reset`, and equivalent provider reset headers. If no usable header exists, set local cooldown with exponential backoff such as 30s, 60s, 120s, capped at 5m.
+
+While cooldown is active, PFTerminal should not send by default. It should show:
+
+- provider/model/key affected;
+- cooldown expiry and remaining wait;
+- last request token and byte size;
+- options: wait, compact, switch provider/model, start a fresh thread, or explicitly override with a logged force action.
+
+### 3. Cross-Process Request Lease
+
+Multiple PFTerminal workers can run from tmux or separate shells. V0 should allow one active request per provider/model/key. The lease should be durable, have a TTL, and be released when the stream finishes or fails.
+
+If another process holds the lease, the UI should offer to wait, switch provider/model, or cancel. It should not silently send a second large request through the same credential.
+
+### 4. Compaction And Pruning Profiles
+
+For third-party providers, default to earlier compaction than the Codex-native path:
 
 - compact around 50-60 percent of usable model context;
-- protect the initial task/instructions;
+- leave a provider-specific safety buffer below advertised context length;
+- protect the initial task and instructions;
 - protect recent turns by token budget, not only message count;
 - prune or summarize older tool outputs before asking an LLM to compact;
 - store raw old outputs outside prompt context with file path and hash;
-- use request-byte pruning if the serialized body crosses a configured limit;
-- cap compaction attempts per turn.
+- use request-byte pruning when serialized body size crosses a configured limit;
+- cap compaction attempts per turn;
+- keep a basic non-LLM compaction fallback.
 
-This should be a provider profile setting, not a product decision about which
-model is "better." Some providers can handle the larger prompt shape; some
-cannot.
+This should be a provider profile setting, not a product judgment about which model is better.
 
-### Loop Guards
+### 5. Tool Selection And Loop Guards
+
+Use model-appropriate edit tools:
+
+- OpenAI/Codex-native profiles: keep strict `apply_patch` available.
+- GLM-class, OpenRouter, and generic gateway profiles: prefer structured edit/write unless the model is known to handle strict patch grammar reliably.
 
 Add hard guards for:
 
 - repeated identical tool calls;
 - repeated failed edit attempts against the same file and same target text;
 - repeated read-only shell commands when the user set a review cap;
-- repeated immediate provider calls after a provider-side 429.
+- repeated immediate provider calls after a provider-side `429`.
 
-When a guard trips, the runtime should stop and report the specific loop, not
-ask the provider to reason through another full context copy.
+When a guard trips, stop and report the specific loop. Do not ask the provider to reason through another full context copy.
+
+## Provider Best Practices
+
+| Provider class | Practice |
+| --- | --- |
+| OpenAI/Codex-native | Keep strict `apply_patch` available for models trained to use it. Still track serialized bytes, non-cached input, and cached input so prompt caching does not hide oversized turns. |
+| Z.AI/GLM-5.2 class | Prefer structured edit/write. Do not immediately retry `429` without `Retry-After`; if no header exists, apply local cooldown. Use smaller smoke-test prompts and compact before large context turns. |
+| Ambient GLM | Treat as GLM-class for edit tools and third-party-provider cooldowns. Share provider/model/key cooldown and lease state across tmux workers. |
+| OpenRouter and generic OpenAI-compatible gateways | Assume rate-limit headers may be missing or provider-specific. Strip unsupported tool types, cap context, and set local exponential cooldown on 429. |
+| Fast inference providers such as Cerebras/Groq | Cap max output tokens because some providers reserve quota based on requested maximum output, not only actual output. Preserve burst headroom. |
+| Local providers such as Ollama/LM Studio | They avoid paid API 429s, but context bloat still hurts latency. Keep pruning, request-byte checks, and loop guards enabled. |
 
 ## Acceptance Criteria
 
-- After a provider `429`, typing `continue` or `wat` does not send another
-  provider request until cooldown expires or the user explicitly overrides.
-- Two PFTerminal processes using the same provider/model/key share cooldown and
-  active-request state.
-- A tiny user message with a 35k-token live context triggers preflight
-  visibility and optional compaction before request dispatch.
-- Old tool outputs are pruned or summarized before they dominate the prompt.
-- GLM-class models use structured edit/write by default; strict `apply_patch`
-  remains available for Codex-native models.
-- The UI can answer: what provider was hit, how large the request was, how much
-  was cached, why it was blocked or sent, and when it is safe to retry.
+- After a provider `429`, typing "continue" or "wat" does not send another provider request until cooldown expires or the user explicitly overrides.
+- If no provider reset header is present, cooldown follows local backoff such as 30s, 60s, 120s, capped at 5m.
+- Two PFTerminal processes using the same provider/model/key share cooldown and active-request state.
+- A tiny user message with a 35k-token live context triggers preflight visibility before request dispatch.
+- Preflight shows estimated input tokens, cached input tokens when known, serialized request bytes, provider/model/key fingerprint, cooldown state, lease state, and compaction recommendation.
+- Old tool outputs are pruned or summarized before they dominate the prompt; raw outputs are preserved outside prompt context with path and hash.
+- Third-party-provider profiles compact around 50-60 percent of usable context or earlier when request-byte limits require it.
+- GLM-class models use structured edit/write by default; strict `apply_patch` remains available for Codex-native models.
+- Repeated identical tool calls and repeated failed same-file edit attempts stop with a clear guard message.
+- The UI can answer: what provider was hit, how large the request was, how much was cached, why it was blocked or sent, and when it is safe to retry.
 
 ## Source Snapshot Register
+
+Commit values are recorded as captured in the study. OpenCode was captured with a full SHA; Hermes Agent, Kilo Code, and Cline were captured with short SHAs.
 
 | Harness | Local path | Remote | Commit |
 | --- | --- | --- | --- |
@@ -336,3 +228,11 @@ ask the provider to reason through another full context copy.
 | Kilo Code | `/home/postfiat/repos/agent-harness-study/kilocode` | `https://github.com/Kilo-Org/kilocode.git` | `0f55066` |
 | Cline | `/home/postfiat/repos/agent-harness-study/cline` | `https://github.com/cline/cline.git` | `19d4248` |
 
+### Key Source Areas Checked
+
+| Harness | Source areas | Evidence used |
+| --- | --- | --- |
+| OpenCode | `packages/opencode/src/tool/registry.ts`; `packages/opencode/src/tool/edit.ts`; `packages/opencode/src/session/retry.ts`; `packages/opencode/src/session/overflow.ts`; `packages/opencode/src/session/compaction.ts` | Model-gated `apply_patch`, structured edit/write, retry-after parsing, visible retry state, usable-context calculation, and old tool-output pruning. |
+| Hermes Agent | `cli-config.yaml.example`; `agent/context_compressor.py`; `agent/conversation_compression.py`; `agent/retry_utils.py`; `agent/rate_limit_tracker.py`; `tools/code_execution_tool.py` | Compression threshold `0.50`, target ratio `0.20`, first/recent turn protection, old output pruning, compression locks, jittered backoff, rate-limit header tracking, concurrency caps, and stdout/stderr caps. |
+| Kilo Code | Kilo native paths: `packages/kilo-vscode/webview-ui/src/components/settings/ContextTab.tsx`; `packages/core/src/config/compaction.ts`; `packages/kilo-vscode/src/util/retry.ts`. Kilo bundled/forked OpenCode package paths inside `/home/postfiat/repos/agent-harness-study/kilocode`, not the separate OpenCode checkout: `packages/opencode/src/session/prompt.ts`; `packages/opencode/src/session/compaction.ts`; `packages/opencode/src/session/processor.ts`. | User-facing compaction settings, compaction config fields, retry-after parsing, request-byte pruning, payload-limit pruning, media stripping, post-summary trimming, and doom-loop detection for repeated identical tool calls. |
+| Cline | `apps/cli/README.md`; `apps/cli/src/utils/compaction-mode.ts`; `apps/vscode/src/core/context/context-management/ContextManager.ts`; `apps/vscode/src/core/context/context-management/context-window-utils.ts`; `apps/vscode/src/core/api/retry.ts`; `apps/vscode/src/core/api/providers/cerebras.ts`; `apps/vscode/src/core/prompts/responses.ts` | CLI compaction modes `basic`, `agentic`, and `off`; fixed safety buffers; context-window detection; retry-after and reset parsing; provider-specific max-token caps; duplicate-read and repeated-tool-call notices. The JetBrains plugin was not part of the open-source study. |
