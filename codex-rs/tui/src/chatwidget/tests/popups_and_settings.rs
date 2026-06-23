@@ -2721,6 +2721,52 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
 }
 
 #[tokio::test]
+async fn model_picker_dismisses_after_selecting_openrouter_model_without_effort_choices() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some(AMBIENT_DEFAULT_MODEL)).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    let presets = chat
+        .model_catalog
+        .try_list_models()
+        .expect("model catalog should load");
+    chat.open_all_models_popup(presets);
+
+    for _ in 0..5 {
+        chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    }
+    let before = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(
+        before.contains("google/gemini-3.5-flash"),
+        "expected Gemini OpenRouter row before selection:\n{before}"
+    );
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    let mut saw_open_reasoning_popup = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::OpenReasoningPopup { model } = event {
+            assert_eq!(model.model, "google/gemini-3.5-flash");
+            saw_open_reasoning_popup = true;
+            chat.open_reasoning_popup(model);
+        }
+    }
+
+    assert!(
+        saw_open_reasoning_popup,
+        "expected selecting Gemini to dispatch through the model apply path"
+    );
+    assert!(
+        chat.no_modal_or_popup_active(),
+        "expected model picker to dismiss after selecting a no-effort OpenRouter model"
+    );
+    let after = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(
+        !after.contains("Select Model and Effort"),
+        "model picker should no longer be visible after selection:\n{after}"
+    );
+}
+
+#[tokio::test]
 async fn server_overloaded_error_does_not_switch_models() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
     chat.set_model("gpt-5.3-codex");
