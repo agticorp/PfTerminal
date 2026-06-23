@@ -27,8 +27,7 @@ class TargetSpec:
 
 
 @dataclass(frozen=True)
-class PackageVariant:
-    name: str
+class PackageExtraBinary:
     cargo_bin: str
     executable_stem: str
 
@@ -37,8 +36,20 @@ class PackageVariant:
 
 
 @dataclass(frozen=True)
+class PackageVariant:
+    name: str
+    cargo_bin: str
+    executable_stem: str
+    extra_binaries: tuple[PackageExtraBinary, ...] = ()
+
+    def entrypoint_name(self, spec: TargetSpec) -> str:
+        return f"{self.executable_stem}{spec.exe_suffix}"
+
+
+@dataclass(frozen=True)
 class PackageInputs:
     entrypoint_bin: Path
+    extra_bins: dict[str, Path]
     rg_bin: Path
     zsh_bin: Path | None
     bwrap_bin: Path | None
@@ -51,6 +62,9 @@ PACKAGE_VARIANTS: dict[str, PackageVariant] = {
         name="codex",
         cargo_bin="codex",
         executable_stem="codex",
+        extra_binaries=(
+            PackageExtraBinary(cargo_bin="pfterminal", executable_stem="pfterminal"),
+        ),
     ),
     "codex-app-server": PackageVariant(
         name="codex-app-server",

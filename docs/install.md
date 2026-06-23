@@ -30,16 +30,26 @@ its bundled fallback, but installing the OS package removes the startup warning.
 ### Release Installer
 
 The standalone installer downloads a release from `agticorp/PfTerminal` and
-verifies the release artifact digest.
+verifies the release artifact digest. This is the preferred path for normal
+users because it avoids a full Rust source build.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/agticorp/PfTerminal/main/scripts/install/install.sh | sh
 ```
 
-The release installer keeps upstream compatibility and may install the command
-as `codex`. npm and source builds expose the product-facing `pfterminal`
-command. In the rest of this page, replace `pfterminal` with `codex` if that is
-the command your installation provides.
+The release installer creates a `pfterminal` launcher and leaves any existing
+stock `codex` command alone. By default that launcher stores PFTerminal state in
+`$HOME/.pfterminal`, separate from a stock Codex install. Override the defaults
+only when you need a custom install location:
+
+```bash
+PFTERMINAL_INSTALL_DIR="$HOME/.local/bin" \
+PFTERMINAL_HOME="$HOME/.pfterminal" \
+curl -fsSL https://raw.githubusercontent.com/agticorp/PfTerminal/main/scripts/install/install.sh | sh
+```
+
+The installer requires a published GitHub release. If a fresh clone has no
+release yet, use the source build fallback below.
 
 ### Source Build
 
@@ -55,8 +65,13 @@ cargo install --locked just
 cargo install --locked dotslash
 cargo install --locked cargo-nextest
 
-cargo build -p codex-cli --bin pfterminal
+CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build -p codex-cli --bin pfterminal
 ```
+
+The first source build can take 10-20 minutes on a fresh Mac because Cargo has
+to fetch git dependencies and compile the full workspace. The
+`CARGO_NET_GIT_FETCH_WITH_CLI=true` setting avoids intermittent macOS libgit2
+fetch stalls seen with nested git dependencies.
 
 Run the source-built binary from the workspace you want PFTerminal to inspect:
 
@@ -66,13 +81,28 @@ cd ~/repos
 /path/to/PfTerminal/codex-rs/target/debug/pfterminal
 ```
 
+For repeated local use, install a wrapper on your `PATH`:
+
+```bash
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/pfterminal/bin"
+install -m 0755 /path/to/PfTerminal/codex-rs/target/debug/pfterminal \
+  "$HOME/.local/share/pfterminal/bin/pfterminal"
+cat > "$HOME/.local/bin/pfterminal" <<'EOF'
+#!/bin/sh
+export CODEX_HOME="${CODEX_HOME:-${PFTERMINAL_HOME:-$HOME/.pfterminal}}"
+exec "$HOME/.local/share/pfterminal/bin/pfterminal" "$@"
+EOF
+chmod 0755 "$HOME/.local/bin/pfterminal"
+```
+
 Using `CODEX_HOME=$HOME/.pfterminal` keeps PFTerminal credentials, vault data,
 sessions, logs, plugins, and skills separate from a stock Codex install.
 
 ### npm Package
 
 The npm package is `@agticorp/pfterminal` and exposes both `pfterminal` and
-`codex` command aliases.
+`codex` command aliases. The launcher prefers the bundled `pfterminal` binary
+and defaults `CODEX_HOME` to `$HOME/.pfterminal`.
 
 ```bash
 npm install -g @agticorp/pfterminal

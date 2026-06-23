@@ -4,6 +4,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "fs";
 import { createRequire } from "node:module";
+import os from "node:os";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -75,7 +76,7 @@ if (!platformPackage) {
   throw new Error(`Unsupported target triple: ${targetTriple}`);
 }
 
-function findCodexExecutable() {
+function findPFTerminalExecutable() {
   let vendorRoot;
   try {
     const packageJsonPath = require.resolve(`${platformPackage}/package.json`);
@@ -84,14 +85,20 @@ function findCodexExecutable() {
     vendorRoot = path.join(__dirname, "..", "vendor");
   }
 
-  const codexExecutable = path.join(
-    vendorRoot,
-    targetTriple,
-    "bin",
-    process.platform === "win32" ? "codex.exe" : "codex",
-  );
-  if (existsSync(codexExecutable)) {
-    return codexExecutable;
+  const executableNames =
+    process.platform === "win32"
+      ? ["pfterminal.exe", "codex.exe"]
+      : ["pfterminal", "codex"];
+  for (const executableName of executableNames) {
+    const executable = path.join(
+      vendorRoot,
+      targetTriple,
+      "bin",
+      executableName,
+    );
+    if (existsSync(executable)) {
+      return executable;
+    }
   }
 
   const packageManager = detectPackageManager();
@@ -104,7 +111,7 @@ function findCodexExecutable() {
   );
 }
 
-const binaryPath = findCodexExecutable();
+const binaryPath = findPFTerminalExecutable();
 
 // Use an asynchronous spawn instead of spawnSync so that Node is able to
 // respond to signals (e.g. Ctrl-C / SIGINT) while the native binary is
@@ -144,6 +151,10 @@ const packageManagerEnvVar =
 const env = {
   ...process.env,
   [packageManagerEnvVar]: "1",
+  CODEX_HOME:
+    process.env.CODEX_HOME ??
+    process.env.PFTERMINAL_HOME ??
+    path.join(os.homedir(), ".pfterminal"),
   CODEX_MANAGED_PACKAGE_ROOT: realpathSync(path.join(__dirname, "..")),
 };
 

@@ -30,7 +30,7 @@ From this repository:
 
 ```shell
 cd codex-rs
-cargo build -p codex-cli --bin pfterminal
+CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build -p codex-cli --bin pfterminal
 ```
 
 Launch it from the workspace you want PFTerminal to inspect:
@@ -42,7 +42,9 @@ cd /home/postfiat/repos
 ```
 
 Some release paths still expose the upstream-compatible `codex` command. The
-npm package and source build expose the product-facing `pfterminal` command.
+standalone installer, npm package, and source build expose the product-facing
+`pfterminal` command. The installer leaves any existing stock `codex` command
+alone and defaults PFTerminal state to `$HOME/.pfterminal`.
 
 ## Upstream
 

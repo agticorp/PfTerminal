@@ -83,6 +83,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--extra-bin",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help=(
+            "Optional prebuilt extra executable for the selected package variant, "
+            "for example pfterminal=/path/to/pfterminal. May be repeated."
+        ),
+    )
+    parser.add_argument(
         "--bwrap-bin",
         type=Path,
         help=(
@@ -123,6 +133,7 @@ def main() -> int:
     args = parse_args()
     spec = TARGET_SPECS[getattr(args, "target", None) or default_target()]
     variant = PACKAGE_VARIANTS[args.variant]
+    extra_bins = resolve_extra_bin_paths(args.extra_bin, variant, spec)
     package_dir_arg = getattr(args, "package_dir", None)
     package_dir = (
         package_dir_arg.resolve()
@@ -140,6 +151,7 @@ def main() -> int:
             "prebuilt entrypoint executable",
             "--entrypoint-bin",
         ),
+        extra_bins=extra_bins,
         bwrap_bin=resolve_optional_input_path(
             args.bwrap_bin,
             "prebuilt Linux bwrap executable",
@@ -159,6 +171,7 @@ def main() -> int:
     version = read_workspace_version()
     inputs = PackageInputs(
         entrypoint_bin=source_outputs.entrypoint_bin,
+        extra_bins=source_outputs.extra_bins,
         rg_bin=resolve_rg_bin(spec, args.rg_bin),
         zsh_bin=resolve_zsh_bin(spec),
         bwrap_bin=source_outputs.bwrap_bin,
@@ -189,3 +202,33 @@ def resolve_optional_input_path(
         return None
 
     return resolve_input_path(explicit_path, description, flag_name)
+
+
+def resolve_extra_bin_paths(values, variant, spec) -> dict[str, Path]:
+    aliases: dict[str, str] = {}
+    for extra in variant.extra_binaries:
+        output_name = extra.entrypoint_name(spec)
+        aliases[extra.executable_stem] = output_name
+        aliases[output_name] = output_name
+
+    resolved: dict[str, Path] = {}
+    for value in values:
+        if "=" not in value:
+            raise RuntimeError(
+                f"Invalid --extra-bin value {value!r}; expected NAME=PATH."
+            )
+        name, path_text = value.split("=", 1)
+        output_name = aliases.get(name)
+        if output_name is None:
+            valid = ", ".join(sorted(aliases)) or "<none>"
+            raise RuntimeError(
+                f"Unknown extra binary {name!r} for package variant "
+                f"{variant.name!r}; valid names: {valid}."
+            )
+        resolved[output_name] = resolve_input_path(
+            Path(path_text),
+            f"prebuilt extra executable {name}",
+            "--extra-bin",
+        )
+
+    return resolved

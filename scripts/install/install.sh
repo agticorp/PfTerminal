@@ -2,13 +2,13 @@
 
 set -eu
 
-RELEASE="${CODEX_RELEASE:-latest}"
-NON_INTERACTIVE="${CODEX_NON_INTERACTIVE:-false}"
+RELEASE="${PFTERMINAL_RELEASE:-${CODEX_RELEASE:-latest}}"
+NON_INTERACTIVE="${PFTERMINAL_NON_INTERACTIVE:-${CODEX_NON_INTERACTIVE:-false}}"
 
-BIN_DIR="${CODEX_INSTALL_DIR:-$HOME/.local/bin}"
-BIN_PATH="$BIN_DIR/codex"
-CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-STANDALONE_ROOT="$CODEX_HOME_DIR/packages/standalone"
+BIN_DIR="${PFTERMINAL_INSTALL_DIR:-${CODEX_INSTALL_DIR:-$HOME/.local/bin}}"
+BIN_PATH="$BIN_DIR/pfterminal"
+PFTERMINAL_HOME_DIR="${PFTERMINAL_HOME:-${CODEX_HOME:-$HOME/.pfterminal}}"
+STANDALONE_ROOT="$PFTERMINAL_HOME_DIR/packages/standalone"
 RELEASES_DIR="$STANDALONE_ROOT/releases"
 CURRENT_LINK="$STANDALONE_ROOT/current"
 LOCK_FILE="$STANDALONE_ROOT/install.lock"
@@ -76,8 +76,12 @@ parse_args() {
 Usage: install.sh [--release VERSION]
 
 Environment:
-  CODEX_RELEASE          Version to install; overridden by --release.
-  CODEX_NON_INTERACTIVE  Set to 1, true, or yes to skip prompts.
+  PFTERMINAL_RELEASE          Version to install; overridden by --release.
+  PFTERMINAL_NON_INTERACTIVE  Set to 1, true, or yes to skip prompts.
+  PFTERMINAL_INSTALL_DIR      Directory for the pfterminal launcher.
+  PFTERMINAL_HOME             PFTerminal state directory; defaults to ~/.pfterminal.
+
+  Legacy CODEX_* installer variables are still honored as fallbacks.
 EOF
         exit 0
         ;;
@@ -478,7 +482,7 @@ cleanup_stale_install_artifacts() {
   find "$STANDALONE_ROOT" -mindepth 1 -maxdepth 1 -name '.current.*' -exec rm -f {} +
 
   if [ -d "$BIN_DIR" ]; then
-    find "$BIN_DIR" -mindepth 1 -maxdepth 1 -name '.codex.*' -exec rm -f {} +
+    find "$BIN_DIR" -mindepth 1 -maxdepth 1 -name '.pfterminal.*' -exec rm -f {} +
   fi
 }
 
@@ -503,17 +507,29 @@ replace_path_with_symlink() {
 }
 
 version_from_binary() {
-  codex_path="$1"
+  binary_path="$1"
 
-  if [ ! -x "$codex_path" ]; then
+  if [ ! -x "$binary_path" ]; then
     return 1
   fi
 
-  "$codex_path" --version 2>/dev/null | sed -n 's/.* \([0-9][0-9A-Za-z.+-]*\)$/\1/p' | head -n 1
+  "$binary_path" --version 2>/dev/null | sed -n 's/.* \([0-9][0-9A-Za-z.+-]*\)$/\1/p' | head -n 1
 }
 
 current_installed_version() {
+  version="$(version_from_binary "$CURRENT_LINK/bin/pfterminal" || true)"
+  if [ -n "$version" ]; then
+    printf '%s\n' "$version"
+    return 0
+  fi
+
   version="$(version_from_binary "$CURRENT_LINK/bin/codex" || true)"
+  if [ -n "$version" ]; then
+    printf '%s\n' "$version"
+    return 0
+  fi
+
+  version="$(version_from_binary "$CURRENT_LINK/pfterminal" || true)"
   if [ -n "$version" ]; then
     printf '%s\n' "$version"
     return 0
@@ -528,25 +544,16 @@ current_installed_version() {
   return 0
 }
 
-resolve_existing_codex() {
-  command -v codex 2>/dev/null || true
+resolve_existing_pfterminal() {
+  command -v pfterminal 2>/dev/null || true
 }
 
-classify_existing_codex() {
+classify_existing_pfterminal() {
   existing_path="$1"
 
   if [ -z "$existing_path" ] || [ "$existing_path" = "$BIN_PATH" ]; then
     return 1
   fi
-
-  case "$existing_path" in
-    /opt/homebrew/* | /usr/local/*)
-      if [ "$os" = "darwin" ]; then
-        printf 'brew\n'
-        return 0
-      fi
-      ;;
-  esac
 
   if [ -f "$existing_path" ] && grep -F "#!/usr/bin/env node" "$existing_path" >/dev/null 2>&1; then
     case "$existing_path" in
@@ -560,7 +567,8 @@ classify_existing_codex() {
     return 0
   fi
 
-  return 1
+  printf 'manual\n'
+  return 0
 }
 
 prompt_yes_no() {
@@ -599,28 +607,28 @@ prompt_yes_no() {
 print_launch_instructions() {
   case "$path_action" in
     added)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
-      step "Future terminals: open a new terminal and run: codex"
+      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && pfterminal"
+      step "Future terminals: open a new terminal and run: pfterminal"
       step "PATH was added to $path_profile"
       ;;
     updated)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
-      step "Future terminals: open a new terminal and run: codex"
+      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && pfterminal"
+      step "Future terminals: open a new terminal and run: pfterminal"
       step "PATH was updated in $path_profile"
       ;;
     configured)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
-      step "Future terminals: open a new terminal and run: codex"
+      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && pfterminal"
+      step "Future terminals: open a new terminal and run: pfterminal"
       step "PATH is already configured in $path_profile"
       ;;
     *)
-      step "Current terminal: codex"
-      step "Future terminals: open a new terminal and run: codex"
+      step "Current terminal: pfterminal"
+      step "Future terminals: open a new terminal and run: pfterminal"
       ;;
   esac
 }
 
-maybe_launch_codex_now() {
+maybe_launch_pfterminal_now() {
   if prompt_yes_no "Start PFTerminal now?"; then
     step "Launching PFTerminal"
     "$BIN_PATH"
@@ -628,8 +636,8 @@ maybe_launch_codex_now() {
 }
 
 detect_conflicting_install() {
-  existing_path="$(resolve_existing_codex)"
-  manager="$(classify_existing_codex "$existing_path" || true)"
+  existing_path="$(resolve_existing_pfterminal)"
+  manager="$(classify_existing_pfterminal "$existing_path" || true)"
 
   if [ -z "$manager" ]; then
     return
@@ -637,8 +645,8 @@ detect_conflicting_install() {
 
   conflict_manager="$manager"
   conflict_path="$existing_path"
-  step "Detected existing $manager-managed PFTerminal at $existing_path"
-  warn "Multiple managed PFTerminal installs can be ambiguous because PATH order decides which one runs."
+  step "Detected existing PFTerminal at $existing_path"
+  warn "Multiple PFTerminal installs can be ambiguous because PATH order decides which one runs."
 }
 
 handle_conflicting_install() {
@@ -647,8 +655,9 @@ handle_conflicting_install() {
   fi
 
   case "$conflict_manager" in
-    brew)
-      uninstall_cmd="brew uninstall --cask codex"
+    manual)
+      warn "Leaving the existing PFTerminal at $conflict_path in place. Put $BIN_DIR earlier on PATH to use this install."
+      return
       ;;
     bun)
       uninstall_cmd="bun remove -g @agticorp/pfterminal"
@@ -664,7 +673,7 @@ handle_conflicting_install() {
       warn "Failed to uninstall the existing $conflict_manager-managed PFTerminal. Continuing with the standalone install."
     fi
   else
-    warn "Leaving the existing $conflict_manager-managed PFTerminal installed. PATH order will determine which codex runs."
+    warn "Leaving the existing $conflict_manager-managed PFTerminal installed. PATH order will determine which pfterminal runs."
   fi
 }
 
@@ -677,10 +686,17 @@ install_package_release() {
   rm -rf "$stage_release"
   mkdir -p "$stage_release"
   tar -xzf "$archive_path" -C "$stage_release"
-  chmod 0755 "$stage_release/bin/codex" "$stage_release/codex-path/rg"
+  if [ ! -x "$stage_release/bin/pfterminal" ] && [ -x "$stage_release/bin/codex" ]; then
+    ln -sf "codex" "$stage_release/bin/pfterminal"
+  fi
+  chmod 0755 "$stage_release/bin/pfterminal" "$stage_release/codex-path/rg"
+  if [ -f "$stage_release/bin/codex" ]; then
+    chmod 0755 "$stage_release/bin/codex"
+  fi
   if [ -f "$stage_release/codex-resources/bwrap" ]; then
     chmod 0755 "$stage_release/codex-resources/bwrap"
   fi
+  ln -sf "bin/pfterminal" "$stage_release/pfterminal"
   ln -sf "bin/codex" "$stage_release/codex"
 
   if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
@@ -702,9 +718,10 @@ install_legacy_platform_npm_release() {
   mkdir -p "$stage_release/codex-resources" "$extract_dir"
   tar -xzf "$archive_path" -C "$extract_dir"
 
-  cp "$vendor_root/codex/codex" "$stage_release/codex"
+  cp "$vendor_root/codex/codex" "$stage_release/pfterminal"
+  ln -sf "pfterminal" "$stage_release/codex"
   cp "$vendor_root/path/rg" "$stage_release/codex-resources/rg"
-  chmod 0755 "$stage_release/codex" "$stage_release/codex-resources/rg"
+  chmod 0755 "$stage_release/pfterminal" "$stage_release/codex-resources/rg"
   if [ -f "$vendor_root/codex-resources/bwrap" ]; then
     cp "$vendor_root/codex-resources/bwrap" "$stage_release/codex-resources/bwrap"
     chmod 0755 "$stage_release/codex-resources/bwrap"
@@ -729,13 +746,14 @@ release_dir_is_complete() {
   case "$layout" in
     package)
       [ -f "$release_dir/codex-package.json" ] &&
+        [ -x "$release_dir/bin/pfterminal" ] &&
         [ -x "$release_dir/bin/codex" ] &&
-        [ -x "$release_dir/codex" ] &&
+        [ -x "$release_dir/pfterminal" ] &&
         [ -x "$release_dir/codex-path/rg" ] ||
         return 1
       ;;
     legacy-platform-npm)
-      [ -x "$release_dir/codex" ] &&
+      [ -x "$release_dir/pfterminal" ] &&
         [ -x "$release_dir/codex-resources/rg" ] ||
         return 1
       ;;
@@ -757,23 +775,51 @@ update_current_link() {
   replace_path_with_symlink "$CURRENT_LINK" "$release_dir" "$tmp_link"
 }
 
-release_codex_relative_path() {
+release_pfterminal_relative_path() {
   release_dir="$1"
 
-  if [ -x "$release_dir/bin/codex" ]; then
+  if [ -x "$release_dir/bin/pfterminal" ]; then
+    printf 'bin/pfterminal\n'
+  elif [ -x "$release_dir/pfterminal" ]; then
+    printf 'pfterminal\n'
+  elif [ -x "$release_dir/bin/codex" ]; then
     printf 'bin/codex\n'
   else
     printf 'codex\n'
   fi
 }
 
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+write_visible_command_wrapper() {
+  target="$1"
+  tmp_script="$2"
+
+  rm -f "$tmp_script"
+  {
+    printf '#!/bin/sh\n'
+    printf 'export CODEX_HOME="${CODEX_HOME:-${PFTERMINAL_HOME:-$HOME/.pfterminal}}"\n'
+    printf 'exec %s "$@"\n' "$(shell_quote "$target")"
+  } >"$tmp_script"
+  chmod 0755 "$tmp_script"
+
+  if mv -f "$tmp_script" "$BIN_PATH"; then
+    return
+  fi
+
+  rm -f "$BIN_PATH"
+  mv -f "$tmp_script" "$BIN_PATH"
+}
+
 update_visible_command() {
   release_dir="$1"
   mkdir -p "$BIN_DIR"
-  tmp_link="$BIN_DIR/.codex.$$"
-  codex_relative_path="$(release_codex_relative_path "$release_dir")"
+  tmp_script="$BIN_DIR/.pfterminal.$$"
+  pfterminal_relative_path="$(release_pfterminal_relative_path "$release_dir")"
 
-  replace_path_with_symlink "$BIN_PATH" "$CURRENT_LINK/$codex_relative_path" "$tmp_link"
+  write_visible_command_wrapper "$CURRENT_LINK/$pfterminal_relative_path" "$tmp_script"
 }
 
 verify_visible_command() {
@@ -934,4 +980,4 @@ case "$path_action" in
 esac
 
 printf 'PFTerminal CLI %s installed successfully.\n' "$resolved_version"
-maybe_launch_codex_now
+maybe_launch_pfterminal_now

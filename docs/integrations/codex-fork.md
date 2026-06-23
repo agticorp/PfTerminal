@@ -23,7 +23,7 @@ PFTerminal keeps upstream-compatible `codex` paths while adding product-facing c
 - `codex-rs/cli/Cargo.toml` defines both `codex` and `pfterminal` binaries.
 - `codex-rs/cli/src/pfterminal_main.rs` currently includes the same implementation as `main.rs`.
 - `codex-cli/package.json` publishes `@agticorp/pfterminal` with both `pfterminal` and `codex` bin aliases.
-- `codex-cli/bin/codex.js` resolves platform packages named `@agticorp/pfterminal-*`.
+- `codex-cli/bin/codex.js` resolves platform packages named `@agticorp/pfterminal-*`, prefers the bundled `pfterminal` binary, and defaults `CODEX_HOME` to `$HOME/.pfterminal`.
 
 This keeps existing Codex workflows usable while making `pfterminal` the product-facing command.
 
@@ -35,7 +35,9 @@ The npm packaging has been renamed around `@agticorp/pfterminal`:
 - Platform packages: `@agticorp/pfterminal-linux-x64`, `@agticorp/pfterminal-darwin-arm64`, and related target variants.
 - TypeScript SDK package: `@agticorp/pfterminal-sdk`.
 
-Standalone installer scripts in `scripts/install/` use PFTerminal messaging and install locations.
+Standalone installer scripts in `scripts/install/` install a `pfterminal`
+launcher, keep state under `$HOME/.pfterminal` by default, and avoid replacing
+an existing stock `codex` command.
 
 ## Branding Changes
 

@@ -20,6 +20,7 @@ class SourceBinariesForTargetTest(unittest.TestCase):
                 TARGET_SPECS["aarch64-apple-darwin"],
                 PACKAGE_VARIANTS["codex"],
                 build_entrypoint=False,
+                extra_cargo_bins=[],
                 build_bwrap=False,
                 build_codex_command_runner=False,
                 build_codex_windows_sandbox_setup=False,
@@ -35,6 +36,7 @@ class SourceBinariesForTargetTest(unittest.TestCase):
                 TARGET_SPECS["x86_64-unknown-linux-musl"],
                 PACKAGE_VARIANTS["codex"],
                 build_entrypoint=False,
+                extra_cargo_bins=[],
                 build_bwrap=False,
                 build_codex_command_runner=False,
                 build_codex_windows_sandbox_setup=False,
@@ -50,6 +52,7 @@ class SourceBinariesForTargetTest(unittest.TestCase):
                 TARGET_SPECS["x86_64-pc-windows-msvc"],
                 PACKAGE_VARIANTS["codex"],
                 build_entrypoint=False,
+                extra_cargo_bins=[],
                 build_bwrap=False,
                 build_codex_command_runner=False,
                 build_codex_windows_sandbox_setup=False,
@@ -63,6 +66,7 @@ class SourceBinariesForTargetTest(unittest.TestCase):
                 TARGET_SPECS["x86_64-pc-windows-msvc"],
                 PACKAGE_VARIANTS["codex"],
                 build_entrypoint=False,
+                extra_cargo_bins=[],
                 build_bwrap=False,
                 build_codex_command_runner=True,
                 build_codex_windows_sandbox_setup=True,
@@ -74,6 +78,7 @@ class SourceBinariesForTargetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             entrypoint = touch_file(root / "codex.exe")
+            pfterminal = touch_file(root / "pfterminal.exe")
             command_runner = touch_file(root / "codex-command-runner.exe")
             sandbox_setup = touch_file(root / "codex-windows-sandbox-setup.exe")
 
@@ -83,12 +88,14 @@ class SourceBinariesForTargetTest(unittest.TestCase):
                 cargo=str(root / "cargo-that-should-not-run"),
                 profile="release",
                 entrypoint_bin=entrypoint,
+                extra_bins={"pfterminal.exe": pfterminal},
                 bwrap_bin=None,
                 codex_command_runner_bin=command_runner,
                 codex_windows_sandbox_setup_bin=sandbox_setup,
             )
 
         self.assertEqual(outputs.entrypoint_bin, entrypoint)
+        self.assertEqual(outputs.extra_bins["pfterminal.exe"], pfterminal)
         self.assertEqual(outputs.codex_command_runner_bin, command_runner)
         self.assertEqual(outputs.codex_windows_sandbox_setup_bin, sandbox_setup)
 

@@ -90,11 +90,13 @@ case "$bundle" in
     variant="codex"
     entrypoint="codex"
     archive_stem="codex-package"
+    extra_package_args=(--extra-bin "pfterminal=${entrypoint_dir%/}/pfterminal")
     ;;
   app-server)
     variant="codex-app-server"
     entrypoint="codex-app-server"
     archive_stem="codex-app-server-package"
+    extra_package_args=()
     ;;
   *)
     echo "No Codex package variant for bundle: $bundle" >&2
@@ -164,6 +166,12 @@ python_args=(
   --archive-output "$gzip_archive_path"
   --archive-output "$zstd_archive_path"
 )
+if ((${#extra_package_args[@]} > 0)); then
+  if [[ -n "$exe_suffix" ]]; then
+    extra_package_args=(--extra-bin "pfterminal=${entrypoint_dir%/}/pfterminal${exe_suffix}")
+  fi
+  python_args+=("${extra_package_args[@]}")
+fi
 if ((${#resource_args[@]} > 0)); then
   python_args+=("${resource_args[@]}")
 fi

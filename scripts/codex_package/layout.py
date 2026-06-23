@@ -51,6 +51,8 @@ def build_package_dir(
         bin_dir / entrypoint_name,
         is_windows=spec.is_windows,
     )
+    for extra_name, extra_bin in sorted(inputs.extra_bins.items()):
+        copy_executable(extra_bin, bin_dir / extra_name, is_windows=spec.is_windows)
     copy_executable(inputs.rg_bin, path_dir / spec.rg_name, is_windows=spec.is_windows)
 
     if inputs.zsh_bin is not None:
@@ -83,6 +85,9 @@ def build_package_dir(
         "target": spec.target,
         "variant": variant.name,
         "entrypoint": f"bin/{entrypoint_name}",
+        "extraBinaries": [
+            f"bin/{extra.entrypoint_name(spec)}" for extra in variant.extra_binaries
+        ],
         "resourcesDir": "codex-resources",
         "pathDir": "codex-path",
     }
@@ -118,6 +123,9 @@ def validate_package_dir(
         "target": spec.target,
         "variant": variant.name,
         "entrypoint": f"bin/{variant.entrypoint_name(spec)}",
+        "extraBinaries": [
+            f"bin/{extra.entrypoint_name(spec)}" for extra in variant.extra_binaries
+        ],
         "resourcesDir": "codex-resources",
         "pathDir": "codex-path",
     }
@@ -130,6 +138,10 @@ def validate_package_dir(
 
     required_files = [
         Path("bin") / variant.entrypoint_name(spec),
+        *[
+            Path("bin") / extra.entrypoint_name(spec)
+            for extra in variant.extra_binaries
+        ],
         Path("codex-path") / spec.rg_name,
     ]
     executable_files = list(required_files)
