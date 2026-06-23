@@ -478,6 +478,14 @@ impl ChatWidget {
             SlashCommand::MemoryUpdate => {
                 self.add_app_server_stub_message("Memory maintenance");
             }
+            SlashCommand::Vault => {
+                // Bare `/vault` shows status. Subcommands flow through the inline-args path.
+                let lines = crate::vault_command::handle_vault_command(
+                    &self.config.codex_home,
+                    /*args*/ "",
+                );
+                self.add_plain_history_lines(lines);
+            }
             SlashCommand::Mcp => {
                 self.add_mcp_output(McpServerStatusDetail::ToolsAndAuthOnly);
             }
@@ -684,6 +692,29 @@ impl ChatWidget {
                 "verbose" => self.add_mcp_output(McpServerStatusDetail::Full),
                 _ => self.add_error_message("Usage: /mcp [verbose]".to_string()),
             },
+            SlashCommand::Vault => {
+                // `/vault credential add` opens the secure (masked) entry overlay rather than
+                // accepting a secret as chat text. Reject extra args so accidental inline secrets
+                // do not enter local slash-command recall.
+                let mut parts = trimmed.split_whitespace();
+                if matches!(
+                    (parts.next(), parts.next()),
+                    (Some("credential"), Some("add"))
+                ) {
+                    if parts.next().is_some() {
+                        self.bottom_pane.clear_pending_slash_command_history();
+                        self.add_error_message(
+                            "Do not type vault secrets inline. Run `/vault credential add` with no arguments and enter the secret in the secure modal.".to_string(),
+                        );
+                        return;
+                    }
+                    self.open_vault_credential_add();
+                    return;
+                }
+                let lines =
+                    crate::vault_command::handle_vault_command(&self.config.codex_home, trimmed);
+                self.add_plain_history_lines(lines);
+            }
             SlashCommand::Keymap => match trimmed.to_ascii_lowercase().as_str() {
                 "" => self.open_keymap_picker(),
                 "debug" => {
@@ -1052,6 +1083,7 @@ impl ChatWidget {
             | SlashCommand::Apps
             | SlashCommand::Plugins
             | SlashCommand::Rollout
+            | SlashCommand::Vault
             | SlashCommand::Copy
             | SlashCommand::Raw
             | SlashCommand::Vim

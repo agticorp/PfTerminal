@@ -1484,6 +1484,14 @@ impl ChatComposer {
         }
     }
 
+    /// Drop a staged slash-command recall entry before it can be committed.
+    ///
+    /// Used for rejected secret-entry commands where the typed args must not be
+    /// made available through Up-arrow recall.
+    pub(crate) fn clear_pending_slash_command_history(&mut self) {
+        self.pending_slash_command_history = None;
+    }
+
     /// Insert an attachment placeholder and track it for the next submission.
     pub fn attach_image(&mut self, path: PathBuf) {
         self.attachments

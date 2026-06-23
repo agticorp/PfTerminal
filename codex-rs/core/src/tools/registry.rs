@@ -490,6 +490,42 @@ impl ToolRegistry {
             return Err(err);
         }
 
+        if is_explicit_shell_command_budget_tool(&tool_name) {
+            match invocation
+                .turn
+                .record_shell_command_against_explicit_budget()
+            {
+                Ok(Some((used, limit))) => {
+                    tracing::info!(
+                        tool = %tool_name_flat,
+                        used,
+                        limit,
+                        "explicit shell command budget usage recorded"
+                    );
+                }
+                Ok(None) => {}
+                Err(limit) => {
+                    let message = format!(
+                        "Shell command budget exhausted: this turn was explicitly limited to {limit} shell command(s). Do not run another shell command; use the information already gathered and produce the final answer."
+                    );
+                    let log_payload = invocation.payload.log_payload();
+                    otel.tool_result_with_tags(
+                        tool_name_flat.as_ref(),
+                        &call_id_owned,
+                        log_payload.as_ref(),
+                        Duration::ZERO,
+                        /*success*/ false,
+                        &message,
+                        &tool_result_tags,
+                        &extra_trace_fields,
+                    );
+                    let err = FunctionCallError::RespondToModel(message);
+                    dispatch_trace.record_failed(&err);
+                    return Err(err);
+                }
+            }
+        }
+
         notify_tool_start(&invocation).await;
 
         if let Some(pre_tool_use_payload) = tool.pre_tool_use_payload(&invocation) {
@@ -736,6 +772,11 @@ fn unsupported_tool_call_message(payload: &ToolPayload, tool_name: &ToolName) ->
         ToolPayload::Custom { .. } => format!("unsupported custom tool call: {tool_name}"),
         _ => format!("unsupported call: {tool_name}"),
     }
+}
+
+fn is_explicit_shell_command_budget_tool(tool_name: &ToolName) -> bool {
+    tool_name.namespace.is_none()
+        && matches!(tool_name.name.as_str(), "exec_command" | "shell_command")
 }
 #[cfg(test)]
 #[path = "registry_tests.rs"]

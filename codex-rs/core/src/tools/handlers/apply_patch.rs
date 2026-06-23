@@ -23,6 +23,7 @@ use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
 use crate::tools::handlers::apply_granted_turn_permissions;
 use crate::tools::handlers::apply_patch_spec::create_apply_patch_freeform_tool;
+use crate::tools::handlers::emit_model_edit_compat_metric;
 use crate::tools::handlers::resolve_tool_environment;
 use crate::tools::handlers::updated_hook_command;
 use crate::tools::hook_names::HookToolName;
@@ -367,6 +368,12 @@ impl ApplyPatchHandler {
         } = invocation;
 
         let Some(patch_input) = apply_patch_payload_command(&payload) else {
+            emit_model_edit_compat_metric(
+                &turn,
+                "strict_apply_patch",
+                "failure",
+                "unsupported_payload",
+            );
             return Err(FunctionCallError::RespondToModel(
                 "apply_patch handler received unsupported payload".to_string(),
             ));
@@ -374,9 +381,28 @@ impl ApplyPatchHandler {
         let args = match codex_apply_patch::parse_patch(&patch_input) {
             Ok(args) => args,
             Err(parse_error) => {
-                return Err(FunctionCallError::RespondToModel(format!(
-                    "apply_patch verification failed: {parse_error}"
-                )));
+                let failure_count = turn.record_strict_apply_patch_failure();
+                emit_model_edit_compat_metric(
+                    &turn,
+                    "strict_apply_patch",
+                    "failure",
+                    "parse_error",
+                );
+                if turn.structured_edit_fallback_enabled() {
+                    emit_model_edit_compat_metric(
+                        &turn,
+                        "strict_apply_patch",
+                        "fallback",
+                        "structured_edit_threshold",
+                    );
+                }
+                let mut message = format!("apply_patch verification failed: {parse_error}");
+                if turn.structured_edit_fallback_enabled() {
+                    message.push_str(&format!(
+                        "\n\nRepeated apply_patch grammar failures detected ({failure_count}). The next tool plan will switch this turn to structured_edit for existing files and structured_write for new/full-file writes; do not retry apply_patch."
+                    ));
+                }
+                return Err(FunctionCallError::RespondToModel(message));
             }
         };
         let selected_environment_id =
@@ -386,6 +412,7 @@ impl ApplyPatchHandler {
         let Some(turn_environment) =
             resolve_tool_environment(turn.as_ref(), selected_environment_id.as_deref())?
         else {
+            emit_model_edit_compat_metric(&turn, "strict_apply_patch", "failure", "unavailable");
             return Err(FunctionCallError::RespondToModel(
                 "apply_patch is unavailable in this session".to_string(),
             ));
@@ -482,17 +509,48 @@ impl ApplyPatchHandler {
                 }
             }
             codex_apply_patch::MaybeApplyPatchVerified::CorrectnessError(parse_error) => {
+                emit_model_edit_compat_metric(
+                    &turn,
+                    "strict_apply_patch",
+                    "failure",
+                    "verification_error",
+                );
                 Err(FunctionCallError::RespondToModel(format!(
                     "apply_patch verification failed: {parse_error}"
                 )))
             }
             codex_apply_patch::MaybeApplyPatchVerified::ShellParseError(error) => {
                 tracing::trace!("Failed to parse apply_patch input, {error:?}");
-                Err(FunctionCallError::RespondToModel(
-                    "apply_patch handler received invalid patch input".to_string(),
-                ))
+                let failure_count = turn.record_strict_apply_patch_failure();
+                emit_model_edit_compat_metric(
+                    &turn,
+                    "strict_apply_patch",
+                    "failure",
+                    "shell_parse_error",
+                );
+                if turn.structured_edit_fallback_enabled() {
+                    emit_model_edit_compat_metric(
+                        &turn,
+                        "strict_apply_patch",
+                        "fallback",
+                        "structured_edit_threshold",
+                    );
+                }
+                let mut message = "apply_patch handler received invalid patch input".to_string();
+                if turn.structured_edit_fallback_enabled() {
+                    message.push_str(&format!(
+                        "\n\nRepeated apply_patch grammar failures detected ({failure_count}). The next tool plan will switch this turn to structured_edit for existing files and structured_write for new/full-file writes; do not retry apply_patch."
+                    ));
+                }
+                Err(FunctionCallError::RespondToModel(message))
             }
             codex_apply_patch::MaybeApplyPatchVerified::NotApplyPatch => {
+                emit_model_edit_compat_metric(
+                    &turn,
+                    "strict_apply_patch",
+                    "failure",
+                    "not_apply_patch",
+                );
                 Err(FunctionCallError::RespondToModel(
                     "apply_patch handler received non-apply_patch input".to_string(),
                 ))
@@ -651,12 +709,24 @@ pub(crate) async fn intercept_apply_patch(
             }
         }
         codex_apply_patch::MaybeApplyPatchVerified::CorrectnessError(parse_error) => {
+            emit_model_edit_compat_metric(
+                &turn,
+                "strict_apply_patch_shell",
+                "failure",
+                "verification_error",
+            );
             Err(FunctionCallError::RespondToModel(format!(
                 "apply_patch verification failed: {parse_error}"
             )))
         }
         codex_apply_patch::MaybeApplyPatchVerified::ShellParseError(error) => {
             tracing::trace!("Failed to parse apply_patch input, {error:?}");
+            emit_model_edit_compat_metric(
+                &turn,
+                "strict_apply_patch_shell",
+                "failure",
+                "shell_parse_error",
+            );
             Ok(None)
         }
         codex_apply_patch::MaybeApplyPatchVerified::NotApplyPatch => Ok(None),

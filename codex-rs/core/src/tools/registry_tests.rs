@@ -318,6 +318,62 @@ async fn write_stdin_does_not_expose_default_pre_tool_use_payload() {
     assert_eq!(write_stdin.pre_tool_use_payload(&invocation), None);
 }
 
+#[tokio::test]
+async fn explicit_shell_command_budget_blocks_after_limit() -> anyhow::Result<()> {
+    let (session, turn) = crate::session::tests::make_session_and_context().await;
+    turn.set_explicit_shell_command_budget(1);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let shell_tool = codex_tools::ToolName::plain("exec_command");
+    let non_shell_tool = codex_tools::ToolName::plain("read_context");
+    let registry = ToolRegistry::new(HashMap::from([
+        (
+            shell_tool.clone(),
+            Arc::new(TestHandler {
+                tool_name: shell_tool.clone(),
+            }) as Arc<dyn CoreToolRuntime>,
+        ),
+        (
+            non_shell_tool.clone(),
+            Arc::new(TestHandler {
+                tool_name: non_shell_tool.clone(),
+            }) as Arc<dyn CoreToolRuntime>,
+        ),
+    ]));
+
+    registry
+        .dispatch_any(test_invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "shell-1",
+            shell_tool.clone(),
+        ))
+        .await?;
+    let err = match registry
+        .dispatch_any(test_invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "shell-2",
+            shell_tool,
+        ))
+        .await
+    {
+        Ok(_) => panic!("second shell command should be blocked"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("Shell command budget exhausted"),
+        "{err}"
+    );
+
+    registry
+        .dispatch_any(test_invocation(session, turn, "read-1", non_shell_tool))
+        .await?;
+
+    Ok(())
+}
+
 #[test]
 fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
     let result = AnyToolResult {

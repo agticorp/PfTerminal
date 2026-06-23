@@ -12,6 +12,7 @@ use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
@@ -658,6 +659,111 @@ async fn environment_count_controls_environment_backed_tools() {
         multiple_environments.visible_spec("view_image"),
         "environment_id"
     ));
+}
+
+#[tokio::test]
+async fn zai_provider_uses_structured_edit_tools_instead_of_apply_patch() {
+    let plan = probe(|turn| {
+        turn.permission_profile = PermissionProfile::workspace_write();
+        use_zai_provider(turn);
+        turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["structured_edit", "structured_write"]);
+    plan.assert_registered_contains(&["structured_edit", "structured_write"]);
+    plan.assert_visible_lacks(&["apply_patch"]);
+    plan.assert_registered_lacks(&["apply_patch"]);
+}
+
+#[tokio::test]
+async fn glm_model_slug_uses_structured_edit_tools_instead_of_apply_patch() {
+    let plan = probe(|turn| {
+        turn.permission_profile = PermissionProfile::workspace_write();
+        turn.model_info.slug = "glm-5.2".to_string();
+        turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["structured_edit", "structured_write"]);
+    plan.assert_registered_contains(&["structured_edit", "structured_write"]);
+    plan.assert_visible_lacks(&["apply_patch"]);
+    plan.assert_registered_lacks(&["apply_patch"]);
+}
+
+#[tokio::test]
+async fn repeated_strict_patch_failures_switch_turn_to_structured_edit_tools() {
+    let initial = probe(|turn| {
+        turn.permission_profile = PermissionProfile::workspace_write();
+        use_openai_provider(turn);
+        turn.model_info.slug = "gpt-5.2".to_string();
+        turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    initial.assert_visible_contains(&["apply_patch"]);
+    initial.assert_visible_lacks(&["structured_edit", "structured_write"]);
+
+    let fallback = probe(|turn| {
+        turn.permission_profile = PermissionProfile::workspace_write();
+        use_openai_provider(turn);
+        turn.model_info.slug = "gpt-5.2".to_string();
+        turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+        assert_eq!(turn.record_strict_apply_patch_failure(), 1);
+        assert_eq!(turn.record_strict_apply_patch_failure(), 2);
+    })
+    .await;
+
+    fallback.assert_visible_contains(&["structured_edit", "structured_write"]);
+    fallback.assert_registered_contains(&["structured_edit", "structured_write"]);
+    fallback.assert_visible_lacks(&["apply_patch"]);
+    fallback.assert_registered_lacks(&["apply_patch"]);
+}
+
+#[tokio::test]
+async fn structured_edit_tools_accept_environment_id_for_multiple_environments() {
+    let plan = probe(|turn| {
+        turn.permission_profile = PermissionProfile::workspace_write();
+        duplicate_primary_environment(turn);
+        turn.model_info.slug = "glm-5.2".to_string();
+        turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["structured_edit", "structured_write"]);
+    assert!(has_parameter(
+        plan.visible_spec("structured_edit"),
+        "environment_id"
+    ));
+    assert!(has_parameter(
+        plan.visible_spec("structured_write"),
+        "environment_id"
+    ));
+}
+
+#[tokio::test]
+async fn read_only_permission_profile_hides_structured_edit_tools() {
+    let plan = probe(|turn| {
+        turn.permission_profile = PermissionProfile::read_only();
+        turn.model_info.slug = "glm-5.2".to_string();
+        turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_lacks(&["structured_edit", "structured_write", "apply_patch"]);
+    plan.assert_registered_lacks(&["structured_edit", "structured_write", "apply_patch"]);
+}
+
+#[tokio::test]
+async fn read_only_permission_profile_hides_apply_patch_tool() {
+    let plan = probe(|turn| {
+        turn.permission_profile = PermissionProfile::read_only();
+        turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+    })
+    .await;
+
+    plan.assert_visible_lacks(&["apply_patch", "structured_edit", "structured_write"]);
+    plan.assert_registered_lacks(&["apply_patch", "structured_edit", "structured_write"]);
 }
 
 #[tokio::test]

@@ -688,7 +688,8 @@ async fn derive_new_contents_from_chunks(
         })
     })?;
 
-    let mut original_lines: Vec<String> = original_contents.split('\n').map(String::from).collect();
+    let source_line_ending = detect_source_line_ending(&original_contents);
+    let mut original_lines = split_lines_for_patch(&original_contents, source_line_ending);
 
     // Drop the trailing empty element that results from the final newline so
     // that line counts match the behaviour of standard `diff`.
@@ -703,11 +704,32 @@ async fn derive_new_contents_from_chunks(
     if !new_lines.last().is_some_and(String::is_empty) {
         new_lines.push(String::new());
     }
-    let new_contents = new_lines.join("\n");
+    let new_contents = new_lines.join(source_line_ending);
     Ok(AppliedPatch {
         original_contents,
         new_contents,
     })
+}
+
+fn detect_source_line_ending(contents: &str) -> &'static str {
+    if contents.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+fn split_lines_for_patch(contents: &str, source_line_ending: &str) -> Vec<String> {
+    contents
+        .split('\n')
+        .map(|line| {
+            if source_line_ending == "\r\n" {
+                line.strip_suffix('\r').unwrap_or(line).to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect()
 }
 
 /// Compute a list of replacements needed to transform `original_lines` into the
@@ -1071,6 +1093,35 @@ mod tests {
         assert_eq!(stderr_str, "");
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(contents, "foo\nbaz\n");
+    }
+
+    #[tokio::test]
+    async fn test_update_file_hunk_preserves_crlf_line_endings() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("crlf.txt");
+        fs::write(&path, b"foo\r\nbar\r\n").unwrap();
+        let patch = wrap_patch(&format!(
+            r#"*** Update File: {}
+@@
+ foo
+-bar
++baz"#,
+            path.display()
+        ));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        apply_patch(
+            &patch,
+            &PathUri::from_path(dir.path()).expect("absolute test path"),
+            &mut stdout,
+            &mut stderr,
+            LOCAL_FS.as_ref(),
+            /*sandbox*/ None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"foo\r\nbaz\r\n");
     }
 
     #[tokio::test]

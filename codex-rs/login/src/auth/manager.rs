@@ -800,7 +800,11 @@ pub fn logout(
     );
     let removed_auth = storage.delete()?;
     let removed_provider = delete_provider_auth_if_exists(codex_home)?;
-    Ok(removed_auth || removed_provider)
+    // Also wipe any provider keys stored in the encrypted vault (best-effort: a missing
+    // keyring in CI must not fail logout).
+    let removed_vault_provider =
+        super::provider_key_vault::delete_all_provider_keys(codex_home).unwrap_or(false);
+    Ok(removed_auth || removed_provider || removed_vault_provider)
 }
 
 pub async fn logout_with_revoke(
@@ -996,6 +1000,18 @@ pub fn provider_api_key_from_auth_storage(
     _auth_credentials_store_mode: AuthCredentialsStoreMode,
     _keyring_backend_kind: AuthKeyringBackendKind,
 ) -> std::io::Result<Option<String>> {
+    // Prefer the encrypted vault; fall back to the legacy plaintext store for compatibility.
+    if let Some(key) = super::provider_key_vault::read_provider_key(codex_home, provider_key_id)? {
+        return Ok(Some(key));
+    }
+    legacy_provider_key(codex_home, provider_key_id)
+}
+
+/// Read a provider key from the legacy plaintext `provider_auth.json` store only.
+pub(super) fn legacy_provider_key(
+    codex_home: &Path,
+    provider_key_id: &str,
+) -> std::io::Result<Option<String>> {
     Ok(load_provider_auth(codex_home)?
         .api_keys
         .get(provider_key_id)
@@ -1062,11 +1078,40 @@ fn save_provider_api_key(
     provider_key_id: &str,
     api_key: &str,
 ) -> std::io::Result<()> {
+    super::provider_key_vault::write_provider_key(codex_home, provider_key_id, api_key)
+}
+
+/// Write a provider key to the legacy plaintext `provider_auth.json` store only.
+pub(super) fn legacy_save_provider_key(
+    codex_home: &Path,
+    provider_key_id: &str,
+    api_key: &str,
+) -> std::io::Result<()> {
     let mut provider_auth = load_provider_auth(codex_home)?;
     provider_auth
         .api_keys
         .insert(provider_key_id.to_string(), api_key.to_string());
     save_provider_auth(codex_home, &provider_auth)
+}
+
+/// Remove a single provider key from the legacy plaintext `provider_auth.json`.
+///
+/// Used after a vault write succeeds so re-saving a provider key migrates it off plaintext
+/// storage. Removes the file entirely when it becomes empty. Returns `true` if a key was removed.
+pub(super) fn legacy_delete_provider_key(
+    codex_home: &Path,
+    provider_key_id: &str,
+) -> std::io::Result<bool> {
+    let mut provider_auth = load_provider_auth(codex_home)?;
+    let removed = provider_auth.api_keys.remove(provider_key_id).is_some();
+    if removed {
+        if provider_auth.api_keys.is_empty() {
+            delete_provider_auth_if_exists(codex_home)?;
+        } else {
+            save_provider_auth(codex_home, &provider_auth)?;
+        }
+    }
+    Ok(removed)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

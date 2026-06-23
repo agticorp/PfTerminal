@@ -113,6 +113,7 @@ use codex_utils_stream_parser::strip_citations;
 use futures::future::BoxFuture;
 use futures::prelude::*;
 use futures::stream::FuturesOrdered;
+use regex_lite::Regex;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::error;
@@ -480,6 +481,7 @@ async fn run_hooks_and_record_inputs(
             if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty()) {
                 accepted_user_input = true;
             }
+            record_explicit_tool_budgets_from_input(turn_context, input_item);
             record_pending_input(
                 sess,
                 turn_context,
@@ -490,6 +492,54 @@ async fn run_hooks_and_record_inputs(
         }
     }
     blocked_input && !accepted_user_input
+}
+
+fn record_explicit_tool_budgets_from_input(turn_context: &TurnContext, input_item: &TurnInput) {
+    let TurnInput::UserInput { content, .. } = input_item else {
+        return;
+    };
+    if let Some(limit) = explicit_shell_command_budget_from_user_input(content) {
+        turn_context.set_explicit_shell_command_budget(limit);
+    }
+}
+
+fn explicit_shell_command_budget_from_user_input(content: &[UserInput]) -> Option<u64> {
+    content
+        .iter()
+        .filter_map(|input| match input {
+            UserInput::Text { text, .. } => explicit_shell_command_budget_from_text(text),
+            UserInput::Image { .. }
+            | UserInput::LocalImage { .. }
+            | UserInput::Skill { .. }
+            | UserInput::Mention { .. } => None,
+            _ => None,
+        })
+        .min()
+}
+
+fn explicit_shell_command_budget_from_text(text: &str) -> Option<u64> {
+    let lower = text.to_ascii_lowercase();
+    [
+        r"\bat most\s+([0-9]{1,3})\s+(shell\s+)?commands?\b",
+        r"\bno more than\s+([0-9]{1,3})\s+(shell\s+)?commands?\b",
+        r"\bmaximum( of)?\s+([0-9]{1,3})\s+(shell\s+)?commands?\b",
+        r"\bmax\s+([0-9]{1,3})\s+(shell\s+)?commands?\b",
+        r"\buse\s+([0-9]{1,3})\s+or fewer\s+(shell\s+)?commands?\b",
+    ]
+    .into_iter()
+    .filter_map(|pattern| parse_budget_match(pattern, &lower))
+    .filter(|limit| *limit > 0)
+    .min()
+}
+
+fn parse_budget_match(pattern: &str, text: &str) -> Option<u64> {
+    let regex = Regex::new(pattern).ok()?;
+    let captures = regex.captures(text)?;
+    captures
+        .iter()
+        .flatten()
+        .filter_map(|matched| matched.as_str().parse::<u64>().ok())
+        .next()
 }
 
 #[instrument(level = "trace", skip_all)]

@@ -3249,6 +3249,7 @@ dependencies = [
  "codex-secrets",
  "codex-terminal-detection",
  "codex-utils-template",
+ "codex-vault",
  "core_test_support",
  "jsonwebtoken",
  "keyring",
@@ -4036,6 +4037,7 @@ dependencies = [
  "codex-file-search",
  "codex-git-utils",
  "codex-install-context",
+ "codex-keyring-store",
  "codex-login",
  "codex-mcp",
  "codex-message-history",
@@ -4064,6 +4066,7 @@ dependencies = [
  "codex-utils-sandbox-summary",
  "codex-utils-sleep-inhibitor",
  "codex-utils-string",
+ "codex-vault",
  "codex-windows-sandbox",
  "color-eyre",
  "core_test_support",
@@ -4364,6 +4367,26 @@ version = "0.0.0"
 dependencies = [
  "pretty_assertions",
  "v8",
+]
+
+[[package]]
+name = "codex-vault"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "codex-keyring-store",
+ "codex-secrets",
+ "pretty_assertions",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "strum 0.27.2",
+ "strum_macros 0.28.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

@@ -278,7 +278,7 @@ fn ambient_chat_completions_strips_strict_from_tools() {
     assert_eq!(
         tools[1]
             .pointer("/function/parameters/additionalProperties")
-            .and_then(|value| value.as_bool()),
+            .and_then(serde_json::Value::as_bool),
         Some(false)
     );
 }
@@ -607,7 +607,7 @@ fn zai_chat_completions_preserves_function_tools_when_web_search_is_available() 
             phase: None,
             metadata: None,
         }],
-        tools: tools.clone(),
+        tools,
         ..Default::default()
     };
     let mixed_request = client

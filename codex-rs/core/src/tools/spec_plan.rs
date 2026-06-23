@@ -25,6 +25,8 @@ use crate::tools::handlers::RequestUserInputHandler;
 use crate::tools::handlers::ShellCommandHandler;
 use crate::tools::handlers::ShellCommandHandlerOptions;
 use crate::tools::handlers::SleepHandler;
+use crate::tools::handlers::StructuredEditHandler;
+use crate::tools::handlers::StructuredWriteHandler;
 use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::handlers::ViewImageHandler;
@@ -48,6 +50,7 @@ use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHand
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
+use crate::tools::handlers::structured_edit_protocol_enabled;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::hosted_spec::WebSearchToolOptions;
 use crate::tools::hosted_spec::create_image_generation_tool;
@@ -67,6 +70,7 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ToolMode;
+use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -743,7 +747,16 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
         ));
     }
 
-    if environment_mode.has_environment() && turn_context.model_info.apply_patch_tool_type.is_some()
+    if environment_mode.has_environment()
+        && edit_tools_allowed_by_permission_profile(turn_context)
+        && structured_edit_protocol_enabled(turn_context)
+    {
+        let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
+        planned_tools.add(StructuredEditHandler::new(include_environment_id));
+        planned_tools.add(StructuredWriteHandler::new(include_environment_id));
+    } else if environment_mode.has_environment()
+        && edit_tools_allowed_by_permission_profile(turn_context)
+        && turn_context.model_info.apply_patch_tool_type.is_some()
     {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
         planned_tools.add(ApplyPatchHandler::new(include_environment_id));
@@ -766,6 +779,21 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
             ),
             include_environment_id,
         }));
+    }
+}
+
+fn edit_tools_allowed_by_permission_profile(turn_context: &TurnContext) -> bool {
+    let file_system_policy = turn_context.permission_profile.file_system_sandbox_policy();
+    match file_system_policy.kind {
+        FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => true,
+        FileSystemSandboxKind::Restricted => {
+            #[allow(deprecated)]
+            let cwd = turn_context.cwd.as_path();
+            file_system_policy.can_write_path_with_cwd(cwd, cwd)
+                || !file_system_policy
+                    .get_writable_roots_with_cwd(cwd)
+                    .is_empty()
+        }
     }
 }
 

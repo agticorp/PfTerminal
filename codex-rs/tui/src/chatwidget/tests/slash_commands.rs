@@ -2912,6 +2912,35 @@ async fn raw_slash_command_reports_usage_for_invalid_arg() {
 }
 
 #[tokio::test]
+async fn vault_credential_add_rejects_inline_secret_without_recall_leak() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let secret = "sk-inline-secret";
+
+    submit_composer_text(&mut chat, &format!("/vault credential add {secret}"));
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Do not type vault secrets inline"),
+        "expected inline-secret rejection, got {rendered:?}"
+    );
+    assert!(
+        !rendered.contains(secret),
+        "error history must not echo the secret"
+    );
+
+    let recalled = recall_latest_after_clearing(&mut chat);
+    assert!(
+        !recalled.contains(secret),
+        "inline vault secret must not be stored in local recall; recalled {recalled:?}"
+    );
+}
+
+#[tokio::test]
 async fn compact_queues_user_messages_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());

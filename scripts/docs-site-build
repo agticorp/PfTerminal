@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+if [[ -x "$ROOT/.venv-docs/bin/mkdocs" ]]; then
+  "$ROOT/.venv-docs/bin/mkdocs" build --strict
+else
+  mkdocs build --strict
+fi

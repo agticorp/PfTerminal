@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Threaded static file server with HTTP Basic Auth."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hmac
+import http.server
+import os
+from functools import partial
+
+
+class AuthHandler(http.server.SimpleHTTPRequestHandler):
+    expected_authorization: str
+    realm: str
+
+    def _authorized(self) -> bool:
+        supplied = self.headers.get("Authorization", "")
+        return hmac.compare_digest(supplied, self.expected_authorization)
+
+    def _reject(self) -> None:
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", f'Basic realm="{self.realm}"')
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(b"authentication required\n")
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+        if not self._authorized():
+            self._reject()
+            return
+        super().do_GET()
+
+    def do_HEAD(self) -> None:  # noqa: N802 - stdlib handler API
+        if not self._authorized():
+            self._reject()
+            return
+        super().do_HEAD()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8089)
+    parser.add_argument("--directory", default="site")
+    parser.add_argument("--user", default=os.environ.get("PFTERMINAL_DOCS_USER", "postfiat"))
+    parser.add_argument("--password", default=os.environ.get("PFTERMINAL_DOCS_PASSWORD"))
+    parser.add_argument("--realm", default="PFTerminal Docs")
+    args = parser.parse_args()
+    if not args.password:
+        raise SystemExit("missing --password or PFTERMINAL_DOCS_PASSWORD")
+    return args
+
+
+def main() -> None:
+    args = parse_args()
+    token = base64.b64encode(f"{args.user}:{args.password}".encode("utf-8")).decode("ascii")
+    AuthHandler.expected_authorization = f"Basic {token}"
+    AuthHandler.realm = args.realm
+    handler_class = partial(AuthHandler, directory=args.directory)
+    server = http.server.ThreadingHTTPServer((args.host, args.port), handler_class)
+    print(f"serving password-protected PFTerminal docs at http://{args.host}:{args.port}/")
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

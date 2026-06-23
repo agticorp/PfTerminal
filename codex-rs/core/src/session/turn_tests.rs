@@ -37,6 +37,42 @@ fn assistant_output_text(text: &str) -> ResponseItem {
     }
 }
 
+#[test]
+fn explicit_shell_command_budget_parses_common_phrasings() {
+    let cases = [
+        ("Use at most 5 shell commands.", Some(5)),
+        ("Run no more than 4 commands, then answer.", Some(4)),
+        ("Maximum of 3 shell commands for this review.", Some(3)),
+        ("Max 2 commands.", Some(2)),
+        ("Use 6 or fewer shell commands.", Some(6)),
+        ("Use at most 0 shell commands.", None),
+    ];
+
+    for (text, expected) in cases {
+        assert_eq!(
+            explicit_shell_command_budget_from_text(text),
+            expected,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn explicit_shell_command_budget_ignores_non_command_numbers() {
+    assert_eq!(
+        explicit_shell_command_budget_from_text(
+            "Review the 5 largest files and finish within 300 seconds."
+        ),
+        None
+    );
+    assert_eq!(
+        explicit_shell_command_budget_from_text(
+            "Use at most 7 shell commands, but no more than 5 commands if possible."
+        ),
+        Some(5)
+    );
+}
+
 #[tokio::test]
 async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
     let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;

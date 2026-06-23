@@ -9,6 +9,7 @@ mod util;
 
 mod external_bearer;
 mod manager;
+mod provider_key_vault;
 mod revoke;
 
 pub use bedrock_api_key::BedrockApiKeyAuth;

@@ -104,6 +104,7 @@ pub(crate) mod prompt_args;
 mod skill_popup;
 mod skills_toggle_view;
 pub(crate) mod slash_commands;
+pub(crate) mod vault_secret_entry;
 pub(crate) use footer::CollaborationModeIndicator;
 pub(crate) use footer::GoalStatusIndicator;
 #[cfg(test)]
@@ -350,6 +351,11 @@ impl BottomPane {
     /// Slash recall records the submitted command text regardless of whether the command succeeds.
     pub(crate) fn record_pending_slash_command_history(&mut self) {
         self.composer.record_pending_slash_command_history();
+    }
+
+    /// Discard a staged slash-command recall entry before it is recorded.
+    pub(crate) fn clear_pending_slash_command_history(&mut self) {
+        self.composer.clear_pending_slash_command_history();
     }
 
     /// Replace all bottom-pane keymap caches from one resolved runtime keymap.

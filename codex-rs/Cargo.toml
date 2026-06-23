@@ -86,6 +86,7 @@ members = [
     "tui",
     "tools",
     "v8-poc",
+    "vault",
     "utils/absolute-path",
     "utils/path-uri",
     "utils/cargo-bin",
@@ -228,6 +229,7 @@ codex-thread-store = { path = "thread-store" }
 codex-tools = { path = "tools" }
 codex-tui = { path = "tui" }
 codex-uds = { path = "uds" }
+codex-vault = { path = "vault" }
 codex-utils-absolute-path = { path = "utils/absolute-path" }
 codex-utils-approval-presets = { path = "utils/approval-presets" }
 codex-utils-cache = { path = "utils/cache" }

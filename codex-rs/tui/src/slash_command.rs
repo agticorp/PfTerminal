@@ -59,6 +59,7 @@ pub enum SlashCommand {
     Apps,
     Plugins,
     Logout,
+    Vault,
     Quit,
     Exit,
     Feedback,
@@ -137,6 +138,7 @@ impl SlashCommand {
             SlashCommand::Mcp => "list configured MCP tools; use /mcp verbose for details",
             SlashCommand::Apps => "manage apps",
             SlashCommand::Plugins => "browse plugins",
+            SlashCommand::Vault => "manage the encrypted credential vault (keys, tokens)",
             SlashCommand::Logout => "log out of Codex",
             SlashCommand::Rollout => "print the rollout file path",
             SlashCommand::TestApproval => "test approval request",
@@ -167,6 +169,7 @@ impl SlashCommand {
                 | SlashCommand::Btw
                 | SlashCommand::Resume
                 | SlashCommand::SandboxReadRoot
+                | SlashCommand::Vault
         )
     }
 
@@ -181,6 +184,7 @@ impl SlashCommand {
                 | SlashCommand::Status
                 | SlashCommand::Usage
                 | SlashCommand::Ide
+                | SlashCommand::Vault
         )
     }
 
@@ -229,6 +233,7 @@ impl SlashCommand {
             | SlashCommand::Plugins
             | SlashCommand::Title
             | SlashCommand::Statusline
+            | SlashCommand::Vault
             | SlashCommand::AutoReview
             | SlashCommand::Feedback
             | SlashCommand::Ide

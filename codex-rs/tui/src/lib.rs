@@ -195,6 +195,7 @@ mod update_versions;
 mod updates;
 #[cfg(any(not(debug_assertions), test))]
 mod updates_cache;
+mod vault_command;
 mod version;
 mod width;
 #[cfg(any(target_os = "windows", test))]

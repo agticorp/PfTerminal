@@ -20,6 +20,8 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::future::Shared;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use tracing::instrument;
 
@@ -39,6 +41,20 @@ impl TurnSkillsContext {
 }
 
 pub(crate) type ShellSnapshotTask = Shared<BoxFuture<'static, Option<Arc<ShellSnapshotFile>>>>;
+
+const STRICT_APPLY_PATCH_FALLBACK_FAILURE_THRESHOLD: u8 = 2;
+
+#[derive(Debug, Default)]
+pub(crate) struct ModelEditProtocolState {
+    strict_apply_patch_failures: AtomicU8,
+    structured_edit_fallback_enabled: AtomicBool,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ExplicitToolBudgetState {
+    shell_command_limit: AtomicU64,
+    shell_commands_used: AtomicU64,
+}
 
 #[derive(Clone)]
 pub(crate) struct TurnEnvironment {
@@ -141,6 +157,8 @@ pub struct TurnContext {
     pub(crate) turn_skills: TurnSkillsContext,
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
     pub(crate) terminal_error: Arc<Mutex<Option<String>>>,
+    pub(crate) model_edit_protocol_state: Arc<ModelEditProtocolState>,
+    pub(crate) explicit_tool_budget_state: Arc<ExplicitToolBudgetState>,
     pub(crate) server_model_warning_emitted: AtomicBool,
     pub(crate) model_verification_emitted: AtomicBool,
 }
@@ -209,6 +227,83 @@ impl TurnContext {
 
     pub(crate) fn tool_environment_mode(&self) -> ToolEnvironmentMode {
         ToolEnvironmentMode::from_count(self.environments.turn_environments.len())
+    }
+
+    pub(crate) fn record_strict_apply_patch_failure(&self) -> u8 {
+        let failures = self
+            .model_edit_protocol_state
+            .strict_apply_patch_failures
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        if failures >= STRICT_APPLY_PATCH_FALLBACK_FAILURE_THRESHOLD {
+            self.model_edit_protocol_state
+                .structured_edit_fallback_enabled
+                .store(true, Ordering::Release);
+        }
+        failures
+    }
+
+    pub(crate) fn structured_edit_fallback_enabled(&self) -> bool {
+        self.model_edit_protocol_state
+            .structured_edit_fallback_enabled
+            .load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_explicit_shell_command_budget(&self, limit: u64) {
+        if limit == 0 {
+            return;
+        }
+        let mut current = self
+            .explicit_tool_budget_state
+            .shell_command_limit
+            .load(Ordering::Acquire);
+        loop {
+            if current != 0 && current <= limit {
+                return;
+            }
+            match self
+                .explicit_tool_budget_state
+                .shell_command_limit
+                .compare_exchange(current, limit, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    pub(crate) fn record_shell_command_against_explicit_budget(
+        &self,
+    ) -> Result<Option<(u64, u64)>, u64> {
+        let limit = self
+            .explicit_tool_budget_state
+            .shell_command_limit
+            .load(Ordering::Acquire);
+        if limit == 0 {
+            return Ok(None);
+        }
+
+        let mut used = self
+            .explicit_tool_budget_state
+            .shell_commands_used
+            .load(Ordering::Acquire);
+        loop {
+            if used >= limit {
+                return Err(limit);
+            }
+            match self
+                .explicit_tool_budget_state
+                .shell_commands_used
+                .compare_exchange(
+                    used,
+                    used.saturating_add(1),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                Ok(_) => return Ok(Some((used.saturating_add(1), limit))),
+                Err(next) => used = next,
+            }
+        }
     }
 
     pub(crate) async fn with_model(
@@ -294,6 +389,8 @@ impl TurnContext {
             turn_skills: self.turn_skills.clone(),
             turn_timing_state: Arc::clone(&self.turn_timing_state),
             terminal_error: Arc::clone(&self.terminal_error),
+            model_edit_protocol_state: Arc::clone(&self.model_edit_protocol_state),
+            explicit_tool_budget_state: Arc::clone(&self.explicit_tool_budget_state),
             server_model_warning_emitted: AtomicBool::new(
                 self.server_model_warning_emitted.load(Ordering::Relaxed),
             ),
@@ -588,6 +685,8 @@ impl Session {
             turn_skills: TurnSkillsContext::new(skills_snapshot),
             turn_timing_state: Arc::new(TurnTimingState::default()),
             terminal_error: Arc::new(Mutex::new(None)),
+            model_edit_protocol_state: Arc::new(ModelEditProtocolState::default()),
+            explicit_tool_budget_state: Arc::new(ExplicitToolBudgetState::default()),
             server_model_warning_emitted: AtomicBool::new(false),
             model_verification_emitted: AtomicBool::new(false),
         }

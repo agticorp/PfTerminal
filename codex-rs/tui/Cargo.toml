@@ -42,6 +42,7 @@ codex-feedback = { workspace = true }
 codex-file-search = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-login = { workspace = true }
+codex-vault = { workspace = true }
 codex-message-history = { workspace = true }
 codex-model-provider = { workspace = true }
 codex-model-provider-info = { workspace = true }
@@ -149,6 +150,7 @@ arboard = { workspace = true }
 
 [dev-dependencies]
 codex-cli = { workspace = true }
+codex-keyring-store = { workspace = true }
 codex-mcp = { workspace = true }
 core_test_support = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }

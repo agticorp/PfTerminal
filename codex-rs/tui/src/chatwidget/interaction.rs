@@ -328,6 +328,46 @@ impl ChatWidget {
         self.bottom_pane.show_view(Box::new(view));
     }
 
+    /// Open the secure (masked) vault secret-entry overlay for `/vault credential add`.
+    ///
+    /// The label and secret are captured by a dedicated overlay and never flow through the chat
+    /// composer, so they never enter agent context, prompt history, or the transcript. Only a
+    /// non-secret confirmation (or error) is surfaced to history.
+    pub(super) fn open_vault_credential_add(&mut self) {
+        let codex_home = self.config.codex_home.as_path().to_path_buf();
+        let tx = self.app_event_tx.clone();
+        let view = crate::bottom_pane::vault_secret_entry::VaultSecretEntryView::new(Box::new(
+            move |label: String, secret: String| {
+                let vault = codex_vault::Vault::new(codex_home.clone());
+                match vault.add(codex_vault::AddCredential {
+                    label: label.clone(),
+                    credential_type: codex_vault::CredentialType::ManualSecret,
+                    provider: None,
+                    notes: None,
+                    revocation_notes: None,
+                    secret,
+                }) {
+                    Ok(()) => {
+                        tx.send(AppEvent::InsertHistoryCell(Box::new(
+                            history_cell::new_info_event(
+                                format!("Added vault credential {label:?}."),
+                                /*hint*/ None,
+                            ),
+                        )));
+                    }
+                    Err(err) => {
+                        tx.send(AppEvent::InsertHistoryCell(Box::new(
+                            history_cell::new_error_event(format!(
+                                "Failed to add vault credential {label:?}: {err}"
+                            )),
+                        )));
+                    }
+                }
+            },
+        ));
+        self.bottom_pane.show_view(Box::new(view));
+    }
+
     pub(super) fn ensure_thread_rename_allowed(&mut self) -> bool {
         match self.thread_rename_block_message.clone() {
             Some(message) => {
