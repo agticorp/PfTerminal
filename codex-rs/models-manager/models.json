@@ -154,11 +154,11 @@
       "supported_reasoning_levels": [
         {
           "effort": "high",
-          "description": "High. OpenRouter GLM reasoning_effort=high."
+          "description": "High. OpenRouter GLM reasoning effort=high."
         },
         {
           "effort": "xhigh",
-          "description": "Extra high. OpenRouter GLM reasoning_effort=xhigh."
+          "description": "Extra high. OpenRouter GLM reasoning effort=xhigh."
         }
       ],
       "shell_type": "shell_command",
@@ -270,8 +270,25 @@
       "slug": "google/gemini-3.5-flash",
       "display_name": "OpenRouter Gemini 3.5 Flash",
       "description": "OpenRouter: Gemini 3.5 Flash - $1.50/M input, $9.00/M output.",
-      "default_reasoning_level": null,
-      "supported_reasoning_levels": [],
+      "default_reasoning_level": "minimal",
+      "supported_reasoning_levels": [
+        {
+          "effort": "minimal",
+          "description": "Fastest. Minimal OpenRouter reasoning for quick interactive turns."
+        },
+        {
+          "effort": "low",
+          "description": "Low. Light reasoning with lower latency than medium."
+        },
+        {
+          "effort": "medium",
+          "description": "Medium. OpenRouter's default Gemini 3.5 Flash reasoning level."
+        },
+        {
+          "effort": "high",
+          "description": "High. More hidden reasoning for harder tasks, usually slower."
+        }
+      ],
       "shell_type": "shell_command",
       "visibility": "list",
       "supported_in_api": true,

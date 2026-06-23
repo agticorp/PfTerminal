@@ -403,6 +403,8 @@ pub struct ChatCompletionsRequest {
     pub enable_thinking: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Value>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]

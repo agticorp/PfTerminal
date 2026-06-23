@@ -172,6 +172,39 @@ fn test_ambient_model_info() -> ModelInfo {
     .expect("deserialize Ambient test model info")
 }
 
+fn test_openrouter_gemini_model_info() -> ModelInfo {
+    serde_json::from_value(json!({
+        "slug": "google/gemini-3.5-flash",
+        "display_name": "OpenRouter Gemini 3.5 Flash",
+        "description": "OpenRouter Gemini 3.5 Flash",
+        "default_reasoning_level": "minimal",
+        "supported_reasoning_levels": [
+            {"effort": "minimal", "description": "Minimal"},
+            {"effort": "low", "description": "Low"},
+            {"effort": "medium", "description": "Medium"},
+            {"effort": "high", "description": "High"}
+        ],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 1,
+        "upgrade": null,
+        "base_instructions": "base instructions",
+        "model_messages": null,
+        "supports_reasoning_summaries": false,
+        "support_verbosity": false,
+        "default_verbosity": null,
+        "apply_patch_tool_type": null,
+        "truncation_policy": {"mode": "tokens", "limit": 10000},
+        "supports_parallel_tool_calls": true,
+        "supports_image_detail_original": false,
+        "context_window": 1048576,
+        "auto_compact_token_limit": null,
+        "experimental_supported_tools": []
+    }))
+    .expect("deserialize OpenRouter Gemini test model info")
+}
+
 fn test_session_telemetry() -> SessionTelemetry {
     SessionTelemetry::new(
         ThreadId::new(),
@@ -553,6 +586,63 @@ fn ambient_chat_completions_request_uses_zai_reasoning_fields() {
     assert_eq!(deep.enable_thinking, Some(true));
     assert_eq!(deep.emit_usage, Some(true));
     assert_eq!(deep.reasoning_effort.as_deref(), Some("max"));
+}
+
+#[test]
+fn openrouter_chat_completions_request_uses_reasoning_object() {
+    let provider_info = ModelProviderInfo::create_openrouter_provider();
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        provider_info,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*item_ids_enabled*/ false,
+        /*attestation_provider*/ None,
+    );
+    let prompt = super::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            metadata: None,
+        }],
+        ..Default::default()
+    };
+    let model_info = test_openrouter_gemini_model_info();
+
+    let default_request = client
+        .build_chat_completions_request(&prompt, &model_info, None)
+        .expect("default OpenRouter chat request");
+    assert_eq!(default_request.enable_thinking, None);
+    assert_eq!(default_request.emit_usage, None);
+    assert_eq!(default_request.reasoning_effort, None);
+    assert_eq!(
+        default_request
+            .reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.get("effort"))
+            .and_then(|effort| effort.as_str()),
+        Some("minimal")
+    );
+
+    let high_request = client
+        .build_chat_completions_request(&prompt, &model_info, Some(ReasoningEffortConfig::High))
+        .expect("high OpenRouter chat request");
+    assert_eq!(
+        high_request
+            .reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.get("effort"))
+            .and_then(|effort| effort.as_str()),
+        Some("high")
+    );
 }
 
 #[test]

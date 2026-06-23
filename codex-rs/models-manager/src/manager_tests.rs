@@ -1052,4 +1052,28 @@ fn bundled_models_json_contains_openrouter_models() {
             "bundled models.json should include {slug}"
         );
     }
+
+    let openrouter_gemini = response
+        .models
+        .iter()
+        .find(|model| model.slug == "google/gemini-3.5-flash")
+        .expect("bundled models.json should include OpenRouter Gemini 3.5 Flash");
+
+    assert_eq!(
+        openrouter_gemini.default_reasoning_level,
+        Some(ReasoningEffort::Minimal)
+    );
+    assert_eq!(
+        openrouter_gemini
+            .supported_reasoning_levels
+            .iter()
+            .map(|level| level.effort.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            ReasoningEffort::Minimal,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ]
+    );
 }

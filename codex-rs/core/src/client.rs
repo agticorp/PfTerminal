@@ -819,6 +819,24 @@ impl ModelClient {
         }
     }
 
+    fn openrouter_reasoning(
+        model_info: &ModelInfo,
+        effort: Option<&ReasoningEffortConfig>,
+    ) -> Option<Value> {
+        let supports_reasoning = model_info.default_reasoning_level.is_some()
+            || !model_info.supported_reasoning_levels.is_empty();
+        if !supports_reasoning {
+            return None;
+        }
+
+        let effort = effort
+            .or(model_info.default_reasoning_level.as_ref())
+            .map(ReasoningEffortConfig::as_str)?;
+        Some(json!({
+            "effort": effort,
+        }))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn build_responses_request(
         &self,
@@ -961,6 +979,13 @@ impl ModelClient {
             )
             .to_string()
         });
+        let openrouter_reasoning = self
+            .state
+            .provider
+            .info()
+            .is_openrouter()
+            .then(|| Self::openrouter_reasoning(model_info, effort.as_ref()))
+            .flatten();
         let response_format = prompt.output_schema.as_ref().map(|schema| {
             json!({
                 "type": "json_schema",
@@ -986,6 +1011,7 @@ impl ModelClient {
             emit_usage: strip_strict_from_tools.then_some(true),
             enable_thinking: strip_strict_from_tools.then_some(true),
             reasoning_effort: ambient_reasoning_effort,
+            reasoning: openrouter_reasoning,
         })
     }
 

@@ -2731,6 +2731,52 @@ async fn model_picker_dismisses_after_selecting_openrouter_model_without_effort_
         .expect("model catalog should load");
     chat.open_all_models_popup(presets);
 
+    for _ in 0..3 {
+        chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    }
+    let before = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(
+        before.contains("minimax/minimax-m3"),
+        "expected MiniMax OpenRouter row before selection:\n{before}"
+    );
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    let mut saw_open_reasoning_popup = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::OpenReasoningPopup { model } = event {
+            assert_eq!(model.model, "minimax/minimax-m3");
+            saw_open_reasoning_popup = true;
+            chat.open_reasoning_popup(model);
+        }
+    }
+
+    assert!(
+        saw_open_reasoning_popup,
+        "expected selecting Gemini to dispatch through the model apply path"
+    );
+    assert!(
+        chat.no_modal_or_popup_active(),
+        "expected model picker to dismiss after selecting a no-effort OpenRouter model"
+    );
+    let after = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(
+        !after.contains("Select Model and Effort"),
+        "model picker should no longer be visible after selection:\n{after}"
+    );
+}
+
+#[tokio::test]
+async fn model_picker_opens_openrouter_reasoning_options_for_gemini() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some(AMBIENT_DEFAULT_MODEL)).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    let presets = chat
+        .model_catalog
+        .try_list_models()
+        .expect("model catalog should load");
+    chat.open_all_models_popup(presets);
+
     for _ in 0..5 {
         chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     }
@@ -2753,17 +2799,19 @@ async fn model_picker_dismisses_after_selecting_openrouter_model_without_effort_
 
     assert!(
         saw_open_reasoning_popup,
-        "expected selecting Gemini to dispatch through the model apply path"
+        "expected selecting Gemini to open the OpenRouter reasoning picker"
     );
+    let reasoning_popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(
-        chat.no_modal_or_popup_active(),
-        "expected model picker to dismiss after selecting a no-effort OpenRouter model"
+        reasoning_popup.contains("Select Reasoning Level"),
+        "expected OpenRouter Gemini to use the generic reasoning picker:\n{reasoning_popup}"
     );
-    let after = render_bottom_popup(&chat, /*width*/ 100);
-    assert!(
-        !after.contains("Select Model and Effort"),
-        "model picker should no longer be visible after selection:\n{after}"
-    );
+    for label in ["Minimal (default)", "Low", "Medium", "High"] {
+        assert!(
+            reasoning_popup.contains(label),
+            "expected Gemini reasoning option {label:?} in picker:\n{reasoning_popup}"
+        );
+    }
 }
 
 #[tokio::test]
