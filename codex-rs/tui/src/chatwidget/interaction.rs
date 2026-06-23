@@ -333,7 +333,7 @@ impl ChatWidget {
     /// The label and secret are captured by a dedicated overlay and never flow through the chat
     /// composer, so they never enter agent context, prompt history, or the transcript. Only a
     /// non-secret confirmation (or error) is surfaced to history.
-    pub(super) fn open_vault_credential_add(&mut self) {
+    pub(crate) fn open_vault_credential_add(&mut self) {
         let codex_home = self.config.codex_home.as_path().to_path_buf();
         let tx = self.app_event_tx.clone();
         let view = crate::bottom_pane::vault_secret_entry::VaultSecretEntryView::new(Box::new(

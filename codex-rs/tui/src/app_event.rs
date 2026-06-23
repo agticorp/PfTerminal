@@ -738,6 +738,14 @@ pub(crate) enum AppEvent {
         models: Vec<ModelPreset>,
     },
 
+    /// Open the masked vault credential-entry overlay.
+    OpenVaultCredentialAdd,
+
+    /// Copy a vault credential secret to the clipboard without writing it to history.
+    OpenVaultCopySecret {
+        label: String,
+    },
+
     /// Open the confirmation prompt before enabling full access mode.
     OpenFullAccessConfirmation {
         preset: ApprovalPreset,

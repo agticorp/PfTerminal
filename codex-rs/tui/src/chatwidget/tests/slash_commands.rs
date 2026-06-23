@@ -2912,6 +2912,20 @@ async fn raw_slash_command_reports_usage_for_invalid_arg() {
 }
 
 #[tokio::test]
+async fn bare_vault_opens_action_menu_without_history_spam() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_slash_command_dispatch(SlashCommand::Vault);
+
+    assert_eq!(chat.bottom_pane.active_view_id(), Some("vault-menu"));
+    let cells = drain_insert_history(&mut rx);
+    assert!(
+        cells.is_empty(),
+        "bare /vault should open the menu, not insert status history: {cells:?}"
+    );
+}
+
+#[tokio::test]
 async fn vault_credential_add_rejects_inline_secret_without_recall_leak() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let secret = "sk-inline-secret";

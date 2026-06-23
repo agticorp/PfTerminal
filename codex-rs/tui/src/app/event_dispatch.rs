@@ -933,6 +933,12 @@ impl App {
             AppEvent::OpenAllModelsPopup { models } => {
                 self.chat_widget.open_all_models_popup(models);
             }
+            AppEvent::OpenVaultCredentialAdd => {
+                self.chat_widget.open_vault_credential_add();
+            }
+            AppEvent::OpenVaultCopySecret { label } => {
+                self.chat_widget.copy_vault_secret_to_clipboard(label);
+            }
             AppEvent::OpenFullAccessConfirmation {
                 preset,
                 return_to_permissions,

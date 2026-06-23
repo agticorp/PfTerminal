@@ -479,12 +479,9 @@ impl ChatWidget {
                 self.add_app_server_stub_message("Memory maintenance");
             }
             SlashCommand::Vault => {
-                // Bare `/vault` shows status. Subcommands flow through the inline-args path.
-                let lines = crate::vault_command::handle_vault_command(
-                    &self.config.codex_home,
-                    /*args*/ "",
-                );
-                self.add_plain_history_lines(lines);
+                // Bare `/vault` opens the action menu. Subcommands flow through the inline-args
+                // path and still render command output.
+                self.open_vault_menu();
             }
             SlashCommand::Mcp => {
                 self.add_mcp_output(McpServerStatusDetail::ToolsAndAuthOnly);
