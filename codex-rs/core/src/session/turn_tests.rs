@@ -73,6 +73,36 @@ fn explicit_shell_command_budget_ignores_non_command_numbers() {
     );
 }
 
+fn token_usage(input_tokens: i64, cached_input_tokens: i64) -> TokenUsage {
+    TokenUsage {
+        input_tokens,
+        cached_input_tokens,
+        output_tokens: 0,
+        reasoning_output_tokens: 0,
+        total_tokens: input_tokens,
+    }
+}
+
+#[test]
+fn third_party_cache_health_uses_last_provider_usage() {
+    let healthy = token_usage(17_136, 17_088);
+
+    assert!(third_party_cache_looks_healthy(Some(&healthy)));
+    assert!(!third_party_cache_miss_is_known(Some(&healthy)));
+}
+
+#[test]
+fn third_party_cache_miss_requires_large_recent_usage() {
+    let miss = token_usage(17_136, 0);
+    let small = token_usage(1_000, 0);
+
+    assert!(third_party_cache_miss_is_known(Some(&miss)));
+    assert!(!third_party_cache_looks_healthy(Some(&miss)));
+    assert!(!third_party_cache_miss_is_known(Some(&small)));
+    assert!(!third_party_cache_looks_healthy(Some(&small)));
+    assert_eq!(cache_hit_rate(None), None);
+}
+
 #[tokio::test]
 async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
     let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;

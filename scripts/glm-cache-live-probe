@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+PROVIDERS = {
+    "ambient": {
+        "api_key_env": "AMBIENT_API_KEY",
+        "endpoint": "https://api.ambient.xyz/v1/chat/completions",
+        "model": "zai-org/GLM-5.2-FP8",
+    },
+    "zai": {
+        "api_key_env": "ZAI_API_KEY",
+        "endpoint": "https://api.z.ai/api/coding/paas/v4/chat/completions",
+        "model": "glm-5.2",
+        "extra_body": {"thinking": {"type": "disabled"}},
+    },
+}
+
+
+def provider_auth_path() -> Path:
+    home = os.environ.get("PFTERMINAL_HOME") or os.environ.get("CODEX_HOME")
+    if home:
+        return Path(home) / "provider_auth.json"
+    return Path.home() / ".pfterminal" / "provider_auth.json"
+
+
+def read_key(env_name: str) -> str | None:
+    value = os.environ.get(env_name)
+    if value:
+        return value
+    path = provider_auth_path()
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text())
+    api_keys = data.get("api_keys", {})
+    value = api_keys.get(env_name)
+    return value if isinstance(value, str) and value else None
+
+
+def stable_cache_text(prefix_lines: int) -> str:
+    line = (
+        "PFTerminal GLM cache probe stable prefix. "
+        "Keep this byte-identical across calls. "
+        "0123456789 abcdefghijklmnopqrstuvwxyz.\n"
+    )
+    return line * prefix_lines
+
+
+def request_body(provider: dict[str, object], prefix_lines: int) -> bytes:
+    body = {
+        "model": provider["model"],
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a cache probe. Reply with exactly OK.",
+            },
+            {
+                "role": "user",
+                "content": (
+                    stable_cache_text(prefix_lines)
+                    + "\nReturn exactly OK and do not add any other text."
+                ),
+            },
+        ],
+        "stream": False,
+        "temperature": 0,
+        "max_tokens": 4,
+    }
+    body.update(provider.get("extra_body", {}))
+    return json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+
+
+def cached_tokens(usage: dict[str, object]) -> int:
+    details = usage.get("prompt_tokens_details") or {}
+    if not isinstance(details, dict):
+        return 0
+    value = details.get("cached_tokens", 0)
+    return value if isinstance(value, int) else 0
+
+
+def run_call(provider_name: str, provider: dict[str, object], api_key: str, body: bytes) -> dict[str, object]:
+    req = urllib.request.Request(
+        str(provider["endpoint"]),
+        data=body,
+        headers={
+            "authorization": f"Bearer {api_key}",
+            "content-type": "application/json",
+        },
+        method="POST",
+    )
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=90) as response:
+            status = response.status
+            payload = response.read()
+    except urllib.error.HTTPError as err:
+        status = err.code
+        payload = err.read()
+    elapsed_s = round(time.monotonic() - started, 3)
+
+    try:
+        data = json.loads(payload.decode() or "{}")
+    except json.JSONDecodeError:
+        data = {}
+    usage = data.get("usage") if isinstance(data, dict) else None
+    if not isinstance(usage, dict):
+        usage = {}
+    prompt_tokens = usage.get("prompt_tokens")
+    cached = cached_tokens(usage)
+    ratio = None
+    if isinstance(prompt_tokens, int) and prompt_tokens > 0:
+        ratio = round(cached / prompt_tokens, 4)
+    error = data.get("error") if isinstance(data, dict) else None
+    message = None
+    code = None
+    if isinstance(error, dict):
+        message = error.get("message")
+        code = error.get("code")
+    return {
+        "provider": provider_name,
+        "status": status,
+        "elapsed_s": elapsed_s,
+        "request_bytes": len(body),
+        "prompt_tokens": prompt_tokens,
+        "cached_tokens": cached,
+        "cache_hit_ratio": ratio,
+        "total_tokens": usage.get("total_tokens"),
+        "error_code": code,
+        "error_message": message,
+    }
+
+
+def provider_names(selected: str) -> list[str]:
+    if selected == "all":
+        return list(PROVIDERS.keys())
+    return [selected]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Run live GLM prompt-cache probes against configured PFTerminal providers."
+    )
+    parser.add_argument("--provider", choices=["all", *PROVIDERS.keys()], default="all")
+    parser.add_argument("--prefix-lines", type=int, default=160)
+    parser.add_argument("--calls", type=int, default=2)
+    args = parser.parse_args()
+
+    if args.calls < 2:
+        print("--calls must be at least 2", file=sys.stderr)
+        return 2
+    if args.prefix_lines < 1:
+        print("--prefix-lines must be positive", file=sys.stderr)
+        return 2
+
+    results = []
+    ok = True
+    for name in provider_names(args.provider):
+        provider = PROVIDERS[name]
+        env_name = str(provider["api_key_env"])
+        api_key = read_key(env_name)
+        if not api_key:
+            results.append(
+                {
+                    "provider": name,
+                    "ok": False,
+                    "error_message": f"missing {env_name} in env or {provider_auth_path()}",
+                }
+            )
+            ok = False
+            continue
+        body = request_body(provider, args.prefix_lines)
+        provider_results = []
+        for call_index in range(args.calls):
+            result = run_call(name, provider, api_key, body)
+            result["call"] = call_index + 1
+            provider_results.append(result)
+            if result["status"] != 200:
+                ok = False
+        if len(provider_results) >= 2:
+            second = provider_results[1]
+            prompt_tokens = second.get("prompt_tokens")
+            cached = second.get("cached_tokens") or 0
+            second_ok = (
+                second.get("status") == 200
+                and isinstance(prompt_tokens, int)
+                and prompt_tokens > 0
+                and cached / prompt_tokens >= 0.70
+            )
+            ok = ok and second_ok
+            provider_results[-1]["second_call_cache_ok"] = second_ok
+        results.extend(provider_results)
+
+    print(json.dumps({"ok": ok, "results": results}, indent=2, sort_keys=True))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -101,6 +101,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
+use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
@@ -137,6 +138,8 @@ use tracing::warn;
 const PROVIDER_REQUEST_LEASE_TTL_MS: i64 = 10 * 60 * 1000;
 const THIRD_PARTY_PREFLIGHT_WARNING_INPUT_TOKENS: i64 = 32_000;
 const THIRD_PARTY_PREFLIGHT_WARNING_REQUEST_BYTES: i64 = 128 * 1024;
+const THIRD_PARTY_CACHE_HEALTH_MIN_INPUT_TOKENS: i64 = 8_000;
+const THIRD_PARTY_CACHE_HEALTHY_HIT_RATE: f64 = 0.70;
 
 /// Takes initial turn input and runs a loop where, at each sampling request,
 /// the model replies with either:
@@ -294,6 +297,7 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    token_usage: _,
                 } = sampling_request_output;
                 can_drain_pending_input = true;
                 let (has_pending_input, token_status, estimated_token_count) = async {
@@ -1392,6 +1396,7 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+    token_usage: Option<TokenUsage>,
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -1967,9 +1972,12 @@ async fn acquire_provider_request_lease(
 
     let key = provider_request_key(sess, turn_context);
     let token_info = sess.token_usage_info().await;
-    let cached_input_tokens = token_info
+    let last_token_usage = token_info
         .as_ref()
-        .map(|info| info.total_token_usage.cached_input())
+        .map(|info| info.last_token_usage.clone());
+    let last_cached_input_tokens = last_token_usage
+        .as_ref()
+        .map(TokenUsage::cached_input)
         .unwrap_or(0);
     let input_tokens = match sess.get_estimated_token_count(turn_context).await {
         Some(tokens) => tokens,
@@ -2001,12 +2009,19 @@ async fn acquire_provider_request_lease(
         });
     let preflight = ProviderRequestPreflight {
         input_tokens,
-        cached_input_tokens,
+        cached_input_tokens: last_cached_input_tokens,
         request_bytes,
         thread_id: Some(sess.thread_id.to_string()),
         turn_id: Some(turn_context.sub_id.clone()),
     };
-    maybe_emit_provider_request_pressure_warning(sess, turn_context, &key, &preflight).await;
+    maybe_emit_provider_request_pressure_warning(
+        sess,
+        turn_context,
+        &key,
+        &preflight,
+        last_token_usage.as_ref(),
+    )
+    .await;
     let owner = format!(
         "pid:{}:thread:{}:turn:{}",
         std::process::id(),
@@ -2068,6 +2083,7 @@ async fn maybe_emit_provider_request_pressure_warning(
     turn_context: &TurnContext,
     key: &ProviderRequestKey,
     preflight: &ProviderRequestPreflight,
+    last_token_usage: Option<&TokenUsage>,
 ) {
     if turn_context.provider.info().is_openai() {
         return;
@@ -2077,16 +2093,56 @@ async fn maybe_emit_provider_request_pressure_warning(
     {
         return;
     }
+    if third_party_cache_looks_healthy(last_token_usage) {
+        info!(
+            turn_id = %turn_context.sub_id,
+            provider = %key.provider_id,
+            model = %key.model,
+            input_tokens = preflight.input_tokens,
+            last_cached_input_tokens = preflight.cached_input_tokens,
+            request_bytes = preflight.request_bytes,
+            "third-party provider request is large but recent prompt-cache hit is healthy"
+        );
+        return;
+    }
+    if !third_party_cache_miss_is_known(last_token_usage) {
+        info!(
+            turn_id = %turn_context.sub_id,
+            provider = %key.provider_id,
+            model = %key.model,
+            input_tokens = preflight.input_tokens,
+            request_bytes = preflight.request_bytes,
+            "third-party provider request is large; waiting for provider cache telemetry before warning"
+        );
+        return;
+    }
     let message = format!(
-        "Provider preflight: {}/{} is about to send input={} cached_input={} request_bytes={}. This is a hammer risk for third-party providers; compact, switch provider/model, or start a fresh thread if this was a tiny follow-up.",
+        "Provider cache miss: {}/{} is about to send input={} request_bytes={} after the previous large request had cached_input={}. This may hit third-party provider limits; compact or start a fresh thread if this was a tiny follow-up.",
         key.provider_id,
         key.model,
         preflight.input_tokens,
-        preflight.cached_input_tokens,
-        preflight.request_bytes
+        preflight.request_bytes,
+        preflight.cached_input_tokens
     );
     sess.send_event(turn_context, EventMsg::Warning(WarningEvent { message }))
         .await;
+}
+
+fn third_party_cache_looks_healthy(last_token_usage: Option<&TokenUsage>) -> bool {
+    cache_hit_rate(last_token_usage).is_some_and(|rate| rate >= THIRD_PARTY_CACHE_HEALTHY_HIT_RATE)
+}
+
+fn third_party_cache_miss_is_known(last_token_usage: Option<&TokenUsage>) -> bool {
+    cache_hit_rate(last_token_usage).is_some_and(|rate| rate < THIRD_PARTY_CACHE_HEALTHY_HIT_RATE)
+}
+
+fn cache_hit_rate(last_token_usage: Option<&TokenUsage>) -> Option<f64> {
+    let usage = last_token_usage?;
+    let input = usage.input_tokens.max(0);
+    if input < THIRD_PARTY_CACHE_HEALTH_MIN_INPUT_TOKENS {
+        return None;
+    }
+    Some(usage.cached_input() as f64 / input as f64)
 }
 
 async fn record_provider_request_result_for_lease(
@@ -2118,7 +2174,13 @@ fn provider_request_result_from_outcome(
     outcome: &CodexResult<SamplingRequestResult>,
 ) -> ProviderRequestResult {
     match outcome {
-        Ok(_) => ProviderRequestResult::Success,
+        Ok(result) => {
+            let token_usage = result.token_usage.as_ref();
+            ProviderRequestResult::Success {
+                input_tokens: token_usage.map(|usage| usage.input_tokens),
+                cached_input_tokens: token_usage.map(TokenUsage::cached_input),
+            }
+        }
         Err(err) => provider_request_result_from_error(err),
     }
 }
@@ -2209,8 +2271,16 @@ fn format_provider_request_block(key: &ProviderRequestKey, block: &ProviderReque
         .as_deref()
         .map(|id| format!(", request id: {id}"))
         .unwrap_or_default();
+    let provider_cache = if block.last_provider_input_tokens > 0 {
+        format!(
+            " Last provider usage: input={} cached_input={}.",
+            block.last_provider_input_tokens, block.last_provider_cached_input_tokens
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "provider request blocked by local {reason} for {}/{} ({}) for about {wait_seconds}s. Last status: {status}{request_id}. Last preflight: input={} cached_input={} request_bytes={}. Wait, compact, switch provider/model, or start a fresh thread before retrying.",
+        "provider request blocked by local {reason} for {}/{} ({}) for about {wait_seconds}s. Last status: {status}{request_id}. Last preflight: input={} cached_input={} request_bytes={}.{provider_cache} Wait, compact, switch provider/model, or start a fresh thread before retrying.",
         key.provider_id,
         key.model,
         key.key_fingerprint,
@@ -2449,6 +2519,7 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        token_usage: None,
                     });
                 }
             }
@@ -2586,9 +2657,11 @@ async fn try_run_sampling_request(
                 if let Some(false) = end_turn {
                     needs_follow_up = true;
                 }
+                let completed_token_usage = token_usage.clone();
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
+                    token_usage: completed_token_usage,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {

@@ -37,6 +37,8 @@ pub struct ProviderRequestBlock {
     pub last_input_tokens: i64,
     pub last_cached_input_tokens: i64,
     pub last_request_bytes: i64,
+    pub last_provider_input_tokens: i64,
+    pub last_provider_cached_input_tokens: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,7 +55,10 @@ pub enum ProviderRequestLeaseDecision {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderRequestResult {
-    Success,
+    Success {
+        input_tokens: Option<i64>,
+        cached_input_tokens: Option<i64>,
+    },
     Failed {
         status: Option<u16>,
         request_id: Option<String>,
@@ -117,7 +122,9 @@ SELECT
     last_request_id,
     last_input_tokens,
     last_cached_input_tokens,
-    last_request_bytes
+    last_request_bytes,
+    last_provider_input_tokens,
+    last_provider_cached_input_tokens
 FROM provider_request_state
 WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
             "#,
@@ -188,7 +195,10 @@ WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
         now_ms: i64,
     ) -> anyhow::Result<()> {
         match result {
-            ProviderRequestResult::Success => {
+            ProviderRequestResult::Success {
+                input_tokens,
+                cached_input_tokens,
+            } => {
                 sqlx::query(
                     r#"
 UPDATE provider_request_state
@@ -197,11 +207,15 @@ SET lease_owner = NULL,
     cooldown_until_ms = 0,
     last_status = 200,
     last_request_id = NULL,
+    last_provider_input_tokens = COALESCE(?, last_provider_input_tokens),
+    last_provider_cached_input_tokens = COALESCE(?, last_provider_cached_input_tokens),
     consecutive_429_count = 0,
     updated_at_ms = ?
 WHERE provider_id = ? AND model = ? AND key_fingerprint = ? AND lease_owner = ?
                     "#,
                 )
+                .bind(input_tokens.map(|tokens| tokens.max(0)))
+                .bind(cached_input_tokens.map(|tokens| tokens.max(0)))
                 .bind(now_ms)
                 .bind(lease.key.provider_id.as_str())
                 .bind(lease.key.model.as_str())
@@ -320,6 +334,8 @@ fn block_from_row(
         last_input_tokens: row.try_get("last_input_tokens")?,
         last_cached_input_tokens: row.try_get("last_cached_input_tokens")?,
         last_request_bytes: row.try_get("last_request_bytes")?,
+        last_provider_input_tokens: row.try_get("last_provider_input_tokens")?,
+        last_provider_cached_input_tokens: row.try_get("last_provider_cached_input_tokens")?,
     })
 }
 
@@ -455,6 +471,70 @@ mod tests {
                 assert_eq!(block.remaining_ms, 29_500);
                 assert_eq!(block.last_status, Some(429));
                 assert_eq!(block.last_request_id.as_deref(), Some("req-1"));
+            }
+            ProviderRequestLeaseDecision::Acquired(_) => panic!("expected cooldown block"),
+        }
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn success_result_records_provider_reported_cache_usage() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
+
+        let ProviderRequestLeaseDecision::Acquired(lease) = runtime
+            .try_acquire_provider_request_lease(&key(), &preflight(), "worker-a", 10_000, 1_000)
+            .await
+            .expect("acquire lease")
+        else {
+            panic!("expected acquired lease");
+        };
+        runtime
+            .record_provider_request_result(
+                &lease,
+                ProviderRequestResult::Success {
+                    input_tokens: Some(17_136),
+                    cached_input_tokens: Some(17_088),
+                },
+                2_000,
+            )
+            .await
+            .expect("record success");
+
+        let ProviderRequestLeaseDecision::Acquired(second) = runtime
+            .try_acquire_provider_request_lease(&key(), &preflight(), "worker-b", 10_000, 2_500)
+            .await
+            .expect("acquire second lease")
+        else {
+            panic!("expected second lease");
+        };
+        runtime
+            .record_provider_request_result(
+                &second,
+                ProviderRequestResult::Failed {
+                    status: Some(429),
+                    request_id: None,
+                    retry_after_ms: None,
+                },
+                3_000,
+            )
+            .await
+            .expect("record 429");
+
+        let blocked = runtime
+            .try_acquire_provider_request_lease(&key(), &preflight(), "worker-c", 10_000, 3_500)
+            .await
+            .expect("blocked after cooldown");
+        match blocked {
+            ProviderRequestLeaseDecision::Blocked(block) => {
+                assert_eq!(block.reason, ProviderRequestBlockReason::Cooldown);
+                assert_eq!(block.last_input_tokens, 37_492);
+                assert_eq!(block.last_cached_input_tokens, 20_000);
+                assert_eq!(block.last_provider_input_tokens, 17_136);
+                assert_eq!(block.last_provider_cached_input_tokens, 17_088);
             }
             ProviderRequestLeaseDecision::Acquired(_) => panic!("expected cooldown block"),
         }

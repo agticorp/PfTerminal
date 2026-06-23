@@ -13,6 +13,8 @@
 - [x] Implemented request-byte/input-token preflight telemetry and third-party hammer-risk warnings before dispatch.
 - [x] Implemented hard identical-tool-call loop guard and verified GLM-class structured edit/write routing.
 - [x] Rebuilt `pfterminal` and ran a mechanical fake-provider benchmark proving immediate post-`429` retries are blocked locally.
+- [x] Verified live GLM prompt caching on Z.AI and Ambient using real provider calls, not mocks.
+- [x] Implemented cache-aware provider telemetry so large third-party requests do not produce user-facing warnings when the previous live request reported a healthy provider cache hit.
 
 ## To Do
 
@@ -30,7 +32,8 @@ Status: implementation and mechanical benchmark verified on 2026-06-23. Evidence
 - PFTerminal is a Codex fork. It inherits Codex behavior where each turn rebuilds model input from live conversation history until compaction cuts it down.
 - The observed failure was not mainly an internal automatic `429` retry loop. Generic provider config has `retry_429: false`, and the `429` surfaced at attempt 0.
 - The missing control is a local dispatch gate: preflight sizing, provider cooldown, and a cross-process lease shared by all PFTerminal workers using the same provider/model/key.
-- Prompt caching can reduce the billable-looking UI number, but it does not make the request shape small. The rollout recorded cumulative input of `888,271`, including `624,384` cached input.
+- GLM prompt caching is automatic at the provider layer. PFTerminal must preserve stable prefixes and read provider-reported `usage.prompt_tokens_details.cached_tokens`; it should not invent a client-side response cache.
+- Prompt caching can reduce repeated computation and cost, but it does not make the serialized request body small. The rollout recorded cumulative input of `888,271`, including `624,384` cached input.
 - V0 should stop hammering by default: if cooldown or lease is active, do not send; show wait time and offer wait, compact, switch provider/model, or start a fresh thread.
 - P1 should reduce future request size with earlier third-party-provider compaction, old tool-output pruning, request-byte gates, and loop guards.
 - Provider profiles should differ. Codex-native models can keep strict `apply_patch`; GLM-class and generic gateway profiles should prefer structured edit/write and tighter context controls.
@@ -94,6 +97,18 @@ A paid provider plan does not remove per-minute request, token, burst, or concur
 | Auto compaction | Compaction is tied to token-window pressure, not provider 429s or repeated small follow-ups. | `codex-rs/core/src/session/turn.rs` |
 | Token display | UI total uses non-cached input plus output, while cached input is recorded separately. | `codex-rs/protocol/src/protocol.rs` |
 | Edit tool choice | PFTerminal has structured edit/write for selected profiles; Codex-native models can keep strict `apply_patch`. | `codex-rs/core/src/tools/spec_plan.rs` |
+
+### GLM Prompt Cache Mechanics
+
+Z.AI documents [context caching](https://docs.z.ai/guides/capabilities/cache) as automatic: repeated or highly similar input content is identified by the provider, and cache use is reported in `usage.prompt_tokens_details.cached_tokens`. The coding-plan endpoint must be `https://api.z.ai/api/coding/paas/v4`, not the general API endpoint.
+
+PFTerminal therefore should not add a fake local LLM-response cache. The low-friction implementation is:
+
+- keep the inherited conversation prefix as stable as possible between turns;
+- parse and preserve provider `cached_tokens` telemetry from Chat Completions responses;
+- warn only when a large third-party request follows a known large cache miss;
+- stay quiet when the previous provider response shows a healthy cache hit;
+- keep cooldown and leases for actual provider `429`s, because caching reduces repeated computation but does not guarantee provider worker availability.
 
 ### Reference Harness Lessons
 
@@ -219,6 +234,8 @@ When a guard trips, stop and report the specific loop. Do not ask the provider t
 | Reset-header parsing | `codex-rs/codex-api/src/api_bridge.rs` extracts `retry-after-ms`, `retry-after`, `x-ratelimit-reset-ms`, and `x-ratelimit-reset`. | `cargo test -p codex-api map_api_error_maps_retry_after_ms_for_generic_429 -- --nocapture` |
 | Cross-process lease | Provider request leases are acquired before dispatch and released after stream success/failure. Lease TTL is 10 minutes to avoid stale process lockout. | State tests cover active lease blocking and release allowing the next worker. |
 | Request-size preflight | `ModelClientSession::serialized_request_body_bytes(...)` serializes the exact outbound Responses or Chat request body before dispatch. Third-party providers warn at 32k input tokens or 128 KiB serialized body. | Fake-provider benchmark recorded a 38,577-byte request and then blocked the next immediate run locally. |
+| Cache-aware preflight | `codex-rs/codex-api/src/endpoint/chat_completions.rs` parses `usage.prompt_tokens_details.cached_tokens`. `codex-rs/core/src/session/turn.rs` now uses last-turn provider cache telemetry to suppress noisy gross-size warnings after healthy cache hits and warn only after known large cache misses. | `cargo test -p codex-core third_party_cache -- --nocapture`; `scripts/glm-cache-live-probe --provider zai --prefix-lines 600`; `scripts/glm-cache-live-probe --provider ambient --prefix-lines 160` |
+| Provider cache evidence in cooldown state | `codex-rs/state/migrations/0041_provider_request_cache_usage.sql` and `codex-rs/state/src/runtime/provider_requests.rs` persist provider-reported input and cached-input tokens after successful requests, so future local block messages can show the last real cache result. | `cargo test -p codex-state provider_requests -- --nocapture` |
 | Repeated immediate provider calls after `429` | `try_run_sampling_request(...)` blocks before `client_session.stream(...)` when cooldown is active, so the provider is not contacted. | `scripts/hammer-reduction-benchmark` shows `new_post_requests_on_second_run: 0`. |
 | Identical tool-call loop guard | `codex-rs/core/src/tools/parallel.rs` stops the fourth identical tool call in one turn using a tool-name plus payload hash signature. | `cargo test -p codex-core repeated_identical_tool_calls_are_stopped_after_budget -- --nocapture` |
 | GLM-class edit routing | Existing structured edit/write routing remains the preferred path for GLM/Z.AI/Ambient-style profiles, with strict `apply_patch` still available for Codex-native profiles. | `cargo test -p codex-core glm_model_slug_uses_structured_edit_tools_instead_of_apply_patch -- --nocapture`; `cargo test -p codex-core zai_provider_uses_structured_edit_tools_instead_of_apply_patch -- --nocapture`; `cargo test -p codex-core repeated_strict_patch_failures_switch_turn_to_structured_edit_tools -- --nocapture` |
@@ -256,6 +273,31 @@ Benchmark JSON excerpt:
   "requests_after_second": 1
 }
 ```
+
+## Live GLM Cache Probe
+
+Probe commands:
+
+```bash
+scripts/glm-cache-live-probe
+scripts/glm-cache-live-probe --provider zai --prefix-lines 600
+scripts/glm-cache-live-probe --provider ambient --prefix-lines 160
+```
+
+Probe shape:
+
+| Provider | Endpoint class | Request bytes | Call 1 | Call 2 | Result |
+| --- | --- | ---: | --- | --- | --- |
+| Z.AI | Coding-plan Chat Completions | `72,864` | `prompt_tokens=21,029`, `cached_tokens=14,656` | `prompt_tokens=21,029`, `cached_tokens=20,992` | `99.82%` second-call cache hit |
+| Ambient | Ambient Chat Completions | `19,605` | `prompt_tokens=5,635`, `cached_tokens=0` | `prompt_tokens=5,635`, `cached_tokens=5,632` | `99.95%` second-call cache hit |
+
+The default all-provider probe also passed on 2026-06-23 with `99.95%` second-call cache hit on Ambient and `98.92%` cache hit on both Z.AI calls, because the Z.AI prefix was already warm from the prior probe.
+
+Provider capacity caveat:
+
+- Ambient returned `429 No workers are currently available` for the larger `51,065` byte and `31,705` byte live probes during this run.
+- Z.AI returned provider overload code `1305` for a `116,424` byte live probe during this run.
+- Those failures confirm caching is not a substitute for request-size control and provider cooldowns. It is a provider-side optimization PFTerminal should observe and use when available.
 
 ## Acceptance Criteria
 
