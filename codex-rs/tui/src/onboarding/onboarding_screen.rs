@@ -53,6 +53,7 @@ use crate::tui::FrameRequester;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
 use color_eyre::eyre::Result;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -148,13 +149,21 @@ fn provider_api_key_options(config: &Config) -> Vec<ApiKeyProviderOption> {
         });
     }
 
+    sort_and_dedupe_provider_api_key_options(&mut options);
+
+    options
+}
+
+fn sort_and_dedupe_provider_api_key_options(options: &mut Vec<ApiKeyProviderOption>) {
     options.sort_by(|a, b| {
         provider_api_key_sort_rank(&a.id)
             .cmp(&provider_api_key_sort_rank(&b.id))
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.id.cmp(&b.id))
     });
-    options
+
+    let mut seen_env_keys = HashSet::new();
+    options.retain(|option| seen_env_keys.insert(option.env_var.clone()));
 }
 
 fn provider_api_key_sort_rank(provider_id: &str) -> usize {
@@ -741,7 +750,9 @@ mod tests {
     use super::Step;
     use super::StepStateProvider;
     use super::persist_selected_trust;
+    use super::sort_and_dedupe_provider_api_key_options;
     use super::suppress_quit_while_typing_api_key;
+    use crate::onboarding::auth::ApiKeyProviderOption;
     use crate::onboarding::trust_directory::TrustDirectorySelection;
     use crate::onboarding::trust_directory::TrustDirectoryWidget;
     use crate::tui::FrameRequester;
@@ -797,6 +808,37 @@ mod tests {
             },
         );
         assert!(!suppressed);
+    }
+
+    #[test]
+    fn provider_api_key_options_dedupe_duplicate_env_keys() {
+        let mut options = vec![
+            ApiKeyProviderOption {
+                id: "ambientproxy".to_string(),
+                name: "Ambient Proxy".to_string(),
+                env_var: "AMBIENT_API_KEY".to_string(),
+            },
+            ApiKeyProviderOption {
+                id: "ambient".to_string(),
+                name: "Ambient".to_string(),
+                env_var: "AMBIENT_API_KEY".to_string(),
+            },
+            ApiKeyProviderOption {
+                id: "zai".to_string(),
+                name: "Z.AI".to_string(),
+                env_var: "ZAI_API_KEY".to_string(),
+            },
+        ];
+
+        sort_and_dedupe_provider_api_key_options(&mut options);
+
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| (option.id.as_str(), option.env_var.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("ambient", "AMBIENT_API_KEY"), ("zai", "ZAI_API_KEY")]
+        );
     }
 
     #[tokio::test]
