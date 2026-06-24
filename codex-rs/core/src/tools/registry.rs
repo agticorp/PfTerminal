@@ -747,12 +747,13 @@ async fn handle_any_tool(
 }
 
 fn function_hook_tool_name(invocation: &ToolInvocation) -> HookToolName {
-    if invocation.tool_name.name == "spawn_agent"
-        && matches!(
-            invocation.tool_name.namespace.as_deref(),
-            None | Some(MULTI_AGENT_V1_NAMESPACE)
-        )
-    {
+    if matches!(
+        invocation.tool_name.name.as_str(),
+        "spawn_agent" | "spawn_agent_v1"
+    ) && matches!(
+        invocation.tool_name.namespace.as_deref(),
+        None | Some(MULTI_AGENT_V1_NAMESPACE)
+    ) {
         return HookToolName::spawn_agent();
     }
 

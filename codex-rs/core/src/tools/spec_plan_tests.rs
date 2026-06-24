@@ -1229,6 +1229,7 @@ async fn excluded_deferred_namespaces_do_not_enable_nested_tool_guidance() {
 #[tokio::test]
 async fn multi_agent_feature_selects_one_agent_tool_family() {
     let v1 = probe(|turn| {
+        use_openai_provider(turn);
         set_feature(turn, Feature::Collab, /*enabled*/ true);
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
     })
@@ -1367,6 +1368,7 @@ async fn tool_mode_selector_overrides_feature_flags() {
 #[tokio::test]
 async fn v1_multi_agent_tools_defer_when_tool_search_available() {
     let plan = probe(|turn| {
+        use_openai_provider(turn);
         turn.model_info.supports_search_tool = true;
         set_feature(turn, Feature::Collab, /*enabled*/ true);
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
@@ -1410,8 +1412,50 @@ async fn v1_multi_agent_tools_defer_when_tool_search_available() {
 }
 
 #[tokio::test]
+async fn v1_multi_agent_tools_flatten_for_openrouter_without_namespace_tools() {
+    let plan = probe(|turn| {
+        use_openrouter_provider(turn);
+        set_feature(turn, Feature::Collab, /*enabled*/ true);
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
+    })
+    .await;
+
+    plan.assert_visible_contains(&[
+        "spawn_agent_v1",
+        "send_input_v1",
+        "wait_agent_v1",
+        "close_agent_v1",
+    ]);
+    plan.assert_visible_lacks(&[MULTI_AGENT_V1_NAMESPACE, "spawn_agent"]);
+    plan.assert_registered_contains(&[
+        "spawn_agent_v1",
+        "send_input_v1",
+        "wait_agent_v1",
+        "close_agent_v1",
+        &ToolName::namespaced(MULTI_AGENT_V1_NAMESPACE, "spawn_agent").to_string(),
+    ]);
+    for tool_name in [
+        "spawn_agent_v1",
+        "send_input_v1",
+        "wait_agent_v1",
+        "close_agent_v1",
+    ] {
+        assert_eq!(plan.exposure(tool_name), ToolExposure::Direct);
+        let ToolSpec::Function(tool) = plan.visible_spec(tool_name) else {
+            panic!("expected {tool_name} to be exposed as a plain function");
+        };
+        assert_eq!(tool.name, tool_name);
+        assert!(
+            tool.description
+                .contains("Compatibility alias for V1 subagent support")
+        );
+    }
+}
+
+#[tokio::test]
 async fn multi_agent_v2_can_use_configured_tool_namespace() {
     let namespaced = probe(|turn| {
+        use_openai_provider(turn);
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
         update_config(turn, |config| {
             config.multi_agent_v2.tool_namespace = Some("agents".to_string());

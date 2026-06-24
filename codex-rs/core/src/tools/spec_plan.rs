@@ -76,6 +76,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
+use codex_tools::ResponsesApiTool;
 use codex_tools::TOOL_SEARCH_TOOL_NAME;
 use codex_tools::ToolCall as ExtensionToolCall;
 use codex_tools::ToolEnvironmentMode;
@@ -855,27 +856,44 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
         } else {
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
-            let exposure =
-                if search_tool_enabled(turn_context) && namespace_tools_enabled(turn_context) {
-                    ToolExposure::Deferred
-                } else {
-                    ToolExposure::Direct
-                };
-            planned_tools.add_with_exposure(
-                SpawnAgentHandler::new(SpawnAgentToolOptions {
-                    available_models: turn_context.available_models.clone(),
-                    agent_type_description,
-                    hide_agent_type_model_reasoning: false,
-                    include_usage_hint: turn_context.config.multi_agent_v2.usage_hint_enabled,
-                    usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
-                }),
-                exposure,
-            );
+            let namespace_tools_available = namespace_tools_enabled(turn_context);
+            let exposure = if search_tool_enabled(turn_context) && namespace_tools_available {
+                ToolExposure::Deferred
+            } else {
+                ToolExposure::Direct
+            };
+            let spawn_options = SpawnAgentToolOptions {
+                available_models: turn_context.available_models.clone(),
+                agent_type_description,
+                hide_agent_type_model_reasoning: false,
+                include_usage_hint: turn_context.config.multi_agent_v2.usage_hint_enabled,
+                usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
+            };
+            planned_tools
+                .add_with_exposure(SpawnAgentHandler::new(spawn_options.clone()), exposure);
             planned_tools.add_with_exposure(SendInputHandler, exposure);
             planned_tools.add_with_exposure(ResumeAgentHandler, exposure);
             planned_tools
                 .add_with_exposure(WaitAgentHandler::new(context.wait_agent_timeouts), exposure);
             planned_tools.add_with_exposure(CloseAgentHandler, exposure);
+            if v1_plain_function_subagents_enabled(turn_context) {
+                planned_tools.add_arc(multi_agent_v1_plain_function_handler(
+                    SpawnAgentHandler::new(spawn_options),
+                    "spawn_agent_v1",
+                ));
+                planned_tools.add_arc(multi_agent_v1_plain_function_handler(
+                    SendInputHandler,
+                    "send_input_v1",
+                ));
+                planned_tools.add_arc(multi_agent_v1_plain_function_handler(
+                    WaitAgentHandler::new(context.wait_agent_timeouts),
+                    "wait_agent_v1",
+                ));
+                planned_tools.add_arc(multi_agent_v1_plain_function_handler(
+                    CloseAgentHandler,
+                    "close_agent_v1",
+                ));
+            }
         }
     }
 
@@ -1069,6 +1087,99 @@ fn multi_agent_v2_handler(
         }),
         None => Arc::new(handler),
     }
+}
+
+fn v1_plain_function_subagents_enabled(turn_context: &TurnContext) -> bool {
+    let provider_info = turn_context.provider.info();
+    !namespace_tools_enabled(turn_context)
+        && (provider_info.is_ambient()
+            || provider_info.is_zai()
+            || provider_info.is_openrouter()
+            || provider_info.is_baseten())
+}
+
+fn multi_agent_v1_plain_function_handler(
+    handler: impl CoreToolRuntime + 'static,
+    plain_name: &'static str,
+) -> Arc<dyn CoreToolRuntime> {
+    Arc::new(MultiAgentV1PlainFunctionOverride {
+        handler: Arc::new(handler),
+        plain_name,
+    })
+}
+
+struct MultiAgentV1PlainFunctionOverride {
+    handler: Arc<dyn CoreToolRuntime>,
+    plain_name: &'static str,
+}
+
+impl ToolExecutor<ToolInvocation> for MultiAgentV1PlainFunctionOverride {
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain(self.plain_name)
+    }
+
+    fn spec(&self) -> ToolSpec {
+        match self.handler.spec() {
+            ToolSpec::Namespace(namespace) => {
+                let mut tool = single_namespace_function(namespace, self.plain_name);
+                tool.name = self.plain_name.to_string();
+                tool.description = format!(
+                    "{}\n\nCompatibility alias for V1 subagent support on providers that do not support namespace tools.",
+                    tool.description
+                );
+                ToolSpec::Function(tool)
+            }
+            spec => spec,
+        }
+    }
+
+    fn exposure(&self) -> ToolExposure {
+        ToolExposure::Direct
+    }
+
+    fn supports_parallel_tool_calls(&self) -> bool {
+        self.handler.supports_parallel_tool_calls()
+    }
+
+    fn search_info(&self) -> Option<ToolSearchInfo> {
+        ToolSearchInfo::from_tool_spec(self.spec(), /*source_info*/ None)
+    }
+
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        self.handler.handle(invocation)
+    }
+}
+
+impl CoreToolRuntime for MultiAgentV1PlainFunctionOverride {
+    fn matches_kind(&self, payload: &crate::tools::context::ToolPayload) -> bool {
+        self.handler.matches_kind(payload)
+    }
+
+    fn create_diff_consumer(
+        &self,
+    ) -> Option<Box<dyn crate::tools::registry::ToolArgumentDiffConsumer>> {
+        self.handler.create_diff_consumer()
+    }
+}
+
+fn single_namespace_function(
+    namespace: ResponsesApiNamespace,
+    plain_name: &str,
+) -> ResponsesApiTool {
+    let mut tools = namespace.tools.into_iter();
+    let Some(ResponsesApiNamespaceTool::Function(tool)) = tools.next() else {
+        panic!(
+            "expected V1 multi-agent namespace `{}` to contain one function",
+            namespace.name
+        );
+    };
+    if tools.next().is_some() {
+        panic!(
+            "expected V1 multi-agent namespace `{}` for `{plain_name}` to contain only one function",
+            namespace.name
+        );
+    }
+    tool
 }
 
 struct MultiAgentV2NamespaceOverride {

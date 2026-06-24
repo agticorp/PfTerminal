@@ -18,6 +18,7 @@ credentials, created automatically on login/startup and usable through
 | GLM 5.2 tool compatibility | Current sprint logs and OpenCode source show GLM-class models should be routed to structured edit/write tools instead of forced through strict `apply_patch`. | [GLM 5.2 Tool Compatibility](glm-52-tool-compatibility.md) |
 | Hammer reduction | Current sprint study compares PFTerminal/Codex, OpenCode, Hermes Agent, Kilo Code, and Cline to reduce repeated large provider requests, 429 loops, and context bloat. | [Hammer Reduction Process](hammer-reduction-process.md) |
 | Tool-call runaway remedy | Live worker logs show malformed oversized `structured_write` calls looping through normal follow-up handling. The remedy is a non-retriable malformed-tool boundary plus bounded/chunked write mechanics. | [Tool Call Runaway Remedy](tool-call-runaway-remedy.md) |
+| Subagents | Current Codex supports explicit subagent workflows, but PFTerminal must make the tool exposure reliable and diagnosable across third-party provider sessions. | [PFTerminal Subagents](subagents.md) |
 
 ## Sprint Reading Path
 
@@ -35,6 +36,8 @@ credentials, created automatically on login/startup and usable through
    high-input retries.
 6. Read [Tool Call Runaway Remedy](tool-call-runaway-remedy.md) for the
    structural fix needed before editing the runtime loop.
+7. Read [PFTerminal Subagents](subagents.md) for the plan to make basic
+   subagent delegation visible, provider-compatible, and debuggable.
 
 ## Boundary
 
