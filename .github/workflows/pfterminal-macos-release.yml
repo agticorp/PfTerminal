@@ -67,7 +67,10 @@ jobs:
     timeout-minutes: 90
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: packed
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_STRIP: "symbols"
       TARGET: ${{ matrix.target }}
     strategy:
       fail-fast: false
@@ -94,7 +97,6 @@ jobs:
             --manifest-path codex-rs/Cargo.toml \
             --target "$TARGET" \
             --release \
-            --bin codex \
             --bin pfterminal
 
       - name: Build standalone package archive
@@ -106,7 +108,7 @@ jobs:
             --target "$TARGET" \
             --variant pfterminal \
             --entrypoint-bin "codex-rs/target/${TARGET}/release/pfterminal" \
-            --extra-bin "codex=codex-rs/target/${TARGET}/release/codex" \
+            --extra-bin "codex=codex-rs/target/${TARGET}/release/pfterminal" \
             --cargo-profile release \
             --package-dir "${RUNNER_TEMP}/pfterminal-package-${TARGET}" \
             --archive-output "dist/${TARGET}/pfterminal-package-${TARGET}.tar.gz" \
