@@ -74,9 +74,9 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runner: macos-26
+            runner: macos-15-xlarge
           - target: x86_64-apple-darwin
-            runner: macos-26-intel
+            runner: macos-15-xlarge
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -104,19 +104,19 @@ jobs:
           mkdir -p "dist/${TARGET}"
           python3 scripts/build_codex_package.py \
             --target "$TARGET" \
-            --variant codex \
-            --entrypoint-bin "codex-rs/target/${TARGET}/release/codex" \
-            --extra-bin "pfterminal=codex-rs/target/${TARGET}/release/pfterminal" \
+            --variant pfterminal \
+            --entrypoint-bin "codex-rs/target/${TARGET}/release/pfterminal" \
+            --extra-bin "codex=codex-rs/target/${TARGET}/release/codex" \
             --cargo-profile release \
-            --package-dir "${RUNNER_TEMP}/codex-package-${TARGET}" \
-            --archive-output "dist/${TARGET}/codex-package-${TARGET}.tar.gz" \
+            --package-dir "${RUNNER_TEMP}/pfterminal-package-${TARGET}" \
+            --archive-output "dist/${TARGET}/pfterminal-package-${TARGET}.tar.gz" \
             --force
 
       - name: Smoke test package archive
         shell: bash
         run: |
           set -euo pipefail
-          archive="dist/${TARGET}/codex-package-${TARGET}.tar.gz"
+          archive="dist/${TARGET}/pfterminal-package-${TARGET}.tar.gz"
           package_dir="${RUNNER_TEMP}/smoke-${TARGET}"
           mkdir -p "$package_dir"
           tar -xzf "$archive" -C "$package_dir"
@@ -127,8 +127,8 @@ jobs:
       - name: Upload macOS package archive
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: codex-package-${{ matrix.target }}
-          path: dist/${{ matrix.target }}/codex-package-${{ matrix.target }}.tar.gz
+          name: pfterminal-package-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/pfterminal-package-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
   assemble-release-assets:
@@ -146,32 +146,32 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: downloaded
-          pattern: codex-package-*
+          pattern: pfterminal-package-*
 
       - name: Build checksum manifest
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release-dist
-          find downloaded -type f -name 'codex-package-*.tar.gz' -exec cp {} release-dist/ \;
+          find downloaded -type f -name 'pfterminal-package-*.tar.gz' -exec cp {} release-dist/ \;
           cp scripts/install/install.sh release-dist/install.sh
 
-          find release-dist -maxdepth 1 -type f -name 'codex-package-*.tar.gz' -print |
+          find release-dist -maxdepth 1 -type f -name 'pfterminal-package-*.tar.gz' -print |
             sort |
             while IFS= read -r archive; do
               sha256sum "$archive" |
                 awk -v name="$(basename "$archive")" '{ print $1 "  " name }'
-            done > release-dist/codex-package_SHA256SUMS
+            done > release-dist/pfterminal-package_SHA256SUMS
 
           expected_count=2
-          actual_count="$(find release-dist -maxdepth 1 -type f -name 'codex-package-*.tar.gz' | wc -l | tr -d ' ')"
+          actual_count="$(find release-dist -maxdepth 1 -type f -name 'pfterminal-package-*.tar.gz' | wc -l | tr -d ' ')"
           if [[ "$actual_count" != "$expected_count" ]]; then
             echo "Expected ${expected_count} package archives, found ${actual_count}"
             find release-dist -maxdepth 1 -type f -print
             exit 1
           fi
 
-          cat release-dist/codex-package_SHA256SUMS
+          cat release-dist/pfterminal-package_SHA256SUMS
 
       - name: Upload release asset bundle
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0

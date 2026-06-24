@@ -1,0 +1,84 @@
+name: pfterminal-ci
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  deploy-smoke:
+    name: Build and package PFTerminal
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Install Linux package prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            pkg-config \
+            libcap-dev
+
+      - name: Install DotSlash
+        uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
+
+      - name: Validate installer and package helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh -n scripts/install/install.sh
+          python3 -m unittest discover -s scripts/codex_package -p 'test_*.py'
+
+      - name: Build PFTerminal binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build \
+            --manifest-path codex-rs/Cargo.toml \
+            --profile dev-small \
+            --bin codex \
+            --bin pfterminal
+          codex-rs/target/dev-small/pfterminal --version
+
+      - name: Build and smoke-test PFTerminal package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          python3 scripts/build_codex_package.py \
+            --target x86_64-unknown-linux-gnu \
+            --variant pfterminal \
+            --entrypoint-bin codex-rs/target/dev-small/pfterminal \
+            --extra-bin codex=codex-rs/target/dev-small/codex \
+            --cargo-profile dev-small \
+            --package-dir "${RUNNER_TEMP}/pfterminal-package-x86_64-unknown-linux-gnu" \
+            --archive-output "dist/pfterminal-package-x86_64-unknown-linux-gnu.tar.gz" \
+            --force
+
+          package_dir="${RUNNER_TEMP}/pfterminal-smoke"
+          mkdir -p "$package_dir"
+          tar -xzf "dist/pfterminal-package-x86_64-unknown-linux-gnu.tar.gz" -C "$package_dir"
+          "$package_dir/bin/pfterminal" --version
+          test -x "$package_dir/bin/codex"
+          test -x "$package_dir/codex-path/rg"
+
+      - name: Upload package smoke artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: pfterminal-package-linux-x64-smoke
+          path: dist/pfterminal-package-x86_64-unknown-linux-gnu.tar.gz
+          if-no-files-found: error

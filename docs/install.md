@@ -69,9 +69,9 @@ Cargo version.
 The workflow builds and smoke-tests both macOS package archives:
 
 ```text
-codex-package-aarch64-apple-darwin.tar.gz
-codex-package-x86_64-apple-darwin.tar.gz
-codex-package_SHA256SUMS
+pfterminal-package-aarch64-apple-darwin.tar.gz
+pfterminal-package-x86_64-apple-darwin.tar.gz
+pfterminal-package_SHA256SUMS
 ```
 
 Leave `publish_release` disabled to do a build-only validation. Enable it to

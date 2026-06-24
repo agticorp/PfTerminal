@@ -139,7 +139,7 @@ function Get-PackageArchiveDigest {
         }
     }
 
-    throw "Could not find SHA-256 digest for $AssetName in codex-package_SHA256SUMS."
+    throw "Could not find SHA-256 digest for $AssetName in the package checksum manifest."
 }
 
 function Path-Contains {
@@ -763,11 +763,17 @@ Write-Step "Resolved version: $resolvedVersion"
 $conflictingInstall = Get-ConflictingInstall -VisibleBinDir $visibleBinDir
 $oldStandaloneBackup = $null
 
-$packageAsset = "codex-package-$target.tar.gz"
-$checksumAsset = "codex-package_SHA256SUMS"
+$packageAsset = "pfterminal-package-$target.tar.gz"
+$checksumAsset = "pfterminal-package_SHA256SUMS"
 $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ResolvedVersion $resolvedVersion
 $checksumMetadata = Find-ReleaseAssetMetadata -AssetName $checksumAsset -ResolvedVersion $resolvedVersion
 $installLayout = "Package"
+if ($null -eq $packageMetadata -or $null -eq $checksumMetadata) {
+    $packageAsset = "codex-package-$target.tar.gz"
+    $checksumAsset = "codex-package_SHA256SUMS"
+    $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ResolvedVersion $resolvedVersion
+    $checksumMetadata = Find-ReleaseAssetMetadata -AssetName $checksumAsset -ResolvedVersion $resolvedVersion
+}
 if ($null -eq $packageMetadata -or $null -eq $checksumMetadata) {
     $packageAsset = "codex-npm-$npmTag-$resolvedVersion.tgz"
     $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ResolvedVersion $resolvedVersion

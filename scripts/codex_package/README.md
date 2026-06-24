@@ -4,7 +4,7 @@ This package contains the implementation behind `scripts/build_codex_package.py`
 The top-level script is the stable executable entry point; these modules keep the
 package-building logic split by responsibility.
 
-The builder creates a canonical Codex package directory:
+The builder creates a canonical package directory inherited from Codex:
 
 ```text
 .
@@ -30,8 +30,9 @@ artifacts; pass a GNU Linux target explicitly for native glibc local builds. If
 prints its path after the package is built.
 
 The `--variant` flag selects the package entrypoint. Supported variants are
-`codex` and `codex-app-server`. Primary `codex` packages keep `codex` for
-upstream compatibility and also include the product-facing `pfterminal` binary.
+`pfterminal`, `codex`, and `codex-app-server`. PFTerminal release jobs should
+use the `pfterminal` variant so the product-facing binary is the package
+entrypoint. The `codex` variant remains available for upstream compatibility.
 The `version` field in `codex-package.json` is read from
 `[workspace.package].version` in `codex-rs/Cargo.toml`.
 

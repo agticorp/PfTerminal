@@ -58,6 +58,14 @@ class PackageInputs:
 
 
 PACKAGE_VARIANTS: dict[str, PackageVariant] = {
+    "pfterminal": PackageVariant(
+        name="pfterminal",
+        cargo_bin="pfterminal",
+        executable_stem="pfterminal",
+        extra_binaries=(
+            PackageExtraBinary(cargo_bin="codex", executable_stem="codex"),
+        ),
+    ),
     "codex": PackageVariant(
         name="codex",
         cargo_bin="codex",

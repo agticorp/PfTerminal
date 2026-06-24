@@ -230,7 +230,7 @@ package_archive_digest() {
   ' "$manifest_path" 2>/dev/null || true)"
 
   if [ -z "$digest" ]; then
-    echo "Could not find SHA-256 digest for $asset in codex-package_SHA256SUMS." >&2
+    echo "Could not find SHA-256 digest for $asset in the package checksum manifest." >&2
     exit 1
   fi
 
@@ -886,11 +886,17 @@ else
 fi
 
 resolved_version="$(resolve_version)"
-package_asset="codex-package-$vendor_target.tar.gz"
-checksum_asset="codex-package_SHA256SUMS"
+package_asset="pfterminal-package-$vendor_target.tar.gz"
+checksum_asset="pfterminal-package_SHA256SUMS"
 if release_asset_exists "$package_asset" "$resolved_version" &&
   release_asset_exists "$checksum_asset" "$resolved_version"; then
   install_layout="package"
+  asset="$package_asset"
+elif release_asset_exists "codex-package-$vendor_target.tar.gz" "$resolved_version" &&
+  release_asset_exists "codex-package_SHA256SUMS" "$resolved_version"; then
+  install_layout="package"
+  package_asset="codex-package-$vendor_target.tar.gz"
+  checksum_asset="codex-package_SHA256SUMS"
   asset="$package_asset"
 elif release_asset_exists "codex-npm-$npm_tag-$resolved_version.tgz" "$resolved_version"; then
   install_layout="legacy-platform-npm"
