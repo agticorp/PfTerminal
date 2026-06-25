@@ -87,6 +87,20 @@ impl ChatWidget {
         self.on_task_started();
     }
 
+    pub(crate) fn update_external_pane_live_status(
+        &mut self,
+        header: String,
+        details: Option<String>,
+    ) {
+        self.bottom_pane.ensure_status_indicator();
+        self.set_status(
+            header,
+            details,
+            StatusDetailsCapitalization::Preserve,
+            /*details_max_lines*/ 8,
+        );
+    }
+
     pub(super) fn on_task_complete(
         &mut self,
         last_agent_message: Option<String>,

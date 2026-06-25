@@ -235,8 +235,94 @@ pub(crate) struct ClaudePane {
     pub(crate) latest_turn_status: Option<ClaudePaneTurnStatus>,
     pub(crate) latest_audit_path: Option<PathBuf>,
     pub(crate) artifact_dir: PathBuf,
+    live_turn: Option<ClaudePaneLiveTurn>,
     lock: Arc<Mutex<()>>,
     next_turn_index: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ClaudePaneLiveTurn {
+    elapsed_ms: i64,
+    current: String,
+    phase: String,
+    tool_blurbs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClaudePaneLiveStatus {
+    pub(crate) header: String,
+    pub(crate) details: Option<String>,
+}
+
+impl ClaudePaneLiveTurn {
+    fn starting() -> Self {
+        Self {
+            elapsed_ms: 0,
+            current: "starting Claude".to_string(),
+            phase: "starting".to_string(),
+            tool_blurbs: Vec::new(),
+        }
+    }
+
+    fn update(&mut self, progress: &ClaudePaneTurnProgress) {
+        self.elapsed_ms = progress.elapsed_ms;
+        self.phase = progress.phase.clone();
+        match progress.phase.as_str() {
+            "tool-call" => {
+                let tool = tool_blurb_from_progress(progress);
+                self.current = tool.clone();
+                if self.tool_blurbs.last() != Some(&tool) {
+                    self.tool_blurbs.push(tool);
+                }
+            }
+            "waiting" => {
+                // Keep the last tool visible during Claude-side thinking so heartbeat ticks update
+                // elapsed time without flickering the panel back to a generic waiting label.
+                if self.current.trim().is_empty() {
+                    self.current = "waiting for Claude".to_string();
+                }
+            }
+            "assistant-result" => {
+                self.current = "finalizing result".to_string();
+            }
+            "system" => {
+                self.current = progress_status_text(progress);
+            }
+            "error" => {
+                self.current = progress_status_text(progress);
+            }
+            _ => {
+                self.current = progress_status_text(progress);
+            }
+        }
+    }
+
+    fn display(&self) -> ClaudePaneLiveStatus {
+        let header = format!("Claude running · {}", format_elapsed_ms(self.elapsed_ms));
+        let mut lines = vec![format!("Current: {}", self.current)];
+        if !self.tool_blurbs.is_empty() {
+            lines.push("Tools:".to_string());
+            let hidden = self.tool_blurbs.len().saturating_sub(5);
+            if hidden > 0 {
+                lines.push(format!("  +{hidden} earlier"));
+            }
+            let visible_start = self.tool_blurbs.len().saturating_sub(5);
+            let all_done = self.phase == "assistant-result" || self.phase == "error";
+            for (index, tool) in self.tool_blurbs.iter().enumerate().skip(visible_start) {
+                let is_last = index + 1 == self.tool_blurbs.len();
+                let state = if is_last && !all_done {
+                    "running"
+                } else {
+                    "done"
+                };
+                lines.push(format!("  {state:<7} {tool}"));
+            }
+        }
+        ClaudePaneLiveStatus {
+            header,
+            details: Some(lines.join("\n")),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -318,6 +404,7 @@ impl ClaudePaneRegistry {
             latest_turn_status: None,
             latest_audit_path: None,
             artifact_dir,
+            live_turn: None,
             lock: Arc::new(Mutex::new(())),
             next_turn_index: 1,
         };
@@ -348,6 +435,7 @@ impl ClaudePaneRegistry {
 
         let plan = build_claude_command_plan(pane, prompt, codex_home)?;
         pane.status = ClaudePaneStatus::Running;
+        pane.live_turn = Some(ClaudePaneLiveTurn::starting());
         Ok(PreparedClaudePaneTurn {
             pane_id: pane.id.clone(),
             plan,
@@ -364,6 +452,7 @@ impl ClaudePaneRegistry {
             return;
         };
         pane.status = ClaudePaneStatus::Idle;
+        pane.live_turn = None;
         if let Ok(output) = result {
             if let Some(session_id) = &output.session_id {
                 pane.claude_session_id = Some(session_id.clone());
@@ -374,6 +463,21 @@ impl ClaudePaneRegistry {
             pane.latest_audit_path = Some(output.audit_path.clone());
             pane.next_turn_index = pane.next_turn_index.saturating_add(1);
         }
+    }
+
+    pub(crate) fn update_live_progress(
+        &mut self,
+        progress: &ClaudePaneTurnProgress,
+    ) -> Option<ClaudePaneLiveStatus> {
+        let pane = self
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == progress.pane_id)?;
+        let live_turn = pane
+            .live_turn
+            .get_or_insert_with(ClaudePaneLiveTurn::starting);
+        live_turn.update(progress);
+        Some(live_turn.display())
     }
 }
 
@@ -417,6 +521,8 @@ pub(crate) struct ClaudePaneTurnProgress {
     pub(crate) pane_id: String,
     pub(crate) phase: String,
     pub(crate) summary: String,
+    /// Non-rendered diagnostic metadata used to deduplicate progress events.
+    /// Artifact/audit paths are intentionally shown only in final turn messages.
     pub(crate) hint: Option<String>,
     pub(crate) elapsed_ms: i64,
     pub(crate) artifact_path: PathBuf,
@@ -1826,13 +1932,8 @@ async fn run_claude_command_plan(
                     &plan,
                     &started_at,
                     "waiting",
-                    "Claude pane still running.",
-                    Some(format!(
-                        "elapsed={}ms; mode: {}; artifact: {}",
-                        elapsed_ms(&started_at),
-                        plan.command_mode.label(),
-                        plan.artifact_path.display()
-                    )),
+                    "Claude running.",
+                    None,
                 );
             }
         }
@@ -3193,7 +3294,7 @@ fn collect_tool_events(value: &Value, tool_events: &mut Vec<ClaudePaneToolEvent>
     {
         let preview = value
             .get("input")
-            .map(|input| truncate_for_display(&input.to_string(), 240))
+            .map(|input| summarize_tool_call_input(name, input))
             .unwrap_or_default();
         tool_events.push(ClaudePaneToolEvent {
             name: name.to_string(),
@@ -3207,7 +3308,7 @@ fn collect_tool_events(value: &Value, tool_events: &mut Vec<ClaudePaneToolEvent>
             {
                 let preview = item
                     .get("input")
-                    .map(|input| truncate_for_display(&input.to_string(), 240))
+                    .map(|input| summarize_tool_call_input(name, input))
                     .unwrap_or_default();
                 tool_events.push(ClaudePaneToolEvent {
                     name: name.to_string(),
@@ -3216,6 +3317,308 @@ fn collect_tool_events(value: &Value, tool_events: &mut Vec<ClaudePaneToolEvent>
             }
         }
     }
+}
+
+const TOOL_PREVIEW_MAX_CHARS: usize = 120;
+const CLAUDE_TOOL_CALL_PREFIX: &str = "Claude tool call: ";
+
+fn summarize_tool_call_input(name: &str, input: &Value) -> String {
+    if let Some(description) = string_field(input, &["description"]) {
+        let description = collapse_whitespace(description);
+        if !description.is_empty() {
+            return truncate_for_display(&description, TOOL_PREVIEW_MAX_CHARS);
+        }
+    }
+
+    let lower_name = name.to_ascii_lowercase();
+    let summary = match lower_name.as_str() {
+        "bash" | "shell" => summarize_bash_input(input),
+        "read" => summarize_path_tool("reading", input),
+        "write" => summarize_path_tool("writing", input),
+        "edit" | "multiedit" => summarize_path_tool("editing", input),
+        "ls" | "list" => summarize_path_tool("listing", input),
+        "grep" => summarize_grep_input(input),
+        "glob" => string_field(input, &["pattern"]).map(|pattern| {
+            format!(
+                "matching {}",
+                truncate_for_display(&collapse_whitespace(pattern), 90)
+            )
+        }),
+        "webfetch" => summarize_path_tool("fetching", input),
+        "websearch" => string_field(input, &["query"]).map(|query| {
+            format!(
+                "searching {}",
+                truncate_for_display(&collapse_whitespace(query), 90)
+            )
+        }),
+        "todowrite" => Some("updating todo list".to_string()),
+        _ => summarize_generic_tool_input(input),
+    };
+
+    summary
+        .map(|value| truncate_for_display(&value, TOOL_PREVIEW_MAX_CHARS))
+        .unwrap_or_else(|| "running tool".to_string())
+}
+
+fn summarize_bash_input(input: &Value) -> Option<String> {
+    let command = string_field(input, &["command", "cmd", "script"])?;
+    summarize_bash_command(command)
+}
+
+fn summarize_bash_command(command: &str) -> Option<String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+
+    if let Some(target) = shell_write_target(command) {
+        return Some(format!("writing {}", compact_shell_target(&target)));
+    }
+
+    if let Some(target) = shell_mkdir_target(command) {
+        return Some(format!("creating directory {}", compact_tool_path(&target)));
+    }
+
+    first_meaningful_shell_fragment(command).map(|fragment| {
+        truncate_for_display(&collapse_whitespace(&fragment), TOOL_PREVIEW_MAX_CHARS)
+    })
+}
+
+fn summarize_path_tool(verb: &str, input: &Value) -> Option<String> {
+    let path = string_field(
+        input,
+        &["file_path", "path", "notebook_path", "url", "directory"],
+    )?;
+    Some(format!("{verb} {}", compact_tool_path(path)))
+}
+
+fn summarize_grep_input(input: &Value) -> Option<String> {
+    let pattern = string_field(input, &["pattern", "query"])?;
+    if let Some(path) = string_field(input, &["path", "directory"]) {
+        return Some(format!(
+            "searching {} in {}",
+            truncate_for_display(&collapse_whitespace(pattern), 60),
+            compact_tool_path(path)
+        ));
+    }
+    Some(format!(
+        "searching {}",
+        truncate_for_display(&collapse_whitespace(pattern), 90)
+    ))
+}
+
+fn summarize_generic_tool_input(input: &Value) -> Option<String> {
+    if let Some(path_summary) = summarize_path_tool("using", input) {
+        return Some(path_summary);
+    }
+    if let Some(value) = input.as_str() {
+        let value = collapse_whitespace(value);
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    let object = input.as_object()?;
+    let fields = object
+        .keys()
+        .take(3)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if fields.is_empty() {
+        None
+    } else {
+        Some(format!("input fields: {fields}"))
+    }
+}
+
+fn string_field<'a>(input: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    for key in keys {
+        if let Some(value) = input.get(*key).and_then(Value::as_str) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn shell_write_target(command: &str) -> Option<String> {
+    for line in command
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if let Some(target) = extract_cat_write_target(line) {
+            return Some(target);
+        }
+        if let Some(target) = extract_tee_write_target(line) {
+            return Some(target);
+        }
+        if let Some(target) = extract_redirection_target(line) {
+            return Some(target);
+        }
+        if line.contains("<<") {
+            break;
+        }
+    }
+    None
+}
+
+fn extract_cat_write_target(line: &str) -> Option<String> {
+    if let Some(index) = line.find("cat >") {
+        return first_shell_token(&line[index + "cat >".len()..])
+            .filter(|target| is_useful_shell_target(target));
+    }
+    if line.starts_with("cat <<")
+        && let Some(index) = line.rfind('>')
+    {
+        return first_shell_token(&line[index + 1..])
+            .filter(|target| is_useful_shell_target(target));
+    }
+    None
+}
+
+fn extract_tee_write_target(line: &str) -> Option<String> {
+    let index = line.find("tee ")?;
+    let after = &line[index + "tee ".len()..];
+    for token in after.split_whitespace() {
+        if token.starts_with('-') {
+            continue;
+        }
+        let token = clean_shell_token(token);
+        if is_useful_shell_target(&token) {
+            return Some(token);
+        }
+    }
+    None
+}
+
+fn extract_redirection_target(line: &str) -> Option<String> {
+    let mut target = None;
+    for (index, _) in line.match_indices('>') {
+        if let Some(token) = first_shell_token(&line[index + 1..])
+            && is_useful_shell_target(&token)
+        {
+            target = Some(token);
+        }
+    }
+    target
+}
+
+fn shell_mkdir_target(command: &str) -> Option<String> {
+    for line in command
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if let Some(index) = line.find("mkdir ") {
+            let after = &line[index + "mkdir ".len()..];
+            for token in after.split_whitespace() {
+                if token.starts_with('-') {
+                    continue;
+                }
+                let token = clean_shell_token(token);
+                if is_useful_shell_target(&token) {
+                    return Some(token);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn first_meaningful_shell_fragment(command: &str) -> Option<String> {
+    let line = command
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))?;
+    let fragment = line
+        .split("&&")
+        .next()
+        .unwrap_or(line)
+        .split(';')
+        .next()
+        .unwrap_or(line)
+        .trim();
+    if fragment.is_empty() {
+        None
+    } else {
+        Some(fragment.to_string())
+    }
+}
+
+fn first_shell_token(value: &str) -> Option<String> {
+    let value = value.trim_start();
+    let mut chars = value.chars();
+    let quote = match chars.next()? {
+        '"' => Some('"'),
+        '\'' => Some('\''),
+        _ => None,
+    };
+    let mut token = String::new();
+    if let Some(quote) = quote {
+        for ch in chars {
+            if ch == quote {
+                break;
+            }
+            token.push(ch);
+        }
+    } else {
+        for ch in value.chars() {
+            if ch.is_whitespace() || matches!(ch, ';' | '|' | '<' | '>') {
+                break;
+            }
+            token.push(ch);
+        }
+    }
+    let token = clean_shell_token(&token);
+    if token.is_empty() { None } else { Some(token) }
+}
+
+fn clean_shell_token(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_end_matches(';')
+        .to_string()
+}
+
+fn is_useful_shell_target(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value != "/dev/null"
+        && value != "&1"
+        && value != "&2"
+        && value != "1"
+        && value != "2"
+        && !value.starts_with('$')
+}
+
+fn compact_tool_path(path: &str) -> String {
+    let path = collapse_whitespace(path);
+    if path.chars().count() <= 90 {
+        return path;
+    }
+    Path::new(&path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| truncate_for_display(&path, 90))
+}
+
+fn compact_shell_target(path: &str) -> String {
+    let path = collapse_whitespace(path);
+    Path::new(&path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| compact_tool_path(&path))
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn tool_events_from_stdout(stdout: &str) -> Vec<ClaudePaneToolEvent> {
@@ -3296,6 +3699,37 @@ fn elapsed_ms(started_at: &Instant) -> i64 {
     i64::try_from(started_at.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
+fn format_elapsed_ms(elapsed_ms: i64) -> String {
+    let total_seconds = (elapsed_ms.max(0) / 1_000).max(0);
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn tool_blurb_from_progress(progress: &ClaudePaneTurnProgress) -> String {
+    progress
+        .summary
+        .strip_prefix(CLAUDE_TOOL_CALL_PREFIX)
+        .unwrap_or(progress.summary.as_str())
+        .trim()
+        .to_string()
+}
+
+fn progress_status_text(progress: &ClaudePaneTurnProgress) -> String {
+    match progress.phase.as_str() {
+        "system" => "session initialized".to_string(),
+        "assistant-result" => "finalizing result".to_string(),
+        "waiting" => "waiting for Claude".to_string(),
+        "error" => progress.summary.trim().to_string(),
+        "tool-call" => tool_blurb_from_progress(progress),
+        _ => progress.summary.trim().to_string(),
+    }
+}
+
 fn unix_epoch_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3335,15 +3769,21 @@ fn progress_from_claude_value(
     let mut tool_events = Vec::new();
     collect_tool_events(value, &mut tool_events);
     if let Some(event) = tool_events.last() {
+        let summary = if event.preview.trim().is_empty() {
+            format!("{}{}", CLAUDE_TOOL_CALL_PREFIX, event.name)
+        } else {
+            format!(
+                "{}{}: {}",
+                CLAUDE_TOOL_CALL_PREFIX,
+                event.name,
+                event.preview.trim()
+            )
+        };
         return Some(ClaudePaneTurnProgress {
             pane_id: plan.pane_id.clone(),
             phase: "tool-call".to_string(),
-            summary: format!("Claude tool call: {}", event.name),
-            hint: Some(format!(
-                "preview: {}; artifact: {}",
-                event.preview,
-                plan.artifact_path.display()
-            )),
+            summary,
+            hint: None,
             elapsed_ms: elapsed_ms(started_at),
             artifact_path: plan.artifact_path.clone(),
             audit_path: plan.audit_path.clone(),
@@ -3365,7 +3805,7 @@ fn progress_from_claude_value(
             pane_id: plan.pane_id.clone(),
             phase: "assistant-result".to_string(),
             summary: "Claude returned a result.".to_string(),
-            hint: Some(format!("artifact: {}", plan.artifact_path.display())),
+            hint: None,
             elapsed_ms: elapsed_ms(started_at),
             artifact_path: plan.artifact_path.clone(),
             audit_path: plan.audit_path.clone(),
@@ -3517,17 +3957,10 @@ impl App {
         if self.claude_panes.active_user_pane_id() != progress.pane_id {
             return;
         }
-        self.chat_widget.add_info_message(
-            progress.summary,
-            progress.hint.or_else(|| {
-                Some(format!(
-                    "elapsed={}ms; artifact: {}; audit: {}",
-                    progress.elapsed_ms,
-                    progress.artifact_path.display(),
-                    progress.audit_path.display()
-                ))
-            }),
-        );
+        if let Some(status) = self.claude_panes.update_live_progress(&progress) {
+            self.chat_widget
+                .update_external_pane_live_status(status.header, status.details);
+        }
     }
 
     pub(super) fn on_claude_pane_turn_finished(
@@ -3692,6 +4125,7 @@ mod tests {
                 latest_turn_status: None,
                 latest_audit_path: None,
                 artifact_dir,
+                live_turn: None,
                 lock: Arc::new(Mutex::new(())),
                 next_turn_index: 1,
             },
@@ -3709,6 +4143,187 @@ mod tests {
         assert!(rendered.contains("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"));
         assert!(rendered.contains("pfterminal vault auth-helper provider/zai_api_key"));
         assert!(!rendered.contains("zai-secret"));
+    }
+
+    #[test]
+    fn tool_call_previews_are_readable_blurbs() {
+        let bash_with_description = json!({
+            "command": "mkdir -p /tmp/gemology-mock && echo ok",
+            "description": "Create directory for gemology website mock"
+        });
+        assert_eq!(
+            summarize_tool_call_input("Bash", &bash_with_description),
+            "Create directory for gemology website mock"
+        );
+
+        let bash_heredoc_without_description = json!({
+            "command": "cat > /tmp/gemology-mock/index.html <<'HTMLEOF'\n<!DOCTYPE html>\n<html><body>large page body</body></html>\nHTMLEOF"
+        });
+        assert_eq!(
+            summarize_tool_call_input("Bash", &bash_heredoc_without_description),
+            "writing index.html"
+        );
+
+        let bash_redirect_with_fd_dup = json!({
+            "command": "npm test > /tmp/test-output.log 2>&1"
+        });
+        assert_eq!(
+            summarize_tool_call_input("Bash", &bash_redirect_with_fd_dup),
+            "writing test-output.log"
+        );
+
+        let bash_dev_null_redirect = json!({
+            "command": "npm test > /dev/null 2>&1"
+        });
+        assert_eq!(
+            summarize_tool_call_input("Bash", &bash_dev_null_redirect),
+            "npm test > /dev/null 2>&1"
+        );
+
+        let edit = json!({
+            "file_path": "src/app.rs",
+            "old_string": "before",
+            "new_string": "after"
+        });
+        assert_eq!(
+            summarize_tool_call_input("Edit", &edit),
+            "editing src/app.rs"
+        );
+
+        let read = json!({ "file_path": "README.md" });
+        assert_eq!(
+            summarize_tool_call_input("Read", &read),
+            "reading README.md"
+        );
+    }
+
+    #[test]
+    fn tool_call_progress_uses_blurb_not_raw_json_preview() {
+        let (dir, pane) = pane(ClaudeProviderProfileKind::ClaudePlan);
+        let plan =
+            build_claude_command_plan(&pane, "make a mock".to_string(), dir.path()).expect("plan");
+        let started_at = Instant::now();
+        let value = json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {
+                        "command": "cat > /tmp/gemology-mock/index.html <<'HTMLEOF'\n<!DOCTYPE html>\n<html>blob</html>\nHTMLEOF"
+                    }
+                }]
+            }
+        });
+
+        let progress =
+            progress_from_claude_value(&plan, &started_at, &value).expect("tool progress");
+        assert_eq!(
+            progress.summary,
+            "Claude tool call: Bash: writing index.html"
+        );
+        assert_eq!(progress.hint, None);
+        assert!(!progress.summary.contains("{\"command\""));
+        assert!(!progress.summary.contains("<!DOCTYPE html>"));
+    }
+
+    #[test]
+    fn live_status_panel_tracks_tools_without_artifact_log_spam() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut registry = ClaudePaneRegistry::new();
+        let pane_id = registry
+            .create_pane(
+                ClaudeProviderProfileKind::ClaudePlan,
+                std::env::current_dir().expect("cwd"),
+                dir.path(),
+            )
+            .expect("pane");
+        let artifact_path = dir.path().join("turn-0001.jsonl");
+        let audit_path = dir.path().join("turn-0001.audit.json");
+
+        let first_tool = ClaudePaneTurnProgress {
+            pane_id: pane_id.clone(),
+            phase: "tool-call".to_string(),
+            summary:
+                "Claude tool call: Bash: Create directory for the mock donkey riding course website"
+                    .to_string(),
+            hint: None,
+            elapsed_ms: 30_000,
+            artifact_path: artifact_path.clone(),
+            audit_path: audit_path.clone(),
+        };
+        let status = registry.update_live_progress(&first_tool).expect("status");
+        assert_eq!(status.header, "Claude running · 30s");
+        let details = status.details.expect("details");
+        assert!(
+            details.contains(
+                "Current: Bash: Create directory for the mock donkey riding course website"
+            )
+        );
+        assert!(
+            details.contains(
+                "running Bash: Create directory for the mock donkey riding course website"
+            )
+        );
+        assert!(!details.contains("artifact:"));
+        assert!(!details.contains("audit:"));
+
+        let heartbeat = ClaudePaneTurnProgress {
+            pane_id: pane_id.clone(),
+            phase: "waiting".to_string(),
+            summary: "Claude running.".to_string(),
+            hint: None,
+            elapsed_ms: 90_000,
+            artifact_path: artifact_path.clone(),
+            audit_path: audit_path.clone(),
+        };
+        let status = registry.update_live_progress(&heartbeat).expect("status");
+        assert_eq!(status.header, "Claude running · 1m30s");
+        let details = status.details.expect("details");
+        assert!(
+            details.contains(
+                "Current: Bash: Create directory for the mock donkey riding course website"
+            )
+        );
+        assert!(!details.contains("Claude pane still running"));
+
+        let second_tool = ClaudePaneTurnProgress {
+            pane_id: pane_id.clone(),
+            phase: "tool-call".to_string(),
+            summary:
+                "Claude tool call: Bash: Write the donkey riding course mock website HTML file"
+                    .to_string(),
+            hint: None,
+            elapsed_ms: 150_000,
+            artifact_path: artifact_path.clone(),
+            audit_path: audit_path.clone(),
+        };
+        let status = registry.update_live_progress(&second_tool).expect("status");
+        let details = status.details.expect("details");
+        assert!(
+            details.contains(
+                "done    Bash: Create directory for the mock donkey riding course website"
+            )
+        );
+        assert!(
+            details.contains("running Bash: Write the donkey riding course mock website HTML file")
+        );
+
+        let result = ClaudePaneTurnProgress {
+            pane_id,
+            phase: "assistant-result".to_string(),
+            summary: "Claude returned a result.".to_string(),
+            hint: None,
+            elapsed_ms: 180_000,
+            artifact_path,
+            audit_path,
+        };
+        let status = registry.update_live_progress(&result).expect("status");
+        let details = status.details.expect("details");
+        assert!(details.contains("Current: finalizing result"));
+        assert!(
+            details.contains("done    Bash: Write the donkey riding course mock website HTML file")
+        );
     }
 
     #[test]
