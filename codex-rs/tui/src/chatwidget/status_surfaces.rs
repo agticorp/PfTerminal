@@ -560,9 +560,12 @@ impl ChatWidget {
     /// git metadata.
     pub(super) fn status_line_value_for_item(&mut self, item: StatusLineItem) -> Option<String> {
         match item {
-            StatusLineItem::ModelName => Some(self.model_display_name().to_string()),
+            StatusLineItem::ModelName => Some(self.status_model_display_name()),
             StatusLineItem::ModelWithReasoning => Some(self.model_with_reasoning_display_name()),
-            StatusLineItem::Reasoning => Some(self.reasoning_display_name()),
+            StatusLineItem::Reasoning => self
+                .active_external_model_display
+                .is_none()
+                .then(|| self.reasoning_display_name()),
             StatusLineItem::CurrentDir => {
                 Some(format_directory_display(
                     self.status_line_cwd(),
@@ -758,19 +761,31 @@ impl ChatWidget {
                 .status_line_value_for_item(StatusLineItem::FastMode)
                 .map(|value| Self::truncate_terminal_title_part(value, /*max_chars*/ 32)),
             TerminalTitleItem::Model => Some(Self::truncate_terminal_title_part(
-                self.model_display_name().to_string(),
+                self.status_model_display_name(),
                 /*max_chars*/ 32,
             )),
             TerminalTitleItem::ModelWithReasoning => Some(Self::truncate_terminal_title_part(
                 self.model_with_reasoning_display_name(),
                 /*max_chars*/ 32,
             )),
-            TerminalTitleItem::Reasoning => Some(Self::truncate_terminal_title_part(
-                self.reasoning_display_name(),
-                /*max_chars*/ 32,
-            )),
+            TerminalTitleItem::Reasoning => self
+                .active_external_model_display
+                .as_ref()
+                .is_none()
+                .then(|| {
+                    Self::truncate_terminal_title_part(
+                        self.reasoning_display_name(),
+                        /*max_chars*/ 32,
+                    )
+                }),
             TerminalTitleItem::TaskProgress => self.terminal_title_task_progress(),
         }
+    }
+
+    fn status_model_display_name(&self) -> String {
+        self.active_external_model_display
+            .clone()
+            .unwrap_or_else(|| self.model_display_name().to_string())
     }
 
     fn reasoning_display_name(&self) -> String {
@@ -779,6 +794,9 @@ impl ChatWidget {
     }
 
     fn model_with_reasoning_display_name(&self) -> String {
+        if let Some(model_display) = self.active_external_model_display.as_ref() {
+            return model_display.clone();
+        }
         let label = self.reasoning_display_name();
         let service_tier_label = self
             .current_service_tier()

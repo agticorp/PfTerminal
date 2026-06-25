@@ -123,6 +123,15 @@ impl ClaudeProviderProfileKind {
         }
     }
 
+    pub(crate) fn status_model_label(self) -> String {
+        let profile = self.profile();
+        profile
+            .title
+            .strip_prefix("Claude Code - ")
+            .unwrap_or(profile.title)
+            .to_string()
+    }
+
     pub(crate) fn creation_options() -> &'static [Self] {
         &[
             Self::AmbientGlm52,
@@ -358,6 +367,14 @@ impl ClaudePaneRegistry {
             .iter()
             .find(|pane| pane.id == pane_id)
             .map(|pane| pane.title.as_str())
+    }
+
+    pub(crate) fn active_claude_pane_model_label(&self) -> Option<String> {
+        let pane_id = self.active_claude_pane_id()?;
+        self.panes
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .map(|pane| pane.profile.status_model_label())
     }
 
     pub(crate) fn set_active_user_pane(&mut self, pane_id: &str) -> Result<()> {

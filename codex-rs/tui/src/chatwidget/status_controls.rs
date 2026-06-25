@@ -84,6 +84,14 @@ impl ChatWidget {
         self.bottom_pane.set_active_agent_label(active_agent_label);
     }
 
+    pub(crate) fn set_active_external_model_display(&mut self, model_display: Option<String>) {
+        if self.active_external_model_display == model_display {
+            return;
+        }
+        self.active_external_model_display = model_display;
+        self.refresh_status_surfaces();
+    }
+
     /// Recomputes footer status-line content from config and current runtime state.
     ///
     /// This method is the status-line orchestrator: it parses configured item identifiers,

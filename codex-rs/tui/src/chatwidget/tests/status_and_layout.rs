@@ -2462,6 +2462,33 @@ async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models(
 }
 
 #[tokio::test]
+async fn status_line_model_uses_active_external_pane_model() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
+    chat.config.tui_status_line = Some(vec![
+        "model-with-reasoning".to_string(),
+        "reasoning".to_string(),
+    ]);
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::XHigh));
+    chat.refresh_status_line();
+
+    assert_eq!(
+        status_line_text(&chat),
+        Some("gpt-5.5 xhigh · xhigh".to_string())
+    );
+
+    chat.set_active_external_model_display(Some("GLM 5.2 Z.AI".to_string()));
+
+    assert_eq!(status_line_text(&chat), Some("GLM 5.2 Z.AI".to_string()));
+
+    chat.set_active_external_model_display(None);
+
+    assert_eq!(
+        status_line_text(&chat),
+        Some("gpt-5.5 xhigh · xhigh".to_string())
+    );
+}
+
+#[tokio::test]
 async fn terminal_title_model_updates_on_model_change_without_manual_refresh() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     chat.config.tui_terminal_title = Some(vec!["model".to_string()]);
