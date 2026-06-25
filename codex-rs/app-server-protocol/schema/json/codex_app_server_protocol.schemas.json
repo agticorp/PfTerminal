@@ -11387,6 +11387,30 @@
           },
           {
             "properties": {
+              "apiKey": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "providerApiKey"
+                ],
+                "title": "ProviderApiKeyv2::LoginAccountParamsType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "apiKey",
+              "provider",
+              "type"
+            ],
+            "title": "ProviderApiKeyv2::LoginAccountParams",
+            "type": "object"
+          },
+          {
+            "properties": {
               "codexStreamlinedLogin": {
                 "type": "boolean"
               },
@@ -11418,6 +11442,22 @@
               "type"
             ],
             "title": "ChatgptDeviceCodev2::LoginAccountParams",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "openaiProviderDeviceCode"
+                ],
+                "title": "OpenaiProviderDeviceCodev2::LoginAccountParamsType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "OpenaiProviderDeviceCodev2::LoginAccountParams",
             "type": "object"
           },
           {

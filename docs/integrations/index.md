@@ -6,13 +6,15 @@ PFTerminal is a Codex CLI fork with product-specific model provider,
 onboarding, packaging, and branding changes.
 
 The important boundary: PFTerminal still uses the Codex execution engine, tool
-system, approval flows, sandboxing, and session mechanics, while adding Ambient,
-Z.AI, OpenRouter, and Baseten as first-class provider choices.
+system, approval flows, sandboxing, and session mechanics, while adding OpenAI
+Codex account login, Ambient, Z.AI, OpenRouter, and Baseten as first-class
+provider choices.
 
 ## What Exists Now
 
 | Area | Current state | Primary paths |
 | --- | --- | --- |
+| OpenAI Codex account | Built-in provider named `openai`, using Codex account auth and visible as GPT-5.5 under Coding Plans. | `codex-rs/model-provider-info/src/lib.rs`, `codex-rs/tui/src/chatwidget/provider_credentials.rs` |
 | Ambient provider | Built-in provider named `ambient`, using `AMBIENT_API_KEY` and the Chat Completions wire shape. | `codex-rs/model-provider-info/src/lib.rs` |
 | Ambient default model | Bundled model `zai-org/GLM-5.2-FP8`, displayed as `Ambient GLM 5.2`. | `codex-rs/models-manager/models.json` |
 | Z.AI provider | Built-in provider named `zai`, using `ZAI_API_KEY` and the Z.AI coding plan API base URL. | `codex-rs/model-provider-info/src/lib.rs` |
@@ -21,8 +23,8 @@ Z.AI, OpenRouter, and Baseten as first-class provider choices.
 | Provider key vault | Provider keys are stored in encrypted vault labels such as `provider/zai_api_key`. | `codex-rs/login/src/auth/provider_key_vault.rs`, `codex-rs/vault/` |
 | GLM request shaping | Ambient and Z.AI requests map PFTerminal reasoning levels to provider-specific `reasoning_effort`, `enable_thinking`, and `emit_usage` fields. | `codex-rs/core/src/client.rs` |
 | Ambient/Z.AI input conversion | Responses-style turn items are flattened for Ambient/Z.AI string input, while hidden reasoning is not replayed. | `codex-rs/codex-api/src/common.rs` |
-| Onboarding | Provider API-key picker supports Ambient, Z.AI, OpenRouter, and Baseten accounts. | `codex-rs/tui/src/onboarding/auth.rs` |
-| Model picker | The PFTerminal model picker groups Ambient/Z.AI under Coding Plans and OpenRouter/Baseten under Pay Per API Call. | `codex-rs/tui/src/chatwidget/model_popups.rs` |
+| Onboarding | Provider picker supports OpenAI Codex account device login plus Ambient, Z.AI, OpenRouter, and Baseten API keys. | `codex-rs/tui/src/onboarding/auth.rs` |
+| Model picker | The PFTerminal model picker groups OpenAI Codex/Ambient/Z.AI under Coding Plans and OpenRouter/Baseten under Pay Per API Call. | `codex-rs/tui/src/chatwidget/model_popups.rs` |
 | Product branding | TUI, login prompts, installer messages, package names, and status surfaces use PFTerminal/Post Fiat Terminal branding. | `codex-rs/tui/`, `codex-rs/login/`, `codex-cli/`, `scripts/install/` |
 
 ## Design line

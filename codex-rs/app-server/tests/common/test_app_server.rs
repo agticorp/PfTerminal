@@ -1288,6 +1288,16 @@ impl TestAppServer {
         self.send_request("account/login/start", Some(params)).await
     }
 
+    /// Send an `account/login/start` JSON-RPC request for OpenAI provider device code login.
+    pub async fn send_login_account_openai_provider_device_code_request(
+        &mut self,
+    ) -> anyhow::Result<i64> {
+        let params = serde_json::json!({
+            "type": "openaiProviderDeviceCode"
+        });
+        self.send_request("account/login/start", Some(params)).await
+    }
+
     /// Send an `account/login/cancel` JSON-RPC request.
     pub async fn send_cancel_login_account_request(
         &mut self,

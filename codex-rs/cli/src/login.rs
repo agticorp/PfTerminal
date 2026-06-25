@@ -17,6 +17,7 @@ use codex_login::ServerOptions;
 use codex_login::login_with_access_token;
 use codex_login::login_with_api_key;
 use codex_login::logout_with_revoke;
+use codex_login::logout_with_revoke_all_credentials;
 use codex_login::run_device_code_login;
 use codex_login::run_login_server;
 use codex_protocol::config_types::ForcedLoginMethod;
@@ -457,16 +458,26 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
     }
 }
 
-pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
+pub async fn run_logout(cli_config_overrides: CliConfigOverrides, all_credentials: bool) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
 
-    match logout_with_revoke(
-        &config.codex_home,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-    )
-    .await
-    {
+    let logout_result = if all_credentials {
+        logout_with_revoke_all_credentials(
+            &config.codex_home,
+            config.cli_auth_credentials_store_mode,
+            config.auth_keyring_backend_kind(),
+        )
+        .await
+    } else {
+        logout_with_revoke(
+            &config.codex_home,
+            config.cli_auth_credentials_store_mode,
+            config.auth_keyring_backend_kind(),
+        )
+        .await
+    };
+
+    match logout_result {
         Ok(true) => {
             eprintln!("Successfully logged out");
             std::process::exit(0);

@@ -234,6 +234,12 @@ enum CliCommand {
         /// Use the device-code login flow instead of the browser callback flow.
         #[arg(long, default_value_t = false)]
         device_code: bool,
+        /// Use the OpenAI provider device-code login request.
+        #[arg(long, default_value_t = false)]
+        openai_provider: bool,
+        /// Return after account/login/start instead of waiting for completion.
+        #[arg(long, default_value_t = false)]
+        start_only: bool,
     },
     /// Fetch the current account rate limits from the Codex app-server.
     GetAccountRateLimits,
@@ -414,10 +420,21 @@ pub async fn run() -> Result<()> {
             )
             .await
         }
-        CliCommand::TestLogin { device_code } => {
+        CliCommand::TestLogin {
+            device_code,
+            openai_provider,
+            start_only,
+        } => {
             ensure_dynamic_tools_unused(&dynamic_tools, "test-login")?;
             let endpoint = resolve_endpoint(codex_bin, url)?;
-            test_login(&endpoint, &config_overrides, device_code).await
+            test_login(
+                &endpoint,
+                &config_overrides,
+                device_code,
+                openai_provider,
+                start_only,
+            )
+            .await
         }
         CliCommand::GetAccountRateLimits => {
             ensure_dynamic_tools_unused(&dynamic_tools, "get-account-rate-limits")?;
@@ -1128,12 +1145,16 @@ async fn test_login(
     endpoint: &Endpoint,
     config_overrides: &[String],
     device_code: bool,
+    openai_provider: bool,
+    start_only: bool,
 ) -> Result<()> {
     with_client("test-login", endpoint, config_overrides, |client| {
         let initialize = client.initialize()?;
         println!("< initialize response: {initialize:?}");
 
-        let login_response = if device_code {
+        let login_response = if openai_provider {
+            client.login_account_openai_provider_device_code()?
+        } else if device_code {
             client.login_account_chatgpt_device_code()?
         } else {
             client.login_account_chatgpt()?
@@ -1156,6 +1177,11 @@ async fn test_login(
             }
             _ => bail!("expected chatgpt login response"),
         };
+
+        if start_only {
+            println!("Login start succeeded.");
+            return Ok(());
+        }
 
         let completion = client.wait_for_account_login_completion(&login_id)?;
         println!("< account/login/completed notification: {completion:?}");
@@ -1732,6 +1758,16 @@ impl CodexClient {
         let request = ClientRequest::LoginAccount {
             request_id: request_id.clone(),
             params: codex_app_server_protocol::LoginAccountParams::ChatgptDeviceCode,
+        };
+
+        self.send_request(request, request_id, "account/login/start")
+    }
+
+    fn login_account_openai_provider_device_code(&mut self) -> Result<LoginAccountResponse> {
+        let request_id = self.request_id();
+        let request = ClientRequest::LoginAccount {
+            request_id: request_id.clone(),
+            params: codex_app_server_protocol::LoginAccountParams::OpenaiProviderDeviceCode,
         };
 
         self.send_request(request, request_id, "account/login/start")

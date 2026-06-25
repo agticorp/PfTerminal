@@ -744,6 +744,26 @@ pub(crate) enum AppEvent {
         env_key: String,
     },
 
+    /// Start OpenAI Codex account device-code login from the Providers screen.
+    OpenCodexAccountDeviceLogin,
+
+    /// Device-code login data returned by account/login/start.
+    CodexAccountDeviceLoginReady {
+        login_id: String,
+        verification_url: String,
+        user_code: String,
+    },
+
+    /// Device-code login failed before a user code was available.
+    CodexAccountDeviceLoginFailed {
+        message: String,
+    },
+
+    /// Cancel a pending OpenAI Codex account device-code login.
+    CancelCodexAccountDeviceLogin {
+        login_id: String,
+    },
+
     /// Open the masked vault credential-entry overlay.
     OpenVaultCredentialAdd,
 

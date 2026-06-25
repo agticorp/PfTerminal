@@ -23,13 +23,16 @@ These providers are compiled into PFTerminal:
 
 | Provider id  | Display name | Base URL                              | Env key              | Wire API         |
 | ------------ | ------------ | ------------------------------------- | -------------------- | ---------------- |
+| `openai`     | OpenAI       | `https://chatgpt.com/backend-api/codex` | Account login      | Responses        |
 | `ambient`    | Ambient      | `https://api.ambient.xyz/v1`          | `AMBIENT_API_KEY`    | Chat Completions |
 | `zai`        | Z.AI         | `https://api.z.ai/api/coding/paas/v4` | `ZAI_API_KEY`        | Chat Completions |
 | `openrouter` | OpenRouter   | `https://openrouter.ai/api/v1`        | `OPENROUTER_API_KEY` | Chat Completions |
 | `baseten`    | Baseten      | `https://inference.baseten.co/v1`     | `BASETEN_API_KEY`    | Chat Completions |
 
-Provider credentials should normally be stored through onboarding or `/vault`.
-Environment variables are supported for temporary sessions and automation.
+OpenAI uses Codex account login from `/providers` or `pfterminal login`.
+Provider API keys should normally be stored through onboarding, `/providers`,
+or `/vault`. Environment variables are supported for temporary sessions and
+automation.
 
 ## Common Model Configs
 
@@ -40,6 +43,13 @@ Ambient:
 ```toml
 model_provider = "ambient"
 model = "zai-org/GLM-5.2-FP8"
+```
+
+OpenAI Codex account:
+
+```toml
+model_provider = "openai"
+model = "gpt-5.5"
 ```
 
 Z.AI:
@@ -74,6 +84,7 @@ You can also select a model per run:
 
 ```bash
 pfterminal -m glm-5.2
+pfterminal -m gpt-5.5
 pfterminal -m z-ai/glm-5.2
 pfterminal -m zai-org/GLM-5.2
 ```

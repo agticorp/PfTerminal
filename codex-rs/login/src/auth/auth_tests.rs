@@ -2310,12 +2310,31 @@ async fn provider_api_key_login_is_provider_scoped_and_not_primary_auth() {
     );
 
     assert!(
-        super::logout(
+        !super::logout(
             codex_home.path(),
             AuthCredentialsStoreMode::File,
             AuthKeyringBackendKind::default(),
         )
-        .expect("logout should remove provider auth")
+        .expect("logout should preserve provider auth")
+    );
+    assert_eq!(
+        super::provider_api_key_from_auth_storage(
+            codex_home.path(),
+            "ZAI_API_KEY",
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )
+        .expect("provider auth storage should still be readable"),
+        Some("zai-test-key".to_string())
+    );
+
+    assert!(
+        super::logout_all_credentials(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )
+        .expect("destructive logout should remove provider auth")
     );
     assert_eq!(
         super::provider_api_key_from_auth_storage(

@@ -1,14 +1,38 @@
 # Authentication And Vault
 
-PFTerminal has two authentication surfaces:
+PFTerminal has three credential surfaces:
 
-1. provider API keys for model access; and
-2. the encrypted `/vault` credential store for provider keys and other
+1. OpenAI Codex account login for the `openai` provider;
+2. provider API keys for Ambient, Z.AI, OpenRouter, Baseten, and similar
+   providers; and
+3. the encrypted `/vault` credential store for provider keys and other
    user-managed secrets.
 
-Provider keys entered through PFTerminal onboarding are written to the vault.
-The inherited OpenAI/ChatGPT auth path still exists for upstream Codex
-compatibility, but PFTerminal's default provider setup is API-key based.
+OpenAI Codex account login uses device auth from `/providers` or the inherited
+`pfterminal login` command. Provider keys entered through PFTerminal onboarding
+or `/providers` are written to the vault.
+
+## OpenAI Codex Account
+
+Use `/providers` and select:
+
+```text
+Provider: OpenAI Codex Account
+```
+
+PFTerminal starts a device-code login, shows the verification URL and one-time
+code, and stores the resulting Codex/OpenAI account auth in the configured
+PFTerminal home.
+
+Installed `pfterminal` launchers and the source-built `pfterminal` binary
+default `CODEX_HOME` to `$HOME/.pfterminal`. To override that location, set:
+
+```bash
+export CODEX_HOME="${PFTERMINAL_HOME:-$HOME/.pfterminal}"
+```
+
+That keeps PFTerminal account auth, vault data, sessions, and logs separate
+from a stock Codex install that uses `$HOME/.codex`.
 
 ## Provider Keys
 
@@ -75,17 +99,21 @@ history, and model context.
 `/vault show <label>` displays metadata only. Raw reveal/export is intentionally
 handled through secure UI, not chat output.
 
-## OpenAI/ChatGPT Compatibility
+## Login And Logout Commands
 
-PFTerminal still includes inherited Codex login modes:
+PFTerminal still includes inherited Codex login commands:
 
 ```bash
 pfterminal login
 pfterminal login --with-api-key
 pfterminal login status
 pfterminal logout
+pfterminal logout --all
 ```
 
-Those commands are primarily for OpenAI/ChatGPT-compatible flows. For Ambient,
-Z.AI, OpenRouter, and Baseten, use the provider onboarding picker, `/vault`, or
-the provider env vars above.
+`pfterminal logout` removes Codex/OpenAI account auth and preserves provider
+API keys in the vault. Use `pfterminal logout --all` only when you also want to
+remove provider API keys from the vault and legacy provider auth storage.
+
+For Ambient, Z.AI, OpenRouter, and Baseten, use the provider onboarding picker,
+`/providers`, `/vault`, or the provider env vars above.

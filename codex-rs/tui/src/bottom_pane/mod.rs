@@ -1363,6 +1363,21 @@ impl BottomPane {
         self.push_view(view);
     }
 
+    pub(crate) fn replace_active_view_by_id(
+        &mut self,
+        view_id: &'static str,
+        view: Box<dyn BottomPaneView>,
+    ) {
+        if let Some(active) = self.view_stack.last_mut()
+            && active.view_id() == Some(view_id)
+        {
+            *active = view;
+            self.request_redraw();
+            return;
+        }
+        self.push_view(view);
+    }
+
     /// Called when the agent requests user approval.
     pub fn push_approval_request(&mut self, request: ApprovalRequest, features: &Features) {
         let request = if let Some(view) = self.view_stack.last_mut() {

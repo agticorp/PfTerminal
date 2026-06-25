@@ -102,6 +102,11 @@ impl App {
                 );
                 return;
             }
+            ServerNotification::AccountLoginCompleted(notification) => {
+                self.chat_widget
+                    .on_codex_account_login_completed(notification.clone());
+                return;
+            }
             ServerNotification::ExternalAgentConfigImportCompleted(_) => {
                 let should_report_completion =
                     app_server_client.consume_external_agent_config_import_completion();

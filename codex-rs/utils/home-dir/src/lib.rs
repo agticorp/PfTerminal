@@ -1,10 +1,14 @@
 use codex_utils_absolute_path::AbsolutePathBuf;
 use dirs::home_dir;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
-/// Returns the path to the Codex configuration directory, which can be
-/// specified by the `CODEX_HOME` environment variable. If not set, defaults to
-/// `~/.codex`.
+const DEFAULT_CODEX_HOME_DIR: &str = ".codex";
+const DEFAULT_PFTERMINAL_HOME_DIR: &str = ".pfterminal";
+
+/// Returns the path to the Codex configuration directory, which can be specified by the
+/// `CODEX_HOME` environment variable. If not set, stock Codex defaults to `~/.codex` and
+/// PFTerminal defaults to `~/.pfterminal`.
 ///
 /// - If `CODEX_HOME` is set, the value must exist and be a directory. The
 ///   value will be canonicalized and this function will Err otherwise.
@@ -14,10 +18,18 @@ pub fn find_codex_home() -> std::io::Result<AbsolutePathBuf> {
     let codex_home_env = std::env::var("CODEX_HOME")
         .ok()
         .filter(|val| !val.is_empty());
-    find_codex_home_from_env(codex_home_env.as_deref())
+    find_codex_home_from_env_and_default(codex_home_env.as_deref(), default_home_dir_name())
 }
 
+#[cfg(test)]
 fn find_codex_home_from_env(codex_home_env: Option<&str>) -> std::io::Result<AbsolutePathBuf> {
+    find_codex_home_from_env_and_default(codex_home_env, DEFAULT_CODEX_HOME_DIR)
+}
+
+fn find_codex_home_from_env_and_default(
+    codex_home_env: Option<&str>,
+    default_home_dir: &str,
+) -> std::io::Result<AbsolutePathBuf> {
     // Honor the `CODEX_HOME` environment variable when it is set to allow users
     // (and tests) to override the default location.
     match codex_home_env {
@@ -56,18 +68,39 @@ fn find_codex_home_from_env(codex_home_env: Option<&str>) -> std::io::Result<Abs
                     "Could not find home directory",
                 )
             })?;
-            p.push(".codex");
+            p.push(default_home_dir);
             AbsolutePathBuf::from_absolute_path(p)
         }
     }
 }
 
+fn default_home_dir_name() -> &'static str {
+    let arg0 = std::env::args_os().next();
+    default_home_dir_name_for_binary(arg0.as_deref())
+}
+
+fn default_home_dir_name_for_binary(binary: Option<&OsStr>) -> &'static str {
+    let file_stem = binary
+        .and_then(|value| PathBuf::from(value).file_stem().map(OsStr::to_owned))
+        .and_then(|value| value.into_string().ok());
+
+    if file_stem.as_deref() == Some("pfterminal") {
+        DEFAULT_PFTERMINAL_HOME_DIR
+    } else {
+        DEFAULT_CODEX_HOME_DIR
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::DEFAULT_PFTERMINAL_HOME_DIR;
+    use super::default_home_dir_name_for_binary;
     use super::find_codex_home_from_env;
+    use super::find_codex_home_from_env_and_default;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use dirs::home_dir;
     use pretty_assertions::assert_eq;
+    use std::ffi::OsStr;
     use std::fs;
     use std::io::ErrorKind;
     use tempfile::TempDir;
@@ -130,5 +163,35 @@ mod tests {
         expected.push(".codex");
         let expected = AbsolutePathBuf::from_absolute_path(expected).expect("absolute home");
         assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn find_codex_home_without_env_uses_pfterminal_default_when_requested() {
+        let resolved = find_codex_home_from_env_and_default(
+            /*codex_home_env*/ None,
+            DEFAULT_PFTERMINAL_HOME_DIR,
+        )
+        .expect("default PFTerminal home");
+        let mut expected = home_dir().expect("home dir");
+        expected.push(".pfterminal");
+        let expected = AbsolutePathBuf::from_absolute_path(expected).expect("absolute home");
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn pfterminal_binary_name_uses_pfterminal_home() {
+        assert_eq!(
+            default_home_dir_name_for_binary(Some(OsStr::new("/usr/local/bin/pfterminal"))),
+            ".pfterminal"
+        );
+        assert_eq!(
+            default_home_dir_name_for_binary(Some(OsStr::new("pfterminal.exe"))),
+            ".pfterminal"
+        );
+        assert_eq!(
+            default_home_dir_name_for_binary(Some(OsStr::new("codex"))),
+            ".codex"
+        );
+        assert_eq!(default_home_dir_name_for_binary(None), ".codex");
     }
 }

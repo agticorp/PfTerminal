@@ -507,6 +507,10 @@ enum LoginSubcommand {
 
 #[derive(Debug, Parser)]
 struct LogoutCommand {
+    /// Also remove provider API keys from the vault and legacy provider auth storage.
+    #[arg(long)]
+    all: bool,
+
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
 }
@@ -1390,7 +1394,7 @@ async fn cli_main(
                 &mut logout_cli.config_overrides,
                 root_config_overrides.clone(),
             );
-            run_logout(logout_cli.config_overrides).await;
+            run_logout(logout_cli.config_overrides, logout_cli.all).await;
         }
         Some(Subcommand::Completion(completion_cli)) => {
             reject_remote_mode_for_subcommand(

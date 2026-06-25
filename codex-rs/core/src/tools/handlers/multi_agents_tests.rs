@@ -20,6 +20,7 @@ use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
+use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
@@ -374,6 +375,44 @@ async fn spawn_agent_fork_context_rejects_child_model_overrides() {
             "Full-history forked agents inherit the parent agent type, model, and reasoning effort; omit agent_type, model, and reasoning_effort, or spawn without a full-history fork.".to_string(),
         )
     );
+}
+
+#[tokio::test]
+async fn spawn_agent_rejects_cross_provider_model_override_for_zai() {
+    let (session, mut turn) = make_session_and_context().await;
+    let provider_info =
+        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)[ZAI_PROVIDER_ID]
+            .clone();
+    let mut config = (*turn.config).clone();
+    config.model = Some("glm-5.2".to_string());
+    config.model_provider_id = ZAI_PROVIDER_ID.to_string();
+    config.model_provider = provider_info.clone();
+    turn.model_info.slug = "glm-5.2".to_string();
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+    turn.config = Arc::new(config);
+
+    let err = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "model": "z-ai/glm-5.2"
+            })),
+        ))
+        .await
+        .err()
+        .expect("Z.AI spawn should reject cross-provider model overrides");
+
+    match err {
+        FunctionCallError::RespondToModel(message) => {
+            assert!(message.contains("provider `zai` model `glm-5.2`"));
+            assert!(message.contains("model `z-ai/glm-5.2`"));
+            assert!(message.contains("Subagents inherit the parent provider"));
+        }
+        other => panic!("expected RespondToModel, got {other:?}"),
+    }
 }
 
 #[tokio::test]

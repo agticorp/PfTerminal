@@ -16,10 +16,15 @@ use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
 use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
+#[cfg(test)]
+use codex_protocol::openai_models::ReasoningEffortPreset;
+#[cfg(test)]
+use codex_protocol::openai_models::default_input_modalities;
 
 const OPENROUTER_MINIMAX_M3_MODEL: &str = "minimax/minimax-m3";
 const OPENROUTER_OWL_ALPHA_MODEL: &str = "openrouter/owl-alpha";
 const OPENROUTER_GEMINI_3_5_FLASH_MODEL: &str = "google/gemini-3.5-flash";
+const OPENAI_GPT_5_5_MODEL: &str = "gpt-5.5";
 
 impl ChatWidget {
     /// Open a popup to choose a quick auto model. Selecting "All models"
@@ -243,6 +248,7 @@ impl ChatWidget {
             let item = self.model_picker_item(preset);
             match provider.as_deref() {
                 Some(AMBIENT_PROVIDER_ID | ZAI_PROVIDER_ID) => coding_plan_items.push(item),
+                Some(OPENAI_PROVIDER_ID) => coding_plan_items.push(item),
                 Some(BASETEN_PROVIDER_ID | OPENROUTER_PROVIDER_ID) => {
                     pay_per_api_call_items.push(item)
                 }
@@ -254,7 +260,7 @@ impl ChatWidget {
         if !coding_plan_items.is_empty() {
             items.push(Self::model_picker_section_header(
                 "Coding Plans",
-                "Ambient and Z.AI plan-backed models",
+                "OpenAI Codex, Ambient, and Z.AI plan-backed models",
             ));
             items.append(&mut coding_plan_items);
         }
@@ -317,15 +323,21 @@ impl ChatWidget {
             return false;
         }
 
-        matches!(
-            Self::model_provider_for_selection(&preset.model).as_deref(),
+        let provider = Self::model_provider_for_selection(&preset.model);
+        match provider.as_deref() {
+            Some(OPENAI_PROVIDER_ID) => Self::is_openai_coding_plan_model(&preset.model),
             Some(
                 AMBIENT_PROVIDER_ID
-                    | ZAI_PROVIDER_ID
-                    | BASETEN_PROVIDER_ID
-                    | OPENROUTER_PROVIDER_ID
-            )
-        )
+                | ZAI_PROVIDER_ID
+                | BASETEN_PROVIDER_ID
+                | OPENROUTER_PROVIDER_ID,
+            ) => true,
+            _ => false,
+        }
+    }
+
+    fn is_openai_coding_plan_model(model: &str) -> bool {
+        model.trim() == OPENAI_GPT_5_5_MODEL
     }
 
     fn model_selection_actions(
@@ -734,5 +746,46 @@ mod tests {
             ChatWidget::model_provider_for_selection(AMAZON_BEDROCK_GPT_5_5_MODEL_ID).as_deref(),
             Some(AMAZON_BEDROCK_PROVIDER_ID)
         );
+    }
+
+    #[test]
+    fn pfterminal_picker_allows_only_gpt_5_5_for_openai() {
+        assert!(ChatWidget::show_in_pfterminal_model_picker(&preset(
+            "gpt-5.5", true
+        )));
+        assert!(!ChatWidget::show_in_pfterminal_model_picker(&preset(
+            "gpt-5.4", true
+        )));
+        assert!(!ChatWidget::show_in_pfterminal_model_picker(&preset(
+            "codex-auto-review",
+            true
+        )));
+        assert!(!ChatWidget::show_in_pfterminal_model_picker(&preset(
+            "gpt-5.5", false
+        )));
+    }
+
+    fn preset(model: &str, show_in_picker: bool) -> ModelPreset {
+        ModelPreset {
+            id: model.to_string(),
+            model: model.to_string(),
+            display_name: model.to_string(),
+            description: format!("{model} description"),
+            default_reasoning_effort: ReasoningEffortConfig::Medium,
+            supported_reasoning_efforts: vec![ReasoningEffortPreset {
+                effort: ReasoningEffortConfig::Medium,
+                description: "medium".to_string(),
+            }],
+            supports_personality: false,
+            additional_speed_tiers: Vec::new(),
+            service_tiers: Vec::new(),
+            default_service_tier: None,
+            is_default: false,
+            upgrade: None,
+            show_in_picker,
+            availability_nux: None,
+            supported_in_api: true,
+            input_modalities: default_input_modalities(),
+        }
     }
 }

@@ -798,7 +798,23 @@ pub fn logout(
         auth_credentials_store_mode,
         keyring_backend_kind,
     );
-    let removed_auth = storage.delete()?;
+    storage.delete()
+}
+
+/// Delete Codex auth plus provider credentials from legacy storage and the vault.
+///
+/// This is intentionally separate from `logout`: normal account logout must not erase
+/// provider API keys that the user stored under `/providers`.
+pub fn logout_all_credentials(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+) -> std::io::Result<bool> {
+    let removed_auth = logout(
+        codex_home,
+        auth_credentials_store_mode,
+        keyring_backend_kind,
+    )?;
     let removed_provider = delete_provider_auth_if_exists(codex_home)?;
     // Also wipe any provider keys stored in the encrypted vault (best-effort: a missing
     // keyring in CI must not fail logout).
@@ -811,6 +827,35 @@ pub async fn logout_with_revoke(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
+) -> std::io::Result<bool> {
+    logout_with_revoke_common(
+        codex_home,
+        auth_credentials_store_mode,
+        keyring_backend_kind,
+        /*include_provider_credentials*/ false,
+    )
+    .await
+}
+
+pub async fn logout_with_revoke_all_credentials(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+) -> std::io::Result<bool> {
+    logout_with_revoke_common(
+        codex_home,
+        auth_credentials_store_mode,
+        keyring_backend_kind,
+        /*include_provider_credentials*/ true,
+    )
+    .await
+}
+
+async fn logout_with_revoke_common(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+    include_provider_credentials: bool,
 ) -> std::io::Result<bool> {
     let auth_dot_json = match load_auth_dot_json(
         codex_home,
@@ -830,6 +875,7 @@ pub async fn logout_with_revoke(
         codex_home,
         auth_credentials_store_mode,
         keyring_backend_kind,
+        include_provider_credentials,
     )
 }
 
@@ -1246,11 +1292,12 @@ fn logout_with_message(
     keyring_backend_kind: AuthKeyringBackendKind,
 ) -> std::io::Result<()> {
     // External auth tokens live in the ephemeral store, but persistent auth may still exist
-    // from earlier logins. Clear both so a forced logout truly removes all active auth.
+    // from earlier logins. Clear both so a forced logout truly removes all active account auth.
     let removal_result = logout_all_stores(
         codex_home,
         auth_credentials_store_mode,
         keyring_backend_kind,
+        /*include_provider_credentials*/ false,
     );
     let error_message = match removal_result {
         Ok(_) => message,
@@ -1269,6 +1316,7 @@ fn logout_and_continue(
         codex_home,
         auth_credentials_store_mode,
         keyring_backend_kind,
+        /*include_provider_credentials*/ false,
     ) {
         Ok(_) => {
             tracing::warn!("{message}");
@@ -1284,6 +1332,7 @@ fn logout_all_stores(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
+    include_provider_credentials: bool,
 ) -> std::io::Result<bool> {
     if auth_credentials_store_mode == AuthCredentialsStoreMode::Ephemeral {
         let removed_ephemeral = logout(
@@ -1291,7 +1340,12 @@ fn logout_all_stores(
             AuthCredentialsStoreMode::Ephemeral,
             AuthKeyringBackendKind::default(),
         )?;
-        let removed_provider = delete_provider_auth_if_exists(codex_home)?;
+        let removed_provider = include_provider_credentials
+            && logout_all_credentials(
+                codex_home,
+                AuthCredentialsStoreMode::File,
+                keyring_backend_kind,
+            )?;
         return Ok(removed_ephemeral || removed_provider);
     }
     let removed_ephemeral = logout(
@@ -1304,7 +1358,12 @@ fn logout_all_stores(
         auth_credentials_store_mode,
         keyring_backend_kind,
     )?;
-    let removed_provider = delete_provider_auth_if_exists(codex_home)?;
+    let removed_provider = include_provider_credentials
+        && logout_all_credentials(
+            codex_home,
+            auth_credentials_store_mode,
+            keyring_backend_kind,
+        )?;
     Ok(removed_ephemeral || removed_managed || removed_provider)
 }
 
@@ -2533,8 +2592,20 @@ impl AuthManager {
             &self.codex_home,
             self.auth_credentials_store_mode,
             self.keyring_backend_kind,
+            /*include_provider_credentials*/ false,
         )?;
         // Always reload to clear any cached auth (even if file absent).
+        self.reload().await;
+        Ok(removed)
+    }
+
+    pub async fn logout_all_credentials(&self) -> std::io::Result<bool> {
+        let removed = logout_all_stores(
+            &self.codex_home,
+            self.auth_credentials_store_mode,
+            self.keyring_backend_kind,
+            /*include_provider_credentials*/ true,
+        )?;
         self.reload().await;
         Ok(removed)
     }
@@ -2550,8 +2621,26 @@ impl AuthManager {
             &self.codex_home,
             self.auth_credentials_store_mode,
             self.keyring_backend_kind,
+            /*include_provider_credentials*/ false,
         )?;
         // Always reload to clear any cached auth (even if file absent).
+        self.reload().await;
+        Ok(result)
+    }
+
+    pub async fn logout_with_revoke_all_credentials(&self) -> std::io::Result<bool> {
+        let auth_dot_json = self
+            .auth_cached()
+            .and_then(|auth| auth.get_current_auth_json());
+        if let Err(err) = revoke_auth_tokens(auth_dot_json.as_ref()).await {
+            tracing::warn!("failed to revoke auth tokens during logout: {err}");
+        }
+        let result = logout_all_stores(
+            &self.codex_home,
+            self.auth_credentials_store_mode,
+            self.keyring_backend_kind,
+            /*include_provider_credentials*/ true,
+        )?;
         self.reload().await;
         Ok(result)
     }

@@ -1,29 +1,36 @@
 //! Provider API-key picker and masked entry flow.
 
 use super::*;
+use crate::bottom_pane::BottomPaneView;
+use crate::bottom_pane::ViewCompletion;
 
 const PROVIDER_CREDENTIALS_VIEW_ID: &str = "provider-credentials";
+const CODEX_ACCOUNT_DEVICE_LOGIN_VIEW_ID: &str = "codex-account-device-login";
 
 #[derive(Debug, Clone, Copy)]
-struct ProviderCredentialOption {
-    provider_name: &'static str,
-    env_key: &'static str,
+enum ProviderCredentialOption {
+    CodexAccount,
+    ProviderApiKey {
+        provider_name: &'static str,
+        env_key: &'static str,
+    },
 }
 
 const PROVIDER_CREDENTIAL_OPTIONS: &[ProviderCredentialOption] = &[
-    ProviderCredentialOption {
+    ProviderCredentialOption::CodexAccount,
+    ProviderCredentialOption::ProviderApiKey {
         provider_name: "Ambient",
         env_key: "AMBIENT_API_KEY",
     },
-    ProviderCredentialOption {
+    ProviderCredentialOption::ProviderApiKey {
         provider_name: "Z.AI",
         env_key: "ZAI_API_KEY",
     },
-    ProviderCredentialOption {
+    ProviderCredentialOption::ProviderApiKey {
         provider_name: "OpenRouter",
         env_key: "OPENROUTER_API_KEY",
     },
-    ProviderCredentialOption {
+    ProviderCredentialOption::ProviderApiKey {
         provider_name: "Baseten",
         env_key: "BASETEN_API_KEY",
     },
@@ -34,7 +41,7 @@ impl ChatWidget {
         let mut header = ColumnRenderable::new();
         header.push(Line::from("Providers".bold()));
         header.push(Line::from(
-            "Add or replace provider API keys. Keys are stored in the vault.".dim(),
+            "Add or replace provider credentials. API keys are stored in the vault.".dim(),
         ));
 
         self.show_selection_view(SelectionViewParams {
@@ -86,6 +93,66 @@ impl ChatWidget {
         );
         self.bottom_pane.show_view(Box::new(view));
     }
+
+    pub(crate) fn open_codex_account_device_login_pending(&mut self) {
+        self.pending_provider_codex_login_id = None;
+        self.bottom_pane
+            .show_view(Box::new(CodexAccountDeviceLoginView::pending(
+                self.app_event_tx.clone(),
+            )));
+    }
+
+    pub(crate) fn open_codex_account_device_login_ready(
+        &mut self,
+        login_id: String,
+        verification_url: String,
+        user_code: String,
+    ) {
+        self.pending_provider_codex_login_id = Some(login_id.clone());
+        self.bottom_pane.replace_active_view_by_id(
+            CODEX_ACCOUNT_DEVICE_LOGIN_VIEW_ID,
+            Box::new(CodexAccountDeviceLoginView::ready(
+                self.app_event_tx.clone(),
+                login_id,
+                verification_url,
+                user_code,
+            )),
+        );
+    }
+
+    pub(crate) fn on_codex_account_device_login_failed(&mut self, message: String) {
+        self.pending_provider_codex_login_id = None;
+        self.bottom_pane
+            .dismiss_view_by_id(CODEX_ACCOUNT_DEVICE_LOGIN_VIEW_ID);
+        self.add_error_message(format!("OpenAI Codex account login failed: {message}"));
+    }
+
+    pub(crate) fn on_codex_account_login_completed(
+        &mut self,
+        notification: codex_app_server_protocol::AccountLoginCompletedNotification,
+    ) {
+        let Some(login_id) = notification.login_id else {
+            return;
+        };
+        if self.pending_provider_codex_login_id.as_deref() != Some(login_id.as_str()) {
+            return;
+        }
+        self.pending_provider_codex_login_id = None;
+        self.bottom_pane
+            .dismiss_view_by_id(CODEX_ACCOUNT_DEVICE_LOGIN_VIEW_ID);
+
+        if notification.success {
+            self.add_info_message(
+                "OpenAI Codex account login complete.".to_string(),
+                /*hint*/ None,
+            );
+        } else {
+            let message = notification
+                .error
+                .unwrap_or_else(|| "OpenAI Codex account login did not complete.".to_string());
+            self.add_error_message(message);
+        }
+    }
 }
 
 fn provider_credential_items() -> Vec<SelectionItem> {
@@ -96,19 +163,35 @@ fn provider_credential_items() -> Vec<SelectionItem> {
 }
 
 fn provider_credential_item(option: &ProviderCredentialOption) -> SelectionItem {
-    let provider_name = option.provider_name.to_string();
-    let env_key = option.env_key.to_string();
-    SelectionItem {
-        name: provider_credential_display_name(option.provider_name, option.env_key),
-        description: Some(format!("Store {env_key} in the vault")),
-        actions: vec![Box::new(move |tx| {
-            tx.send(AppEvent::OpenProviderApiKeyAdd {
-                provider_name: provider_name.clone(),
-                env_key: env_key.clone(),
-            });
-        })],
-        dismiss_on_select: true,
-        ..Default::default()
+    match option {
+        ProviderCredentialOption::CodexAccount => SelectionItem {
+            name: "Provider: OpenAI Codex Account".to_string(),
+            description: Some("Sign in with device code".to_string()),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::OpenCodexAccountDeviceLogin);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        },
+        ProviderCredentialOption::ProviderApiKey {
+            provider_name,
+            env_key,
+        } => {
+            let provider_name = provider_name.to_string();
+            let env_key = env_key.to_string();
+            SelectionItem {
+                name: provider_credential_display_name(&provider_name, &env_key),
+                description: Some(format!("Store {env_key} in the vault")),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::OpenProviderApiKeyAdd {
+                        provider_name: provider_name.clone(),
+                        env_key: env_key.clone(),
+                    });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            }
+        }
     }
 }
 
@@ -127,9 +210,144 @@ fn provider_vault_label(env_key: &str) -> String {
     format!("provider/{}", env_key.to_ascii_lowercase())
 }
 
+struct CodexAccountDeviceLoginView {
+    app_event_tx: AppEventSender,
+    login_id: Option<String>,
+    verification_url: Option<String>,
+    user_code: Option<String>,
+    complete: bool,
+    completion: Option<ViewCompletion>,
+}
+
+impl CodexAccountDeviceLoginView {
+    fn pending(app_event_tx: AppEventSender) -> Self {
+        Self {
+            app_event_tx,
+            login_id: None,
+            verification_url: None,
+            user_code: None,
+            complete: false,
+            completion: None,
+        }
+    }
+
+    fn ready(
+        app_event_tx: AppEventSender,
+        login_id: String,
+        verification_url: String,
+        user_code: String,
+    ) -> Self {
+        Self {
+            app_event_tx,
+            login_id: Some(login_id),
+            verification_url: Some(verification_url),
+            user_code: Some(user_code),
+            complete: false,
+            completion: None,
+        }
+    }
+
+    fn cancel(&mut self) {
+        if self.complete {
+            return;
+        }
+        if let Some(login_id) = self.login_id.take() {
+            self.app_event_tx
+                .send(AppEvent::CancelCodexAccountDeviceLogin { login_id });
+        }
+        self.complete = true;
+        self.completion = Some(ViewCompletion::Cancelled);
+    }
+
+    fn accept(&mut self) {
+        if self.complete {
+            return;
+        }
+        self.login_id = None;
+        self.complete = true;
+        self.completion = Some(ViewCompletion::Accepted);
+    }
+
+    fn lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from("OpenAI Codex Account".bold()), Line::from("")];
+        if let (Some(verification_url), Some(user_code)) = (&self.verification_url, &self.user_code)
+        {
+            lines.push(Line::from("1. Open this link in your browser and sign in"));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                verification_url.clone().cyan().underlined(),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from("2. Enter this one-time code"));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![user_code.clone().cyan().bold()]));
+            lines.push(Line::from(""));
+            lines.push(
+                Line::from("Device codes are a common phishing target. Never share this code.")
+                    .dim(),
+            );
+            lines.push(Line::from(""));
+            lines.push(Line::from("Press Esc to cancel").dim());
+        } else {
+            lines.push(Line::from("Requesting a one-time device code...").dim());
+            lines.push(Line::from(""));
+            lines.push(Line::from("Press Esc to cancel").dim());
+        }
+        lines
+    }
+}
+
+impl BottomPaneView for CodexAccountDeviceLoginView {
+    fn handle_key_event(&mut self, key_event: crossterm::event::KeyEvent) {
+        match key_event.code {
+            KeyCode::Esc => self.cancel(),
+            KeyCode::Enter => self.accept(),
+            _ => {}
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    fn completion(&self) -> Option<ViewCompletion> {
+        self.completion
+    }
+
+    fn view_id(&self) -> Option<&'static str> {
+        Some(CODEX_ACCOUNT_DEVICE_LOGIN_VIEW_ID)
+    }
+
+    fn on_ctrl_c(&mut self) -> CancellationEvent {
+        self.cancel();
+        CancellationEvent::Handled
+    }
+
+    fn prefer_esc_to_handle_key_event(&self) -> bool {
+        true
+    }
+}
+
+impl Renderable for CodexAccountDeviceLoginView {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        Paragraph::new(self.lines())
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
+    }
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        if self.verification_url.is_some() && self.user_code.is_some() {
+            13
+        } else {
+            4
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_event_sender::AppEventSender;
 
     #[test]
     fn recommended_provider_rows_are_human_readable() {
@@ -138,6 +356,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "Provider: OpenAI Codex Account",
                 "Provider: Ambient API Key",
                 "Provider: Z.AI API Key",
                 "Provider: OpenRouter API Key",
@@ -146,8 +365,90 @@ mod tests {
         );
         assert_eq!(
             rows[0].description.as_deref(),
+            Some("Sign in with device code")
+        );
+        assert_eq!(
+            rows[1].description.as_deref(),
             Some("Store AMBIENT_API_KEY in the vault")
         );
+    }
+
+    #[test]
+    fn provider_rows_dispatch_expected_events() {
+        let rows = provider_credential_items();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = AppEventSender::new(tx);
+
+        (rows[0].actions[0])(&sender);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AppEvent::OpenCodexAccountDeviceLogin)
+        ));
+
+        (rows[1].actions[0])(&sender);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AppEvent::OpenProviderApiKeyAdd { provider_name, env_key })
+                if provider_name == "Ambient" && env_key == "AMBIENT_API_KEY"
+        ));
+    }
+
+    #[test]
+    fn codex_account_device_login_escape_cancels_only_active_login() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = AppEventSender::new(tx);
+        let esc = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+
+        let mut pending = CodexAccountDeviceLoginView::pending(sender.clone());
+        pending.handle_key_event(esc);
+        assert!(pending.is_complete());
+        assert!(matches!(
+            pending.completion(),
+            Some(ViewCompletion::Cancelled)
+        ));
+        assert!(rx.try_recv().is_err());
+
+        let mut ready = CodexAccountDeviceLoginView::ready(
+            sender.clone(),
+            "login-1".to_string(),
+            "https://example.com/device".to_string(),
+            "ABCD-EFGH".to_string(),
+        );
+        ready.handle_key_event(esc);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AppEvent::CancelCodexAccountDeviceLogin { login_id }) if login_id == "login-1"
+        ));
+
+        ready.handle_key_event(esc);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn codex_account_device_login_accept_disarms_cancel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = AppEventSender::new(tx);
+        let mut view = CodexAccountDeviceLoginView::ready(
+            sender,
+            "login-1".to_string(),
+            "https://example.com/device".to_string(),
+            "ABCD-EFGH".to_string(),
+        );
+
+        view.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(matches!(view.completion(), Some(ViewCompletion::Accepted)));
+
+        view.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

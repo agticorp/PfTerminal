@@ -2691,12 +2691,16 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
         "expected MiniMax M3 price description in /model picker:\n{popup}"
     );
     assert!(
-        popup.contains("openrouter/owl-alpha"),
-        "expected Owl Alpha in /model picker:\n{popup}"
+        popup.contains("gpt-5.5"),
+        "expected GPT-5.5 in /model picker:\n{popup}"
     );
     assert!(
-        !popup.contains("gpt-"),
-        "expected fake OpenAI models to be hidden from /model picker:\n{popup}"
+        !popup.contains("gpt-5.4"),
+        "expected older OpenAI models to be hidden from /model picker:\n{popup}"
+    );
+    assert!(
+        !popup.contains("codex-auto-review"),
+        "expected hidden OpenAI/Codex models to be hidden from /model picker:\n{popup}"
     );
 
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));

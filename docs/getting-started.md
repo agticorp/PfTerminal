@@ -12,11 +12,10 @@ cd ~/repos/my-project
 pfterminal
 ```
 
-If you built from source and are launching the debug binary directly, keep
-PFTerminal state separate from stock Codex:
+If you built from source, the debug `pfterminal` binary also defaults
+PFTerminal state to `$HOME/.pfterminal`, separate from stock Codex:
 
 ```bash
-export CODEX_HOME="${PFTERMINAL_HOME:-$HOME/.pfterminal}"
 /path/to/PfTerminal/codex-rs/target/debug/pfterminal
 ```
 

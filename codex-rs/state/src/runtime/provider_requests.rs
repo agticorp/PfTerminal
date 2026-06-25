@@ -67,6 +67,87 @@ pub enum ProviderRequestResult {
 }
 
 impl StateRuntime {
+    pub async fn check_provider_request_cooldown(
+        &self,
+        key: &ProviderRequestKey,
+        preflight: &ProviderRequestPreflight,
+        now_ms: i64,
+    ) -> anyhow::Result<Option<ProviderRequestBlock>> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            r#"
+INSERT INTO provider_request_state (
+    provider_id,
+    model,
+    key_fingerprint,
+    last_input_tokens,
+    last_cached_input_tokens,
+    last_request_bytes,
+    last_thread_id,
+    last_turn_id,
+    updated_at_ms
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(provider_id, model, key_fingerprint) DO UPDATE SET
+    last_input_tokens = excluded.last_input_tokens,
+    last_cached_input_tokens = excluded.last_cached_input_tokens,
+    last_request_bytes = excluded.last_request_bytes,
+    last_thread_id = excluded.last_thread_id,
+    last_turn_id = excluded.last_turn_id,
+    updated_at_ms = excluded.updated_at_ms
+            "#,
+        )
+        .bind(key.provider_id.as_str())
+        .bind(key.model.as_str())
+        .bind(key.key_fingerprint.as_str())
+        .bind(preflight.input_tokens.max(0))
+        .bind(preflight.cached_input_tokens.max(0))
+        .bind(preflight.request_bytes.max(0))
+        .bind(preflight.thread_id.as_deref())
+        .bind(preflight.turn_id.as_deref())
+        .bind(now_ms)
+        .execute(&mut *tx)
+        .await?;
+
+        let row = sqlx::query(
+            r#"
+SELECT
+    cooldown_until_ms,
+    lease_owner,
+    lease_until_ms,
+    last_status,
+    last_request_id,
+    last_input_tokens,
+    last_cached_input_tokens,
+    last_request_bytes,
+    last_provider_input_tokens,
+    last_provider_cached_input_tokens
+FROM provider_request_state
+WHERE provider_id = ? AND model = ? AND key_fingerprint = ?
+            "#,
+        )
+        .bind(key.provider_id.as_str())
+        .bind(key.model.as_str())
+        .bind(key.key_fingerprint.as_str())
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let cooldown_until_ms: i64 = row.try_get("cooldown_until_ms")?;
+        let block = if cooldown_until_ms > now_ms {
+            Some(block_from_row(
+                &row,
+                ProviderRequestBlockReason::Cooldown,
+                cooldown_until_ms,
+                now_ms,
+            )?)
+        } else {
+            None
+        };
+
+        tx.commit().await?;
+        Ok(block)
+    }
+
     pub async fn try_acquire_provider_request_lease(
         &self,
         key: &ProviderRequestKey,
@@ -380,6 +461,16 @@ mod tests {
         }
     }
 
+    fn small_preflight() -> ProviderRequestPreflight {
+        ProviderRequestPreflight {
+            input_tokens: 2_426,
+            cached_input_tokens: 576,
+            request_bytes: 29_441,
+            thread_id: Some("thread-b".to_string()),
+            turn_id: Some("turn-b".to_string()),
+        }
+    }
+
     #[tokio::test]
     async fn lease_blocks_second_process_until_ttl() {
         let codex_home = unique_temp_dir();
@@ -434,6 +525,28 @@ mod tests {
             .await
             .expect("acquire second lease");
         assert!(matches!(second, ProviderRequestLeaseDecision::Acquired(_)));
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn cooldown_only_check_ignores_active_lease() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
+
+        let first = runtime
+            .try_acquire_provider_request_lease(&key(), &preflight(), "worker-a", 10_000, 1_000)
+            .await
+            .expect("acquire first lease");
+        assert!(matches!(first, ProviderRequestLeaseDecision::Acquired(_)));
+
+        let block = runtime
+            .check_provider_request_cooldown(&key(), &small_preflight(), 1_500)
+            .await
+            .expect("check cooldown");
+        assert_eq!(block, None);
 
         let _ = tokio::fs::remove_dir_all(codex_home).await;
     }

@@ -2023,13 +2023,40 @@ async fn acquire_provider_request_lease(
         last_token_usage.as_ref(),
     )
     .await;
+    let now_ms = now_unix_timestamp_ms();
+    if !provider_request_active_lease_needed(turn_context, &preflight, last_token_usage.as_ref()) {
+        if let Some(block) = state_db
+            .check_provider_request_cooldown(&key, &preflight, now_ms)
+            .await
+            .map_err(|err| {
+                CodexErr::Fatal(format!(
+                    "failed to check provider request throttle state: {err:#}"
+                ))
+            })?
+        {
+            warn!(
+                turn_id = %turn_context.sub_id,
+                provider = %key.provider_id,
+                model = %key.model,
+                key_fingerprint = %key.key_fingerprint,
+                reason = ?block.reason,
+                remaining_ms = block.remaining_ms,
+                last_status = ?block.last_status,
+                last_request_bytes = block.last_request_bytes,
+                "provider request blocked by local hammer-reduction state"
+            );
+            return Err(CodexErr::InvalidRequest(format_provider_request_block(
+                &key, &block,
+            )));
+        }
+        return Ok(None);
+    }
     let owner = format!(
         "pid:{}:thread:{}:turn:{}",
         std::process::id(),
         sess.thread_id,
         turn_context.sub_id
     );
-    let now_ms = now_unix_timestamp_ms();
     let decision = state_db
         .try_acquire_provider_request_lease(
             &key,
@@ -2135,6 +2162,19 @@ fn third_party_cache_looks_healthy(last_token_usage: Option<&TokenUsage>) -> boo
 
 fn third_party_cache_miss_is_known(last_token_usage: Option<&TokenUsage>) -> bool {
     cache_hit_rate(last_token_usage).is_some_and(|rate| rate < THIRD_PARTY_CACHE_HEALTHY_HIT_RATE)
+}
+
+fn provider_request_active_lease_needed(
+    turn_context: &TurnContext,
+    preflight: &ProviderRequestPreflight,
+    last_token_usage: Option<&TokenUsage>,
+) -> bool {
+    if turn_context.provider.info().is_openai() {
+        return false;
+    }
+    let large_request = preflight.input_tokens >= THIRD_PARTY_PREFLIGHT_WARNING_INPUT_TOKENS
+        || preflight.request_bytes >= THIRD_PARTY_PREFLIGHT_WARNING_REQUEST_BYTES;
+    large_request && !third_party_cache_looks_healthy(last_token_usage)
 }
 
 fn cache_hit_rate(last_token_usage: Option<&TokenUsage>) -> Option<f64> {
@@ -2832,25 +2872,22 @@ async fn try_run_sampling_request(
     )
     .await;
 
-    let tool_blocking_timing_guard = if in_flight.is_empty() {
-        None
-    } else {
-        Some(turn_context.turn_timing_state.begin_tool_blocking())
-    };
-    if let Err(err) = drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await {
-        provider_request_lease_guard
-            .record_result(sess.as_ref(), provider_request_result_from_error(&err))
-            .await;
-        return Err(err);
-    }
-    drop(tool_blocking_timing_guard);
-
     provider_request_lease_guard
         .record_result(
             sess.as_ref(),
             provider_request_result_from_outcome(&outcome),
         )
         .await;
+
+    let tool_blocking_timing_guard = if in_flight.is_empty() {
+        None
+    } else {
+        Some(turn_context.turn_timing_state.begin_tool_blocking())
+    };
+    if let Err(err) = drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await {
+        return Err(err);
+    }
+    drop(tool_blocking_timing_guard);
 
     if should_emit_token_count {
         // A tool call such as request_user_input can intentionally pause the turn. Emit token

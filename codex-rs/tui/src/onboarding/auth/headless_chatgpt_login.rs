@@ -30,11 +30,16 @@ pub(super) fn start_headless_chatgpt_login(widget: &mut AuthModeWidget) {
     let sign_in_state = widget.sign_in_state.clone();
     let request_frame = widget.request_frame.clone();
     let error = widget.error.clone();
+    let login_params = if widget.provider_picker_enabled() {
+        LoginAccountParams::OpenaiProviderDeviceCode
+    } else {
+        LoginAccountParams::ChatgptDeviceCode
+    };
     tokio::spawn(async move {
         match request_handle
             .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
                 request_id: onboarding_request_id(),
-                params: LoginAccountParams::ChatgptDeviceCode,
+                params: login_params,
             })
             .await
         {

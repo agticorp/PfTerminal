@@ -940,6 +940,89 @@ impl App {
                 self.chat_widget
                     .open_provider_api_key_add(provider_name, env_key);
             }
+            AppEvent::OpenCodexAccountDeviceLogin => {
+                self.chat_widget.open_codex_account_device_login_pending();
+                let request_handle = app_server.request_handle();
+                let tx = self.app_event_tx.clone();
+                tokio::spawn(async move {
+                    let result = request_handle
+                        .request_typed::<codex_app_server_protocol::LoginAccountResponse>(
+                            ClientRequest::LoginAccount {
+                                request_id: codex_app_server_protocol::RequestId::String(format!(
+                                    "codex-account-device-login-{}",
+                                    Uuid::new_v4()
+                                )),
+                                params: codex_app_server_protocol::LoginAccountParams::OpenaiProviderDeviceCode,
+                            },
+                        )
+                        .await;
+
+                    match result {
+                        Ok(
+                            codex_app_server_protocol::LoginAccountResponse::ChatgptDeviceCode {
+                                login_id,
+                                verification_url,
+                                user_code,
+                            },
+                        ) => {
+                            tx.send(AppEvent::CodexAccountDeviceLoginReady {
+                                login_id,
+                                verification_url,
+                                user_code,
+                            });
+                        }
+                        Ok(other) => {
+                            tx.send(AppEvent::CodexAccountDeviceLoginFailed {
+                                message: format!(
+                                    "Unexpected account/login/start response: {other:?}"
+                                ),
+                            });
+                        }
+                        Err(err) => {
+                            tx.send(AppEvent::CodexAccountDeviceLoginFailed {
+                                message: err.to_string(),
+                            });
+                        }
+                    }
+                });
+            }
+            AppEvent::CodexAccountDeviceLoginReady {
+                login_id,
+                verification_url,
+                user_code,
+            } => {
+                self.chat_widget.open_codex_account_device_login_ready(
+                    login_id,
+                    verification_url,
+                    user_code,
+                );
+            }
+            AppEvent::CodexAccountDeviceLoginFailed { message } => {
+                self.chat_widget
+                    .on_codex_account_device_login_failed(message);
+            }
+            AppEvent::CancelCodexAccountDeviceLogin { login_id } => {
+                self.chat_widget.add_info_message(
+                    "OpenAI Codex account login canceled.".to_string(),
+                    /*hint*/ None,
+                );
+                let request_handle = app_server.request_handle();
+                tokio::spawn(async move {
+                    let _ = request_handle
+                        .request_typed::<codex_app_server_protocol::CancelLoginAccountResponse>(
+                            ClientRequest::CancelLoginAccount {
+                                request_id: codex_app_server_protocol::RequestId::String(format!(
+                                    "cancel-codex-account-device-login-{}",
+                                    Uuid::new_v4()
+                                )),
+                                params: codex_app_server_protocol::CancelLoginAccountParams {
+                                    login_id,
+                                },
+                            },
+                        )
+                        .await;
+                });
+            }
             AppEvent::OpenVaultCredentialAdd => {
                 self.chat_widget.open_vault_credential_add();
             }

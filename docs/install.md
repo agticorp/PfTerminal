@@ -104,10 +104,13 @@ fetch stalls seen with nested git dependencies.
 Run the source-built binary from the workspace you want PFTerminal to inspect:
 
 ```bash
-export CODEX_HOME="${PFTERMINAL_HOME:-$HOME/.pfterminal}"
 cd ~/repos
 /path/to/PfTerminal/codex-rs/target/debug/pfterminal
 ```
+
+The source-built `pfterminal` binary defaults `CODEX_HOME` to
+`$HOME/.pfterminal`; set `CODEX_HOME` only when you need a custom state
+directory.
 
 For repeated local use, install a wrapper on your `PATH`:
 
@@ -123,8 +126,9 @@ EOF
 chmod 0755 "$HOME/.local/bin/pfterminal"
 ```
 
-Using `CODEX_HOME=$HOME/.pfterminal` keeps PFTerminal credentials, vault data,
-sessions, logs, plugins, and skills separate from a stock Codex install.
+Using the default `CODEX_HOME=$HOME/.pfterminal` keeps PFTerminal credentials,
+vault data, sessions, logs, plugins, and skills separate from a stock Codex
+install.
 
 ### npm Package
 
@@ -145,14 +149,16 @@ to use.
 
 | Provider   | Provider id  | Key name             | Model(s) shown in `/model`                                                              |
 | ---------- | ------------ | -------------------- | --------------------------------------------------------------------------------------- |
+| OpenAI Codex | `openai`   | Codex account login  | `gpt-5.5`                                                                               |
 | Ambient    | `ambient`    | `AMBIENT_API_KEY`    | `zai-org/GLM-5.2-FP8`                                                                   |
 | Z.AI       | `zai`        | `ZAI_API_KEY`        | `glm-5.2`                                                                               |
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `z-ai/glm-5.2`, `minimax/minimax-m3`, `openrouter/owl-alpha`, `google/gemini-3.5-flash` |
 | Baseten    | `baseten`    | `BASETEN_API_KEY`    | `zai-org/GLM-5.2`                                                                       |
 
-The first-run provider picker can accept Ambient, Z.AI, OpenRouter, or Baseten
-API keys. Provider keys entered through the PFTerminal UI are stored in the
-encrypted vault and are available from any working directory.
+The first-run provider picker and `/providers` can start OpenAI Codex account
+device login or accept Ambient, Z.AI, OpenRouter, or Baseten API keys. Provider
+keys entered through the PFTerminal UI are stored in the encrypted vault and
+are available from any working directory.
 
 You can also provide keys through environment variables:
 
@@ -215,6 +221,7 @@ Use `/model` in the TUI or pass `-m` at startup.
 
 ```bash
 pfterminal -m zai-org/GLM-5.2-FP8      # Ambient GLM 5.2
+pfterminal -m gpt-5.5                  # OpenAI Codex account
 pfterminal -m glm-5.2                  # Z.AI GLM 5.2
 pfterminal -m z-ai/glm-5.2             # OpenRouter GLM 5.2
 pfterminal -m minimax/minimax-m3       # OpenRouter MiniMax M3
@@ -225,13 +232,14 @@ pfterminal -m zai-org/GLM-5.2          # Baseten GLM 5.2
 
 The `/model` picker groups models into:
 
-- `Coding Plans`: Ambient and Z.AI plan-backed models.
+- `Coding Plans`: OpenAI Codex, Ambient, and Z.AI plan-backed models.
 - `Pay Per API Call`: OpenRouter and Baseten metered models.
 
 Current visible model metadata:
 
 | Model                     | Provider   | Notes                                                                        |
 | ------------------------- | ---------- | ---------------------------------------------------------------------------- |
+| `gpt-5.5`                 | OpenAI     | Codex account model exposed through provider `openai`                        |
 | `zai-org/GLM-5.2-FP8`     | Ambient    | Ambient default GLM 5.2 coding model                                         |
 | `glm-5.2`                 | Z.AI       | Z.AI coding-plan GLM 5.2                                                     |
 | `zai-org/GLM-5.2`         | Baseten    | GLM 5.2, listed as `$1.50/M input`, `$0.30/M cached input`, `$4.50/M output` |
@@ -260,6 +268,7 @@ In the TUI:
 Expected setup signs:
 
 - `/vault` shows the provider key label you added.
+- `/providers` includes OpenAI Codex Account plus API-key provider rows.
 - `/model` shows Coding Plans and Pay Per API Call sections.
 - `/skills` includes bundled PFTerminal system skills such as Frontend Design.
 

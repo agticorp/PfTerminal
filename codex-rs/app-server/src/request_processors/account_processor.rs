@@ -250,7 +250,16 @@ impl AccountRequestProcessor {
                     .await;
             }
             LoginAccountParams::ChatgptDeviceCode => {
-                self.login_chatgpt_device_code_v2(request_id).await;
+                self.login_chatgpt_device_code_v2(
+                    request_id, /*allow_forced_api_for_provider_login*/ false,
+                )
+                .await;
+            }
+            LoginAccountParams::OpenaiProviderDeviceCode => {
+                self.login_chatgpt_device_code_v2(
+                    request_id, /*allow_forced_api_for_provider_login*/ true,
+                )
+                .await;
             }
             LoginAccountParams::ChatgptAuthTokens {
                 access_token,
@@ -400,6 +409,7 @@ impl AccountRequestProcessor {
     async fn login_chatgpt_common(
         &self,
         codex_streamlined_login: bool,
+        allow_forced_api_for_provider_login: bool,
     ) -> std::result::Result<LoginServerOptions, JSONRPCErrorError> {
         let config = self.config.as_ref();
 
@@ -407,7 +417,9 @@ impl AccountRequestProcessor {
             return Err(self.external_auth_active_error());
         }
 
-        if matches!(config.forced_login_method, Some(ForcedLoginMethod::Api)) {
+        if !allow_forced_api_for_provider_login
+            && matches!(config.forced_login_method, Some(ForcedLoginMethod::Api))
+        {
             return Err(invalid_request(
                 "ChatGPT login is disabled. Use API key login instead.",
             ));
@@ -460,7 +472,12 @@ impl AccountRequestProcessor {
         &self,
         codex_streamlined_login: bool,
     ) -> Result<LoginAccountResponse, JSONRPCErrorError> {
-        let opts = self.login_chatgpt_common(codex_streamlined_login).await?;
+        let opts = self
+            .login_chatgpt_common(
+                codex_streamlined_login,
+                /*allow_forced_api_for_provider_login*/ false,
+            )
+            .await?;
         let server = run_login_server(opts)
             .map_err(|err| internal_error(format!("failed to start login server: {err}")))?;
         let login_id = Uuid::new_v4();
@@ -523,16 +540,26 @@ impl AccountRequestProcessor {
         })
     }
 
-    async fn login_chatgpt_device_code_v2(&self, request_id: ConnectionRequestId) {
-        let result = self.login_chatgpt_device_code_response().await;
+    async fn login_chatgpt_device_code_v2(
+        &self,
+        request_id: ConnectionRequestId,
+        allow_forced_api_for_provider_login: bool,
+    ) {
+        let result = self
+            .login_chatgpt_device_code_response(allow_forced_api_for_provider_login)
+            .await;
         self.outgoing.send_result(request_id, result).await;
     }
 
     async fn login_chatgpt_device_code_response(
         &self,
+        allow_forced_api_for_provider_login: bool,
     ) -> Result<LoginAccountResponse, JSONRPCErrorError> {
         let opts = self
-            .login_chatgpt_common(/*codex_streamlined_login*/ false)
+            .login_chatgpt_common(
+                /*codex_streamlined_login*/ false,
+                allow_forced_api_for_provider_login,
+            )
             .await?;
         let device_code = request_device_code(&opts)
             .await

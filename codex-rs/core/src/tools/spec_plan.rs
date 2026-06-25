@@ -69,6 +69,7 @@ use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
+use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -817,7 +818,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
             planned_tools.add_arc(override_tool_exposure(
                 multi_agent_v2_handler(
                     SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
-                        available_models: turn_context.available_models.clone(),
+                        available_models: spawn_agent_available_models(turn_context),
                         agent_type_description,
                         hide_agent_type_model_reasoning: turn_context
                             .config
@@ -863,7 +864,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                 ToolExposure::Direct
             };
             let spawn_options = SpawnAgentToolOptions {
-                available_models: turn_context.available_models.clone(),
+                available_models: spawn_agent_available_models(turn_context),
                 agent_type_description,
                 hide_agent_type_model_reasoning: false,
                 include_usage_hint: turn_context.config.multi_agent_v2.usage_hint_enabled,
@@ -1096,6 +1097,21 @@ fn v1_plain_function_subagents_enabled(turn_context: &TurnContext) -> bool {
             || provider_info.is_zai()
             || provider_info.is_openrouter()
             || provider_info.is_baseten())
+}
+
+fn spawn_agent_available_models(turn_context: &TurnContext) -> Vec<ModelPreset> {
+    if third_party_provider_without_spawn_model_switching(turn_context) {
+        return Vec::new();
+    }
+    turn_context.available_models.clone()
+}
+
+fn third_party_provider_without_spawn_model_switching(turn_context: &TurnContext) -> bool {
+    let provider_info = turn_context.provider.info();
+    provider_info.is_ambient()
+        || provider_info.is_zai()
+        || provider_info.is_openrouter()
+        || provider_info.is_baseten()
 }
 
 fn multi_agent_v1_plain_function_handler(

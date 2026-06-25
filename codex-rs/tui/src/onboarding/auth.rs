@@ -361,15 +361,15 @@ impl AuthModeWidget {
     }
 
     fn is_chatgpt_login_allowed(&self) -> bool {
-        !self.provider_picker_enabled()
-            && !matches!(self.forced_login_method, Some(ForcedLoginMethod::Api))
+        !matches!(self.forced_login_method, Some(ForcedLoginMethod::Api))
     }
 
     fn displayed_sign_in_options(&self) -> Vec<SignInOption> {
         if self.provider_picker_enabled() {
-            return (0..self.api_key_provider_options.len())
-                .map(SignInOption::ProviderApiKey)
-                .collect();
+            let mut options = vec![SignInOption::DeviceCode];
+            options
+                .extend((0..self.api_key_provider_options.len()).map(SignInOption::ProviderApiKey));
+            return options;
         }
 
         if self.is_chatgpt_login_allowed() {
@@ -573,12 +573,12 @@ impl AuthModeWidget {
                     ));
                 }
                 SignInOption::DeviceCode => {
-                    lines.extend(create_mode_item(
-                        idx,
-                        option,
-                        "Sign in with Device Code",
-                        device_code_description,
-                    ));
+                    let (text, description) = if self.provider_picker_enabled() {
+                        ("Provider: OpenAI Codex Account", "Sign in with device code")
+                    } else {
+                        ("Sign in with Device Code", device_code_description)
+                    };
+                    lines.extend(create_mode_item(idx, option, text, description));
                 }
                 SignInOption::ApiKey => {
                     let text = if self.provider_api_key_required() {
@@ -1260,9 +1260,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_key_picker_shows_provider_accounts_only() {
+    async fn provider_key_picker_shows_codex_account_and_provider_keys() {
         let (mut widget, _tmp) = widget_forced_chatgpt().await;
-        widget.forced_login_method = None;
+        widget.forced_login_method = Some(ForcedLoginMethod::Api);
         widget.highlighted_mode = SignInOption::ProviderApiKey(0);
         widget.api_key_provider_options = vec![
             ApiKeyProviderOption {
@@ -1290,6 +1290,7 @@ mod tests {
         assert_eq!(
             widget.displayed_sign_in_options(),
             vec![
+                SignInOption::DeviceCode,
                 SignInOption::ProviderApiKey(0),
                 SignInOption::ProviderApiKey(1),
                 SignInOption::ProviderApiKey(2),
@@ -1297,11 +1298,15 @@ mod tests {
             ]
         );
 
-        let area = Rect::new(0, 0, 80, 12);
+        let area = Rect::new(0, 0, 80, 16);
         let mut buf = Buffer::empty(area);
         widget.render_pick_mode(area, &mut buf);
         let rendered = buffer_text(&buf, area);
 
+        assert!(
+            rendered.contains("Provider: OpenAI Codex Account"),
+            "rendered:\n{rendered}"
+        );
         assert!(
             rendered.contains("Provider: Ambient API Key"),
             "rendered:\n{rendered}"
@@ -1319,7 +1324,7 @@ mod tests {
             "rendered:\n{rendered}"
         );
         assert!(!rendered.contains("ChatGPT"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("Device Code"), "rendered:\n{rendered}");
+        assert!(rendered.contains("device code"), "rendered:\n{rendered}");
     }
 
     #[tokio::test]

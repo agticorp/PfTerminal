@@ -286,6 +286,18 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
     }
 
     if let Some(requested_model) = requested_model {
+        if requested_model == turn.model_info.slug {
+            if let Some(reasoning_effort) = requested_reasoning_effort {
+                validate_spawn_agent_reasoning_effort(
+                    &turn.model_info.slug,
+                    &turn.model_info.supported_reasoning_levels,
+                    &reasoning_effort,
+                )?;
+                config.model_reasoning_effort = Some(reasoning_effort);
+            }
+            return Ok(());
+        }
+        reject_spawn_agent_model_switch_for_third_party_provider(turn, requested_model)?;
         let available_models = session
             .services
             .models_manager
@@ -398,6 +410,25 @@ fn find_spawn_agent_model_name(
                 "Unknown model `{requested_model}` for spawn_agent. Available models: {available}"
             ))
         })
+}
+
+fn reject_spawn_agent_model_switch_for_third_party_provider(
+    turn: &TurnContext,
+    requested_model: &str,
+) -> Result<(), FunctionCallError> {
+    let provider_info = turn.provider.info();
+    if !(provider_info.is_ambient()
+        || provider_info.is_zai()
+        || provider_info.is_openrouter()
+        || provider_info.is_baseten())
+    {
+        return Ok(());
+    }
+
+    Err(FunctionCallError::RespondToModel(format!(
+        "spawn_agent cannot switch from provider `{}` model `{}` to model `{requested_model}`. Subagents inherit the parent provider; omit model to inherit `{}`, or switch the parent session provider/model before spawning.",
+        turn.config.model_provider_id, turn.model_info.slug, turn.model_info.slug
+    )))
 }
 
 fn validate_spawn_agent_reasoning_effort(
