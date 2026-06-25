@@ -300,6 +300,9 @@ impl ChatWidget {
             SlashCommand::Agent | SlashCommand::MultiAgents => {
                 self.app_event_tx.send(AppEvent::OpenAgentPicker);
             }
+            SlashCommand::Panes => {
+                self.app_event_tx.send(AppEvent::OpenPanePicker);
+            }
             SlashCommand::Permissions => {
                 self.open_permissions_popup();
                 self.defer_input_until_settings_applied();
@@ -1083,6 +1086,7 @@ impl ChatWidget {
             | SlashCommand::Apps
             | SlashCommand::Plugins
             | SlashCommand::Providers
+            | SlashCommand::Panes
             | SlashCommand::Rollout
             | SlashCommand::Vault
             | SlashCommand::Copy

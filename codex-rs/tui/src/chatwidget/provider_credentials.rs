@@ -412,7 +412,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         let mut ready = CodexAccountDeviceLoginView::ready(
-            sender.clone(),
+            sender,
             "login-1".to_string(),
             "https://example.com/device".to_string(),
             "ABCD-EFGH".to_string(),

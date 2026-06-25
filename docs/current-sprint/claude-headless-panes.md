@@ -1,6 +1,16 @@
 # Claude Headless Panes
 
-Status: scope proposal, not implemented.
+Status: implemented in PFTerminal for Ambient-backed Claude Code panes.
+
+The working path runs real `claude -p` headless turns against a local
+PFTerminal Anthropic Messages bridge. The bridge translates Claude Code
+Messages requests to Ambient Chat Completions with the vault-held Ambient key,
+then returns Claude-compatible JSON/SSE back to the Claude process.
+
+The local runner no longer hangs on the `claude -p` rc-124 failure mode. It now
+uses the hardened headless invocation, surfaces structured provider errors from
+Claude Code stream JSON, and has a live two-turn regression test proving actual
+assistant output.
 
 ## Complete
 
@@ -16,20 +26,43 @@ Status: scope proposal, not implemented.
 - [x] Confirmed the second resumed turn reported cache reuse
   (`cache_read_input_tokens`), which is the behavior needed for a pane-like
   session rather than a stateless one-shot call.
+- [x] Implemented a user-pane registry for user-owned panes separate from
+  Codex subagent thread navigation.
+- [x] Added `/panes` with `User Panes`, `New Claude Pane`, and `Agent Panes`
+  sections.
+- [x] Added a `ClaudeHeadlessPane` backend that invokes Claude Code through
+  headless `stream-json` mode.
+- [x] Added a PFTerminal vault auth helper for Claude pane provider
+  credentials.
+- [x] Generate pane-local Claude settings from vault-backed provider profiles.
+- [x] Added per-pane request locking so a Claude session cannot receive two
+  turns concurrently.
+- [x] Added tests for pane creation, provider settings generation, resume
+  behavior, stream-json error handling, and redaction boundaries.
+- [x] Hardened the headless invocation with `--bare`, `--max-turns 8`,
+  `--output-format stream-json --verbose`, disabled nonessential traffic and
+  experimental betas, and disabled non-streaming fallback to avoid rc-124
+  retry hangs.
+- [x] Live-tested the Ambient-backed Claude pane path with a vault-held key,
+  and separately verified the raw Z.AI Anthropic endpoint/key.
+- [x] Implemented a local Ambient Anthropic-to-Chat bridge for Claude Code
+  headless panes.
+- [x] Live-tested the Ambient bridge through the pane command path:
+  first turn returned `OK-PFTERMINAL-LIVE`; resumed second turn returned the
+  same marker.
+- [x] Live-tested a Claude Code tool loop through the Ambient bridge:
+  Claude inspected the working directory through Claude Code tooling and
+  returned `FOUND-CARGO-TOML`.
+- [x] Exercised the real `/panes` TUI path in tmux:
+  created an Ambient Claude pane, saw the footer label switch to the Claude
+  pane, submitted a prompt, and rendered `UX-PANE-BUILD-FOUND`.
 
 ## To Do
 
-- [ ] Implement a pane registry for user-owned panes separate from Codex
-  subagent thread navigation.
-- [ ] Add `/panes` with `User Panes` and `Agent Panes` sections.
-- [ ] Add a `ClaudeHeadlessPane` backend that invokes Claude Code through
-  headless JSON/stream-json mode.
-- [ ] Add a PFTerminal vault auth helper for Claude pane provider credentials.
-- [ ] Generate pane-local Claude settings from vault-backed provider profiles.
-- [ ] Add per-pane request locking so a Claude session cannot receive two turns
-  concurrently.
-- [ ] Add tests for pane creation, provider settings generation, resume
-  behavior, and redaction boundaries.
+- [ ] Validate direct Z.AI, Baseten, and OpenRouter Claude-compatible routes as
+  optional pane profiles.
+- [ ] Decide whether to keep the Ambient bridge as the default long-term path
+  or replace it when Ambient's native Anthropic route is consistently healthy.
 
 ## Goal
 
@@ -44,6 +77,7 @@ The target UX is:
 
 User Panes
 > Codex - Main - OpenAI
+  Claude Code - GLM 5.2 Ambient
   Claude Code - GLM 5.2 Z.AI
   Claude Code - GLM 5.2 Baseten
   Claude Code - OpenRouter
@@ -80,10 +114,11 @@ The local test used a fixed Claude session id:
 
 ```bash
 claude -p \
-  --output-format json \
-  --session-id 11111111-2222-4333-8444-555555555555 \
-  --tools "" \
+  --output-format stream-json \
+  --verbose \
   --permission-mode bypassPermissions \
+  --max-turns 8 \
+  --session-id 11111111-2222-4333-8444-555555555555 \
   'This is a continuity test. Remember the marker: PFT-PANE-721. Reply with exactly: stored.'
 ```
 
@@ -99,10 +134,11 @@ The correct continuation path is:
 
 ```bash
 claude -p \
-  --output-format json \
-  --resume 11111111-2222-4333-8444-555555555555 \
-  --tools "" \
+  --output-format stream-json \
+  --verbose \
   --permission-mode bypassPermissions \
+  --max-turns 8 \
+  --resume 11111111-2222-4333-8444-555555555555 \
   'What marker did I ask you to remember in the previous turn? Reply with only the marker.'
 ```
 
@@ -152,8 +188,9 @@ First message to a Claude pane:
 PFTerminal
   -> resolve provider profile
   -> read credential from vault
+  -> start local provider bridge if the profile requires one
   -> write pane-local Claude settings
-  -> run claude -p --output-format stream-json --session-id <pane_uuid>
+  -> run claude --bare -p --output-format stream-json --verbose --max-turns 8 --session-id <pane_uuid>
   -> parse JSON events
   -> render native PFTerminal history cells
 ```
@@ -164,7 +201,7 @@ Later messages to the same pane:
 PFTerminal
   -> acquire pane lock
   -> refresh settings/auth helper
-  -> run claude -p --output-format stream-json --resume <claude_session_id>
+  -> run claude --bare -p --output-format stream-json --verbose --max-turns 8 --resume <claude_session_id>
   -> parse JSON events
   -> release pane lock
 ```
@@ -187,7 +224,18 @@ Preferred auth path:
 {
   "env": {
     "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2[1m]"
+    "ANTHROPIC_API_KEY": "",
+    "ANTHROPIC_MODEL": "opus",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7",
+    "ANTHROPIC_SMALL_FAST_MODEL": "glm-4.7",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "glm-5.2[1m]",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
+    "API_TIMEOUT_MS": "3000000",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1"
   },
   "apiKeyHelper": "pfterminal vault auth-helper provider/zai_api_key"
 }
@@ -208,10 +256,30 @@ provider profile, but raw secret reads should remain host-owned.
 | Pane profile | Claude base URL | Credential source | Notes |
 | --- | --- | --- | --- |
 | Claude Plan | native Claude auth | Claude's own login/keychain | No PFTerminal provider key required. |
+| Ambient GLM 5.2 | local PFTerminal bridge to `https://api.ambient.xyz/v1/chat/completions` | `provider/ambient_api_key` | Working path. Claude Code talks Anthropic Messages to loopback; PFTerminal translates to Ambient Chat Completions. |
 | Z.AI GLM 5.2 | `https://api.z.ai/api/anthropic` | `provider/zai_api_key` | Best first third-party target because Z.AI documents Claude Code usage through an Anthropic-compatible endpoint. |
 | Baseten GLM 5.2 | `https://inference.baseten.co` | `provider/baseten_api_key` | Baseten documents Model APIs with Anthropic Messages. Needs live validation with GLM 5.2 model naming and auth headers. |
 | OpenRouter | `https://openrouter.ai/api` | `provider/openrouter_api_key` | OpenRouter documents a Claude Code integration through an Anthropic-compatible skin. |
-| Ambient GLM 5.2 | unknown | `provider/ambient_api_key` | Only direct if Ambient exposes an Anthropic-compatible Claude endpoint. Otherwise requires a local Anthropic-to-Chat proxy. |
+
+## Live Provider Evidence
+
+The local implementation was tested with vault-held keys and the freshly built
+`pfterminal` binary.
+
+| Probe | Result | Interpretation |
+| --- | --- | --- |
+| Ambient Chat Completions, `https://api.ambient.xyz/v1/chat/completions`, `zai-org/GLM-5.2-FP8` | HTTP 200 | Ambient key and base API are valid. |
+| PFTerminal Ambient Claude bridge, first turn | returned `OK-PFTERMINAL-LIVE` | Real `claude -p` headless process received assistant text through the local bridge. |
+| PFTerminal Ambient Claude bridge, resumed second turn | returned `OK-PFTERMINAL-LIVE` | The pane command path preserves Claude session continuity across `--resume`. |
+| PFTerminal Ambient Claude bridge, tool loop | returned `FOUND-CARGO-TOML` after being asked to inspect the working directory | The local bridge carries Claude Code tool definitions, model `tool_use`, host tool execution, tool results, and final assistant text. |
+| Real `/panes` TUI path in tmux | rendered `UX-PANE-BUILD-FOUND`; artifact `/home/postfiat/.pfterminal/panes/claude-ee436dce-06dc-4b7d-acce-e92cf42b3b06/turn-0001.jsonl` | Proves the visible picker, pane selection, footer label, prompt submission, Claude Code tool loop, native history rendering, and artifact persistence work together. |
+| Live regression command | `PFTERMINAL_LIVE_CODEX_HOME=/home/postfiat/.pfterminal cargo test -p codex-tui claude_panes::tests::live_ambient_bridge_runs_claude_headless_for_two_turns -- --ignored --nocapture` | Explicit opt-in test uses the real vault credential and real Claude CLI; it is ignored by default for CI. |
+| Live tool-loop command | `PFTERMINAL_LIVE_CODEX_HOME=/home/postfiat/.pfterminal cargo test -p codex-tui claude_panes::tests::live_ambient_bridge_runs_claude_tool_loop -- --ignored --nocapture` | Explicit opt-in test proves the pane is not chat-only. |
+| Ambient Anthropic route, `https://api.ambient.xyz/v1/messages` | HTTP 429, `Bundle saturated` | Claude Code-compatible route exists but currently cannot accept the request. |
+| Hardened Claude Code + Ambient + `apiKeyHelper` | exits in ~5s with stream-json `is_error: true`, `Stream ended without receiving any events` | PFTerminal no longer hangs; provider error is visible. |
+| Same Ambient probe with non-streaming fallback enabled | external timeout rc 124 after retrying 429 `Bundle saturated` | Non-streaming fallback recreates the old hang; keep it disabled for pane runs. |
+| Z.AI direct Anthropic curl, `https://api.z.ai/api/anthropic/v1/messages`, `glm-5.2` | HTTP 200, text `OK` | Z.AI key and raw endpoint are valid. |
+| Claude Code + Z.AI headless | repeated 529/1305 overloaded errors | Failure is Claude Code provider route behavior, not missing credentials. |
 
 ## Rendering Contract
 
@@ -333,8 +401,12 @@ raw secrets to Claude model context.
 ## Acceptance Criteria
 
 - `/panes` opens a picker with `User Panes` and `Agent Panes`.
-- A Z.AI Claude pane can be created from a vault-stored `provider/zai_api_key`
-  without editing `~/.claude/settings.json`.
+- An Ambient Claude pane can be created from a vault-stored
+  `provider/ambient_api_key` without editing `~/.claude/settings.json`.
+- The active footer labels the selected Claude pane so users know new prompts
+  are routed to Claude Code, not the main Codex model.
+- Direct Z.AI, Baseten, and OpenRouter Claude pane profiles fail clearly until
+  their Claude-compatible routes are validated.
 - A two-turn Claude pane remembers prior context through `--resume`.
 - The pane backend prevents concurrent sends to the same Claude session.
 - Raw provider keys do not appear in PFTerminal chat history, Claude transcript

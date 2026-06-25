@@ -335,6 +335,9 @@ impl App {
             }
             AppEvent::CodexOp(op) => {
                 self.chat_widget.prepare_local_op_submission(&op);
+                if self.try_submit_active_claude_pane_op(&op) {
+                    return Ok(AppRunControl::Continue);
+                }
                 self.submit_active_thread_op(app_server, op).await?;
             }
             AppEvent::RestoreCancelledTurn(prompt) => {
@@ -1919,6 +1922,18 @@ impl App {
             AppEvent::SelectAgentThread(thread_id) => {
                 self.select_agent_thread_and_discard_side(tui, app_server, thread_id)
                     .await?;
+            }
+            AppEvent::OpenPanePicker => {
+                self.open_pane_picker();
+            }
+            AppEvent::SelectUserPane { pane_id } => {
+                self.select_user_pane(pane_id);
+            }
+            AppEvent::CreateClaudePane { profile } => {
+                self.create_claude_pane(profile);
+            }
+            AppEvent::ClaudePaneTurnFinished { pane_id, result } => {
+                self.on_claude_pane_turn_finished(pane_id, result);
             }
             AppEvent::StartSide {
                 parent_thread_id,

@@ -20,7 +20,7 @@ credentials, created automatically on login/startup and usable through
 | Tool-call runaway remedy | Live worker logs show malformed oversized `structured_write` calls looping through normal follow-up handling. The remedy is a non-retriable malformed-tool boundary plus bounded/chunked write mechanics. | [Tool Call Runaway Remedy](tool-call-runaway-remedy.md) |
 | Subagents | Current Codex supports explicit subagent workflows, but PFTerminal must make the tool exposure reliable and diagnosable across third-party provider sessions. | [PFTerminal Subagents](subagents.md) |
 | Codex account login | OpenAI Codex account login should appear as a provider credential, use device auth from `/providers`, expose only GPT-5.5, and avoid wiping provider vault keys on default logout. | [Codex Account Login](codex-account-login.md) |
-| Claude headless panes | Proposed `/panes` scope uses Claude Code headless JSON mode as user-owned panes, avoiding tmux/TUI embedding while preserving vault-backed provider credentials. | [Claude Headless Panes](claude-headless-panes.md) |
+| Claude headless panes | Implemented `/panes` user panes with Claude Code headless JSON mode, vault-backed provider credentials, and a verified Ambient bridge for live Claude execs. | [Claude Headless Panes](claude-headless-panes.md) |
 
 ## Sprint Reading Path
 
@@ -42,9 +42,8 @@ credentials, created automatically on login/startup and usable through
    subagent delegation visible, provider-compatible, and debuggable.
 8. Read [Codex Account Login](codex-account-login.md) for the plan to
    reintegrate OpenAI Codex account auth into `/providers` and Coding Plans.
-9. Read [Claude Headless Panes](claude-headless-panes.md) for the proposed
-   `/panes` architecture that runs Claude Code through headless JSON sessions
-   instead of embedded tmux panes.
+9. Read [Claude Headless Panes](claude-headless-panes.md) for the implemented
+   `/panes` Claude headless pane path and remaining provider validation work.
 
 ## Boundary
 

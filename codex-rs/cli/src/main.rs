@@ -135,6 +135,9 @@ enum Subcommand {
     /// Remove stored authentication credentials.
     Logout(LogoutCommand),
 
+    /// Internal vault helpers for PFTerminal integrations.
+    Vault(VaultCommand),
+
     /// Manage external MCP servers for Codex.
     Mcp(McpCli),
 
@@ -513,6 +516,28 @@ struct LogoutCommand {
 
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
+}
+
+#[derive(Debug, Parser)]
+struct VaultCommand {
+    #[clap(skip)]
+    config_overrides: CliConfigOverrides,
+
+    #[command(subcommand)]
+    action: VaultSubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum VaultSubcommand {
+    /// Print a whitelisted provider key for Claude Code apiKeyHelper.
+    #[clap(name = "auth-helper")]
+    AuthHelper(VaultAuthHelperCommand),
+}
+
+#[derive(Debug, Parser)]
+struct VaultAuthHelperCommand {
+    /// Vault label to reveal.
+    label: String,
 }
 
 #[derive(Debug, Parser)]
@@ -1396,6 +1421,18 @@ async fn cli_main(
             );
             run_logout(logout_cli.config_overrides, logout_cli.all).await;
         }
+        Some(Subcommand::Vault(mut vault_cli)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "vault",
+            )?;
+            prepend_config_flags(
+                &mut vault_cli.config_overrides,
+                root_config_overrides.clone(),
+            );
+            run_vault_command(vault_cli).await?;
+        }
         Some(Subcommand::Completion(completion_cli)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2043,6 +2080,47 @@ async fn run_debug_clear_memories_command(
     Ok(())
 }
 
+async fn run_vault_command(command: VaultCommand) -> anyhow::Result<()> {
+    match command.action {
+        VaultSubcommand::AuthHelper(auth_helper) => {
+            run_vault_auth_helper(command.config_overrides, auth_helper).await
+        }
+    }
+}
+
+async fn run_vault_auth_helper(
+    config_overrides: CliConfigOverrides,
+    command: VaultAuthHelperCommand,
+) -> anyhow::Result<()> {
+    if !provider_vault_label_allowed_for_auth_helper(&command.label) {
+        anyhow::bail!(
+            "vault auth-helper can only reveal whitelisted provider labels for Claude panes"
+        );
+    }
+
+    let cli_kv_overrides = config_overrides
+        .parse_overrides()
+        .map_err(anyhow::Error::msg)?;
+    let config = ConfigBuilder::default()
+        .cli_overrides(cli_kv_overrides)
+        .build()
+        .await?;
+    let vault = codex_vault::Vault::new(config.codex_home.to_path_buf());
+    let secret = vault.reveal(&command.label)?;
+    std::io::stdout().write_all(secret.as_bytes())?;
+    Ok(())
+}
+
+fn provider_vault_label_allowed_for_auth_helper(label: &str) -> bool {
+    matches!(
+        label,
+        "provider/zai_api_key"
+            | "provider/ambient_api_key"
+            | "provider/baseten_api_key"
+            | "provider/openrouter_api_key"
+    )
+}
+
 /// Prepend root-level overrides so they have lower precedence than
 /// CLI-specific ones specified after the subcommand (if any).
 fn prepend_config_flags(
@@ -2124,6 +2202,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::App(_)) => Some("app"),
         Some(Subcommand::Login(_)) => Some("login"),
         Some(Subcommand::Logout(_)) => Some("logout"),
+        Some(Subcommand::Vault(_)) => Some("vault"),
         Some(Subcommand::Completion(_)) => Some("completion"),
         Some(Subcommand::Update) => Some("update"),
         Some(Subcommand::Cloud(_)) => Some("cloud"),
@@ -2817,6 +2896,27 @@ mod tests {
         };
 
         assert!(cmd.bundled);
+    }
+
+    #[test]
+    fn vault_auth_helper_parses_provider_label() {
+        let cli =
+            MultitoolCli::try_parse_from(["codex", "vault", "auth-helper", "provider/zai_api_key"])
+                .expect("parse");
+
+        let Some(Subcommand::Vault(VaultCommand {
+            action: VaultSubcommand::AuthHelper(command),
+            ..
+        })) = cli.subcommand
+        else {
+            panic!("expected vault auth-helper subcommand");
+        };
+
+        assert_eq!(command.label, "provider/zai_api_key");
+        assert!(provider_vault_label_allowed_for_auth_helper(&command.label));
+        assert!(provider_vault_label_allowed_for_auth_helper(
+            "provider/ambient_api_key"
+        ));
     }
 
     #[test]

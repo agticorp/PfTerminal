@@ -1,0 +1,2101 @@
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::net::TcpListener as StdTcpListener;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
+
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::anyhow;
+use codex_app_server_protocol::UserInput;
+use codex_protocol::ThreadId;
+use codex_vault::Vault;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tokio::process::Command;
+use tokio::sync::Mutex;
+use tokio::sync::OwnedMutexGuard;
+use tokio::time::timeout;
+use uuid::Uuid;
+
+use crate::app::App;
+use crate::app_command::AppCommand;
+use crate::app_event::AppEvent;
+use crate::bottom_pane::SelectionItem;
+use crate::bottom_pane::SelectionViewParams;
+use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+use crate::multi_agents::AgentPickerThreadEntry;
+use crate::multi_agents::agent_picker_status_dot_spans;
+use crate::multi_agents::format_agent_picker_item_name;
+
+pub(crate) const CODEX_MAIN_PANE_ID: &str = "codex-main";
+const CLAUDE_PANE_TURN_TIMEOUT: Duration = Duration::from_secs(150);
+const CLAUDE_PANE_MAX_TURNS: &str = "8";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ClaudeProviderProfileKind {
+    ClaudePlan,
+    AmbientGlm52,
+    ZaiGlm52,
+    BasetenGlm52,
+    OpenRouterGlm52,
+}
+
+impl ClaudeProviderProfileKind {
+    pub(crate) fn profile(self) -> ClaudeProviderProfile {
+        match self {
+            Self::ClaudePlan => ClaudeProviderProfile {
+                kind: self,
+                title: "Claude Code - Claude Plan",
+                description: "Use Claude Code's native auth and selected Claude model.",
+                claude_model: "sonnet",
+                provider_model: "sonnet",
+                small_model: "haiku",
+                base_url: None,
+                vault_label: None,
+                uses_bare_mode: false,
+                transport: ClaudeProviderTransport::DirectAnthropic,
+            },
+            Self::AmbientGlm52 => ClaudeProviderProfile {
+                kind: self,
+                title: "Claude Code - GLM 5.2 Ambient",
+                description: "Use Ambient's Claude Code endpoint with the Ambient vault key.",
+                claude_model: "opus",
+                provider_model: "glm-5.2[1m]",
+                small_model: "glm-4.7",
+                base_url: Some("https://api.ambient.xyz"),
+                vault_label: Some("provider/ambient_api_key"),
+                uses_bare_mode: true,
+                transport: ClaudeProviderTransport::AmbientChatBridge,
+            },
+            Self::ZaiGlm52 => ClaudeProviderProfile {
+                kind: self,
+                title: "Claude Code - GLM 5.2 Z.AI",
+                description: "Use Z.AI's Anthropic-compatible Claude Code endpoint.",
+                claude_model: "opus",
+                provider_model: "glm-5.2[1m]",
+                small_model: "glm-4.7",
+                base_url: Some("https://api.z.ai/api/anthropic"),
+                vault_label: Some("provider/zai_api_key"),
+                uses_bare_mode: true,
+                transport: ClaudeProviderTransport::DirectAnthropic,
+            },
+            Self::BasetenGlm52 => ClaudeProviderProfile {
+                kind: self,
+                title: "Claude Code - GLM 5.2 Baseten",
+                description: "Use Baseten's Anthropic-compatible Model API endpoint.",
+                claude_model: "opus",
+                provider_model: "zai-org/GLM-5.2",
+                small_model: "zai-org/GLM-5.2",
+                base_url: Some("https://inference.baseten.co"),
+                vault_label: Some("provider/baseten_api_key"),
+                uses_bare_mode: true,
+                transport: ClaudeProviderTransport::DirectAnthropic,
+            },
+            Self::OpenRouterGlm52 => ClaudeProviderProfile {
+                kind: self,
+                title: "Claude Code - GLM 5.2 OpenRouter",
+                description: "Use OpenRouter through Claude Code's Anthropic-compatible skin.",
+                claude_model: "opus",
+                provider_model: "z-ai/glm-5.2",
+                small_model: "z-ai/glm-5.2",
+                base_url: Some("https://openrouter.ai/api"),
+                vault_label: Some("provider/openrouter_api_key"),
+                uses_bare_mode: true,
+                transport: ClaudeProviderTransport::DirectAnthropic,
+            },
+        }
+    }
+
+    pub(crate) fn creation_options() -> &'static [Self] {
+        &[
+            Self::AmbientGlm52,
+            Self::ZaiGlm52,
+            Self::BasetenGlm52,
+            Self::OpenRouterGlm52,
+            Self::ClaudePlan,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaudeProviderTransport {
+    DirectAnthropic,
+    AmbientChatBridge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClaudeProviderProfile {
+    pub(crate) kind: ClaudeProviderProfileKind,
+    pub(crate) title: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) claude_model: &'static str,
+    pub(crate) provider_model: &'static str,
+    pub(crate) small_model: &'static str,
+    pub(crate) base_url: Option<&'static str>,
+    pub(crate) vault_label: Option<&'static str>,
+    pub(crate) uses_bare_mode: bool,
+    pub(crate) transport: ClaudeProviderTransport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClaudePaneStatus {
+    Idle,
+    Running,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ClaudePane {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) profile: ClaudeProviderProfileKind,
+    pub(crate) cwd: PathBuf,
+    pub(crate) claude_session_id: Option<String>,
+    pub(crate) status: ClaudePaneStatus,
+    pub(crate) latest_usage_summary: Option<String>,
+    pub(crate) artifact_dir: PathBuf,
+    lock: Arc<Mutex<()>>,
+    next_turn_index: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct ClaudePaneRegistry {
+    active_user_pane_id: String,
+    panes: Vec<ClaudePane>,
+}
+
+impl ClaudePaneRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            active_user_pane_id: CODEX_MAIN_PANE_ID.to_string(),
+            panes: Vec::new(),
+        }
+    }
+
+    pub(crate) fn active_user_pane_id(&self) -> &str {
+        &self.active_user_pane_id
+    }
+
+    pub(crate) fn active_claude_pane_id(&self) -> Option<&str> {
+        (self.active_user_pane_id != CODEX_MAIN_PANE_ID)
+            .then_some(self.active_user_pane_id.as_str())
+    }
+
+    pub(crate) fn panes(&self) -> &[ClaudePane] {
+        &self.panes
+    }
+
+    pub(crate) fn active_claude_pane_title(&self) -> Option<&str> {
+        let pane_id = self.active_claude_pane_id()?;
+        self.panes
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .map(|pane| pane.title.as_str())
+    }
+
+    pub(crate) fn set_active_user_pane(&mut self, pane_id: &str) -> Result<()> {
+        if pane_id == CODEX_MAIN_PANE_ID {
+            self.active_user_pane_id = CODEX_MAIN_PANE_ID.to_string();
+            return Ok(());
+        }
+        if self.panes.iter().any(|pane| pane.id == pane_id) {
+            self.active_user_pane_id = pane_id.to_string();
+            Ok(())
+        } else {
+            Err(anyhow!("Claude pane `{pane_id}` does not exist"))
+        }
+    }
+
+    pub(crate) fn create_pane(
+        &mut self,
+        profile: ClaudeProviderProfileKind,
+        cwd: PathBuf,
+        codex_home: &Path,
+    ) -> Result<String> {
+        let profile_config = profile.profile();
+        if let Some(label) = profile_config.vault_label {
+            ensure_vault_label_exists(codex_home, label)?;
+        }
+
+        let id = format!("claude-{}", Uuid::new_v4());
+        let artifact_dir = codex_home.join("panes").join(&id);
+        std::fs::create_dir_all(&artifact_dir).with_context(|| {
+            format!(
+                "failed to create Claude pane artifact directory `{}`",
+                artifact_dir.display()
+            )
+        })?;
+        let pane = ClaudePane {
+            id: id.clone(),
+            title: profile_config.title.to_string(),
+            profile,
+            cwd,
+            claude_session_id: None,
+            status: ClaudePaneStatus::Idle,
+            latest_usage_summary: None,
+            artifact_dir,
+            lock: Arc::new(Mutex::new(())),
+            next_turn_index: 1,
+        };
+        self.panes.push(pane);
+        self.active_user_pane_id = id.clone();
+        Ok(id)
+    }
+
+    pub(crate) fn prepare_turn(
+        &mut self,
+        pane_id: &str,
+        prompt: String,
+        codex_home: &Path,
+    ) -> Result<PreparedClaudePaneTurn> {
+        let pane = self
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == pane_id)
+            .ok_or_else(|| anyhow!("Claude pane `{pane_id}` does not exist"))?;
+        if pane.status == ClaudePaneStatus::Running {
+            return Err(anyhow!("Claude pane `{}` is already running", pane.title));
+        }
+        let lock = pane
+            .lock
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| anyhow!("Claude pane `{}` is already running", pane.title))?;
+
+        let plan = build_claude_command_plan(pane, prompt, codex_home)?;
+        pane.status = ClaudePaneStatus::Running;
+        Ok(PreparedClaudePaneTurn {
+            pane_id: pane.id.clone(),
+            plan,
+            _lock: lock,
+        })
+    }
+
+    pub(crate) fn finish_turn(
+        &mut self,
+        pane_id: &str,
+        result: &Result<ClaudePaneTurnOutput, String>,
+    ) {
+        let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == pane_id) else {
+            return;
+        };
+        pane.status = ClaudePaneStatus::Idle;
+        if let Ok(output) = result {
+            if let Some(session_id) = &output.session_id {
+                pane.claude_session_id = Some(session_id.clone());
+            }
+            pane.latest_usage_summary = output.usage_summary.clone();
+            pane.next_turn_index = pane.next_turn_index.saturating_add(1);
+        }
+    }
+}
+
+impl Default for ClaudePaneRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub(crate) struct PreparedClaudePaneTurn {
+    pub(crate) pane_id: String,
+    plan: ClaudeCommandPlan,
+    _lock: OwnedMutexGuard<()>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClaudePaneTurnOutput {
+    pub(crate) text: String,
+    pub(crate) session_id: Option<String>,
+    pub(crate) usage_summary: Option<String>,
+    pub(crate) artifact_path: PathBuf,
+    pub(crate) duration_ms: i64,
+}
+
+pub(crate) struct ClaudeCommandPlan {
+    executable: String,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    cwd: PathBuf,
+    artifact_path: PathBuf,
+    bridge: Option<ClaudeBridgePlan>,
+}
+
+struct ClaudeBridgePlan {
+    listener: StdTcpListener,
+    bind_addr: SocketAddr,
+    upstream_api_key: String,
+    upstream_model: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BridgeToolCall {
+    id: String,
+    name: String,
+    input: Value,
+}
+
+impl std::fmt::Debug for ClaudeCommandPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env_keys = self.env.keys().cloned().collect::<Vec<_>>();
+        f.debug_struct("ClaudeCommandPlan")
+            .field("executable", &self.executable)
+            .field("args", &self.args)
+            .field("env_keys", &env_keys)
+            .field("cwd", &self.cwd)
+            .field("artifact_path", &self.artifact_path)
+            .field(
+                "bridge_addr",
+                &self.bridge.as_ref().map(|bridge| bridge.bind_addr),
+            )
+            .finish()
+    }
+}
+
+fn ensure_vault_label_exists(codex_home: &Path, label: &str) -> Result<()> {
+    let vault = Vault::new(codex_home.to_path_buf());
+    match vault.exists(label) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(anyhow!(
+            "Missing vault credential `{label}`. Add it from /providers before creating this Claude pane."
+        )),
+        Err(err) => Err(anyhow!("Could not read vault credential `{label}`: {err}")),
+    }
+}
+
+fn reveal_provider_secret(codex_home: &Path, label: &str) -> Result<String> {
+    if !allowed_provider_vault_label(label) {
+        return Err(anyhow!(
+            "Vault label `{label}` is not allowed for Claude pane auth"
+        ));
+    }
+    let vault = Vault::new(codex_home.to_path_buf());
+    vault
+        .reveal(label)
+        .with_context(|| format!("failed to read vault credential `{label}`"))
+}
+
+pub(crate) fn allowed_provider_vault_label(label: &str) -> bool {
+    matches!(
+        label,
+        "provider/zai_api_key"
+            | "provider/ambient_api_key"
+            | "provider/baseten_api_key"
+            | "provider/openrouter_api_key"
+    )
+}
+
+fn build_claude_command_plan(
+    pane: &ClaudePane,
+    prompt: String,
+    codex_home: &Path,
+) -> Result<ClaudeCommandPlan> {
+    let profile = pane.profile.profile();
+    let turn_index = pane.next_turn_index;
+    let settings_path = pane.artifact_dir.join("settings.json");
+    let artifact_path = pane
+        .artifact_dir
+        .join(format!("turn-{turn_index:04}.jsonl"));
+    let mut bridge = None;
+    let mut base_url_override = None;
+    if profile.transport == ClaudeProviderTransport::AmbientChatBridge {
+        let Some(label) = profile.vault_label else {
+            return Err(anyhow!(
+                "Ambient Claude bridge requires a provider vault label"
+            ));
+        };
+        let secret = reveal_provider_secret(codex_home, label)?;
+        let listener = StdTcpListener::bind("127.0.0.1:0")
+            .context("failed to bind Ambient Claude bridge loopback listener")?;
+        listener
+            .set_nonblocking(true)
+            .context("failed to set Ambient Claude bridge listener nonblocking")?;
+        let bind_addr = listener
+            .local_addr()
+            .context("failed to read Ambient Claude bridge listener address")?;
+        base_url_override = Some(format!("http://{bind_addr}"));
+        bridge = Some(ClaudeBridgePlan {
+            listener,
+            bind_addr,
+            upstream_api_key: secret,
+            upstream_model: "zai-org/GLM-5.2-FP8".to_string(),
+        });
+    }
+    let settings = settings_json_with_base_url(
+        profile,
+        if bridge.is_some() {
+            None
+        } else {
+            Some("pfterminal")
+        },
+        base_url_override.as_deref(),
+    );
+    std::fs::write(&settings_path, settings.to_string()).with_context(|| {
+        format!(
+            "failed to write Claude pane settings `{}`",
+            settings_path.display()
+        )
+    })?;
+
+    let mut env = BTreeMap::new();
+    if let Some(base_url) = base_url_override.as_deref().or(profile.base_url) {
+        env.insert("ANTHROPIC_BASE_URL".to_string(), base_url.to_string());
+    }
+    if bridge.is_some() {
+        env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
+        env.insert(
+            "ANTHROPIC_AUTH_TOKEN".to_string(),
+            "pfterminal-local-bridge".to_string(),
+        );
+    } else if let Some(label) = profile.vault_label {
+        let secret = reveal_provider_secret(codex_home, label)?;
+        env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
+        env.insert("ANTHROPIC_AUTH_TOKEN".to_string(), secret);
+    }
+    if profile.uses_bare_mode {
+        env.insert(
+            "ANTHROPIC_MODEL".to_string(),
+            profile.claude_model.to_string(),
+        );
+        env.insert(
+            "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+            profile.provider_model.to_string(),
+        );
+        env.insert(
+            "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+            profile.provider_model.to_string(),
+        );
+        env.insert(
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+            profile.small_model.to_string(),
+        );
+        env.insert(
+            "ANTHROPIC_SMALL_FAST_MODEL".to_string(),
+            profile.small_model.to_string(),
+        );
+        env.insert(
+            "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+            profile.provider_model.to_string(),
+        );
+        env.insert(
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
+            "1000000".to_string(),
+        );
+        env.insert("API_TIMEOUT_MS".to_string(), "3000000".to_string());
+        env.insert(
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS".to_string(),
+            "1".to_string(),
+        );
+        env.insert(
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+            "1".to_string(),
+        );
+        env.insert(
+            "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK".to_string(),
+            "1".to_string(),
+        );
+        env.insert("CLAUDECODE".to_string(), String::new());
+    }
+
+    let mut args = Vec::new();
+    if profile.uses_bare_mode {
+        args.push("--bare".to_string());
+    }
+    args.extend([
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+        "--settings".to_string(),
+        settings_path.to_string_lossy().into_owned(),
+        "--permission-mode".to_string(),
+        "bypassPermissions".to_string(),
+        "--max-turns".to_string(),
+        CLAUDE_PANE_MAX_TURNS.to_string(),
+        "--exclude-dynamic-system-prompt-sections".to_string(),
+        "--model".to_string(),
+        profile.claude_model.to_string(),
+    ]);
+    if profile.uses_bare_mode {
+        args.extend(["--setting-sources".to_string(), "project".to_string()]);
+    }
+    if let Some(session_id) = &pane.claude_session_id {
+        args.push("--resume".to_string());
+        args.push(session_id.clone());
+    } else {
+        args.push("--session-id".to_string());
+        args.push(pane.id.trim_start_matches("claude-").to_string());
+    }
+    args.push(prompt);
+
+    Ok(ClaudeCommandPlan {
+        executable: "claude".to_string(),
+        args,
+        env,
+        cwd: pane.cwd.clone(),
+        artifact_path,
+        bridge,
+    })
+}
+
+fn settings_json_with_base_url(
+    profile: ClaudeProviderProfile,
+    helper_program: Option<&str>,
+    base_url_override: Option<&str>,
+) -> Value {
+    let mut env = serde_json::Map::new();
+    if profile.uses_bare_mode {
+        if let Some(base_url) = base_url_override.or(profile.base_url) {
+            env.insert(
+                "ANTHROPIC_BASE_URL".to_string(),
+                Value::String(base_url.to_string()),
+            );
+        }
+        env.insert(
+            "ANTHROPIC_API_KEY".to_string(),
+            Value::String(String::new()),
+        );
+        env.insert(
+            "ANTHROPIC_MODEL".to_string(),
+            Value::String(profile.claude_model.to_string()),
+        );
+        env.insert(
+            "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+            Value::String(profile.provider_model.to_string()),
+        );
+        env.insert(
+            "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+            Value::String(profile.provider_model.to_string()),
+        );
+        env.insert(
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+            Value::String(profile.small_model.to_string()),
+        );
+        env.insert(
+            "ANTHROPIC_SMALL_FAST_MODEL".to_string(),
+            Value::String(profile.small_model.to_string()),
+        );
+        env.insert(
+            "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+            Value::String(profile.provider_model.to_string()),
+        );
+        env.insert(
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
+            Value::String("1000000".to_string()),
+        );
+        env.insert(
+            "API_TIMEOUT_MS".to_string(),
+            Value::String("3000000".to_string()),
+        );
+        env.insert(
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS".to_string(),
+            Value::String("1".to_string()),
+        );
+        env.insert(
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+            Value::String("1".to_string()),
+        );
+        env.insert(
+            "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK".to_string(),
+            Value::String("1".to_string()),
+        );
+    }
+
+    let mut settings = serde_json::Map::new();
+    settings.insert("env".to_string(), Value::Object(env));
+    if profile.uses_bare_mode
+        && let (Some(helper_program), Some(label)) = (helper_program, profile.vault_label)
+    {
+        settings.insert(
+            "apiKeyHelper".to_string(),
+            Value::String(format!("{helper_program} vault auth-helper {label}")),
+        );
+    }
+    Value::Object(settings)
+}
+
+pub(crate) fn prompt_from_user_turn(op: &AppCommand) -> Result<Option<String>> {
+    let AppCommand::UserTurn { items, .. } = op else {
+        return Ok(None);
+    };
+    let mut chunks = Vec::new();
+    for item in items {
+        match item {
+            UserInput::Text { text, .. } => chunks.push(text.clone()),
+            UserInput::Skill { name, path } => {
+                chunks.push(format!("[Selected skill: {name} at {}]", path.display()))
+            }
+            UserInput::Mention { name, path } => {
+                chunks.push(format!("[Mention: {name} at {path}]"));
+            }
+            UserInput::Image { .. } | UserInput::LocalImage { .. } => {
+                return Err(anyhow!(
+                    "Claude panes currently accept text, skills, and mentions only; image input is not supported yet."
+                ));
+            }
+        }
+    }
+    Ok(Some(chunks.join("\n\n")))
+}
+
+pub(crate) async fn run_prepared_claude_turn(
+    prepared: PreparedClaudePaneTurn,
+) -> Result<ClaudePaneTurnOutput, String> {
+    run_claude_command_plan(prepared.plan)
+        .await
+        .map_err(|err| format!("{err:#}"))
+}
+
+async fn run_claude_command_plan(plan: ClaudeCommandPlan) -> Result<ClaudePaneTurnOutput> {
+    let started_at = Instant::now();
+    let bridge_handle = plan
+        .bridge
+        .map(|bridge| tokio::spawn(run_ambient_chat_bridge(bridge)));
+    let output = timeout(
+        CLAUDE_PANE_TURN_TIMEOUT,
+        Command::new(&plan.executable)
+            .args(&plan.args)
+            .envs(&plan.env)
+            .current_dir(&plan.cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow!("Claude pane turn timed out after 150 seconds"))?
+    .with_context(|| format!("failed to run `{}`", plan.executable))?;
+    if let Some(handle) = bridge_handle {
+        handle.abort();
+    }
+
+    std::fs::write(&plan.artifact_path, &output.stdout).with_context(|| {
+        format!(
+            "failed to write Claude pane artifact `{}`",
+            plan.artifact_path.display()
+        )
+    })?;
+
+    let stdout = String::from_utf8(output.stdout).context("Claude output was not UTF-8")?;
+    if !stdout.trim().is_empty() {
+        let parsed = parse_claude_output(&stdout)?;
+        return Ok(ClaudePaneTurnOutput {
+            text: parsed.text,
+            session_id: parsed.session_id,
+            usage_summary: parsed.usage_summary,
+            artifact_path: plan.artifact_path,
+            duration_ms: i64::try_from(started_at.elapsed().as_millis()).unwrap_or(i64::MAX),
+        });
+    }
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "Claude exited with status {}: {}",
+            output.status,
+            truncate_for_display(stderr.trim(), 1_000)
+        ));
+    }
+
+    Err(anyhow!("Claude returned empty output"))
+}
+
+async fn run_ambient_chat_bridge(plan: ClaudeBridgePlan) -> Result<()> {
+    let listener = TcpListener::from_std(plan.listener)
+        .context("failed to create async Ambient Claude bridge listener")?;
+    let api_key = Arc::new(plan.upstream_api_key);
+    let upstream_model = Arc::new(plan.upstream_model);
+    let http = reqwest::Client::new();
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let api_key = api_key.clone();
+        let upstream_model = upstream_model.clone();
+        let http = http.clone();
+        tokio::spawn(async move {
+            if let Err(err) =
+                handle_ambient_bridge_connection(stream, api_key, upstream_model, http).await
+            {
+                tracing::debug!(error = %err, "Ambient Claude bridge connection failed");
+            }
+        });
+    }
+}
+
+async fn handle_ambient_bridge_connection(
+    mut stream: tokio::net::TcpStream,
+    api_key: Arc<String>,
+    upstream_model: Arc<String>,
+    http: reqwest::Client,
+) -> Result<()> {
+    let mut buffer = Vec::new();
+    let mut temp = [0_u8; 4096];
+    let header_end = loop {
+        let read = stream.read(&mut temp).await?;
+        if read == 0 {
+            return Ok(());
+        }
+        buffer.extend_from_slice(&temp[..read]);
+        if let Some(pos) = find_header_end(&buffer) {
+            break pos;
+        }
+        if buffer.len() > 1024 * 1024 {
+            return Err(anyhow!("Ambient Claude bridge request headers too large"));
+        }
+    };
+
+    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+    let request_line = headers.lines().next().unwrap_or_default().to_string();
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+
+    let body_start = header_end + 4;
+    while buffer.len() < body_start + content_length {
+        let read = stream.read(&mut temp).await?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&temp[..read]);
+    }
+    let body = &buffer[body_start..buffer.len().min(body_start + content_length)];
+
+    if request_line.contains("/v1/messages/count_tokens") {
+        write_json_response(&mut stream, serde_json::json!({ "input_tokens": 1 })).await?;
+        return Ok(());
+    }
+
+    if !request_line.contains("/v1/messages") {
+        write_json_status_response(
+            &mut stream,
+            404,
+            serde_json::json!({ "error": { "type": "not_found", "message": "not found" } }),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let request: Value = serde_json::from_slice(body).context("invalid Claude Messages request")?;
+    let wants_stream = request
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let max_tokens = request
+        .get("max_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(1024)
+        .clamp(64, 4096);
+    let chat_messages = ambient_chat_messages_from_claude_request(&request)?;
+    let chat_tools = ambient_chat_tools_from_claude_request(&request);
+    let mut upstream_body = serde_json::json!({
+        "model": upstream_model.as_str(),
+        "messages": chat_messages,
+        "max_tokens": max_tokens,
+    });
+    if !chat_tools.is_empty() {
+        upstream_body["tools"] = Value::Array(chat_tools);
+        upstream_body["tool_choice"] = Value::String("auto".to_string());
+    }
+    let response = http
+        .post("https://api.ambient.xyz/v1/chat/completions")
+        .bearer_auth(api_key.as_str())
+        .json(&upstream_body)
+        .send()
+        .await
+        .context("Ambient Chat bridge upstream request failed")?;
+    let status = response.status();
+    let response_text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        write_json_status_response(
+            &mut stream,
+            status.as_u16(),
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "upstream_error",
+                    "message": response_text
+                }
+            }),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let upstream: Value =
+        serde_json::from_str(&response_text).context("Ambient Chat response was not JSON")?;
+    let usage = upstream.get("usage").cloned().unwrap_or_else(|| {
+        serde_json::json!({
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        })
+    });
+    let tool_calls = bridge_tool_calls_from_ambient_response(&upstream);
+    if let Some(tool_call) = tool_calls.first() {
+        if wants_stream {
+            write_anthropic_stream_tool_use_response(
+                &mut stream,
+                upstream_model.as_str(),
+                tool_call,
+                &usage,
+            )
+            .await?;
+        } else {
+            write_json_response(
+                &mut stream,
+                anthropic_tool_use_response(upstream_model.as_str(), tool_call, &usage),
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+
+    let text = upstream
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or("OK")
+        .to_string();
+    if wants_stream {
+        write_anthropic_stream_response(&mut stream, upstream_model.as_str(), &text, &usage)
+            .await?;
+    } else {
+        write_json_response(
+            &mut stream,
+            anthropic_message_response(upstream_model.as_str(), &text, &usage),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn ambient_chat_messages_from_claude_request(request: &Value) -> Result<Vec<Value>> {
+    let mut messages = Vec::new();
+    if let Some(system) = request.get("system") {
+        let system_text = claude_content_to_text(system);
+        if !system_text.trim().is_empty() {
+            messages.push(serde_json::json!({ "role": "system", "content": system_text }));
+        }
+    }
+    for message in request
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Claude Messages request missing messages array"))?
+    {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
+        let content = message.get("content").unwrap_or(&Value::Null);
+        if role == "assistant" {
+            let text = claude_text_blocks_to_text(content);
+            let tool_calls = ambient_assistant_tool_calls_from_claude_content(content);
+            if text.trim().is_empty() && tool_calls.is_empty() {
+                continue;
+            }
+            let mut assistant = serde_json::Map::new();
+            assistant.insert("role".to_string(), Value::String("assistant".to_string()));
+            assistant.insert(
+                "content".to_string(),
+                if text.trim().is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(text)
+                },
+            );
+            if !tool_calls.is_empty() {
+                assistant.insert("tool_calls".to_string(), Value::Array(tool_calls));
+            }
+            messages.push(Value::Object(assistant));
+            continue;
+        }
+
+        let text = claude_text_blocks_to_text(content);
+        if !text.trim().is_empty() {
+            messages.push(serde_json::json!({ "role": role, "content": text }));
+        }
+        for tool_result in ambient_tool_result_messages_from_claude_content(content) {
+            messages.push(tool_result);
+        }
+    }
+    if messages.is_empty() {
+        messages.push(serde_json::json!({ "role": "user", "content": "Continue." }));
+    }
+    Ok(messages)
+}
+
+fn ambient_chat_tools_from_claude_request(request: &Value) -> Vec<Value> {
+    request
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| {
+            let name = tool.get("name").and_then(Value::as_str)?;
+            let description = tool
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let parameters = tool
+                .get("input_schema")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({ "type": "object" }));
+            Some(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": parameters
+                }
+            }))
+        })
+        .collect()
+}
+
+fn ambient_assistant_tool_calls_from_claude_content(content: &Value) -> Vec<Value> {
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .filter_map(|item| {
+            let id = item.get("id").and_then(Value::as_str)?;
+            let name = item.get("name").and_then(Value::as_str)?;
+            let input = item
+                .get("input")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            Some(serde_json::json!({
+                "id": id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": input.to_string()
+                }
+            }))
+        })
+        .collect()
+}
+
+fn ambient_tool_result_messages_from_claude_content(content: &Value) -> Vec<Value> {
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .filter_map(|item| {
+            let tool_call_id = item.get("tool_use_id").and_then(Value::as_str)?;
+            Some(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": claude_content_to_text(item.get("content").unwrap_or(&Value::Null))
+            }))
+        })
+        .collect()
+}
+
+fn claude_text_blocks_to_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn claude_content_to_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    return Some(text.to_string());
+                }
+                if let Some(text) = item.get("content").and_then(Value::as_str) {
+                    return Some(text.to_string());
+                }
+                None
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn anthropic_message_response(model: &str, text: &str, usage: &Value) -> Value {
+    serde_json::json!({
+        "id": format!("msg_pfterminal_{}", Uuid::new_v4().simple()),
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [{ "type": "text", "text": text }],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
+            "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0)
+        }
+    })
+}
+
+fn bridge_tool_calls_from_ambient_response(upstream: &Value) -> Vec<BridgeToolCall> {
+    upstream
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tool_call| {
+            let id = tool_call.get("id").and_then(Value::as_str)?;
+            let function = tool_call.get("function")?;
+            let name = function.get("name").and_then(Value::as_str)?;
+            let arguments = function
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("{}");
+            let input = serde_json::from_str(arguments).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "_raw_arguments": arguments
+                })
+            });
+            Some(BridgeToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                input,
+            })
+        })
+        .collect()
+}
+
+fn anthropic_tool_use_response(model: &str, tool_call: &BridgeToolCall, usage: &Value) -> Value {
+    serde_json::json!({
+        "id": format!("msg_pfterminal_{}", Uuid::new_v4().simple()),
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [{
+            "type": "tool_use",
+            "id": tool_call.id,
+            "name": tool_call.name,
+            "input": tool_call.input
+        }],
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
+            "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0)
+        }
+    })
+}
+
+async fn write_json_response(stream: &mut tokio::net::TcpStream, body: Value) -> Result<()> {
+    write_json_status_response(stream, 200, body).await
+}
+
+async fn write_json_status_response(
+    stream: &mut tokio::net::TcpStream,
+    status: u16,
+    body: Value,
+) -> Result<()> {
+    let reason = match status {
+        200 => "OK",
+        404 => "Not Found",
+        429 => "Too Many Requests",
+        _ => "Error",
+    };
+    let body = body.to_string();
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+async fn write_anthropic_stream_response(
+    stream: &mut tokio::net::TcpStream,
+    model: &str,
+    text: &str,
+    usage: &Value,
+) -> Result<()> {
+    let message_id = format!("msg_pfterminal_{}", Uuid::new_v4().simple());
+    let events = vec![
+        (
+            "message_start",
+            serde_json::json!({
+                "type": "message_start",
+                "message": {
+                    "id": message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {
+                        "input_tokens": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
+                        "output_tokens": 0
+                    }
+                }
+            }),
+        ),
+        (
+            "content_block_start",
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": { "type": "text", "text": "" }
+            }),
+        ),
+        (
+            "content_block_delta",
+            serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": "text_delta", "text": text }
+            }),
+        ),
+        (
+            "content_block_stop",
+            serde_json::json!({ "type": "content_block_stop", "index": 0 }),
+        ),
+        (
+            "message_delta",
+            serde_json::json!({
+                "type": "message_delta",
+                "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+                "usage": {
+                    "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0)
+                }
+            }),
+        ),
+        (
+            "message_stop",
+            serde_json::json!({ "type": "message_stop" }),
+        ),
+    ];
+    let mut body = String::new();
+    for (event, data) in events {
+        body.push_str("event: ");
+        body.push_str(event);
+        body.push_str("\ndata: ");
+        body.push_str(&data.to_string());
+        body.push_str("\n\n");
+    }
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n{body}"
+    );
+    stream.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+async fn write_anthropic_stream_tool_use_response(
+    stream: &mut tokio::net::TcpStream,
+    model: &str,
+    tool_call: &BridgeToolCall,
+    usage: &Value,
+) -> Result<()> {
+    let message_id = format!("msg_pfterminal_{}", Uuid::new_v4().simple());
+    let partial_json = tool_call.input.to_string();
+    let events = vec![
+        (
+            "message_start",
+            serde_json::json!({
+                "type": "message_start",
+                "message": {
+                    "id": message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {
+                        "input_tokens": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
+                        "output_tokens": 0
+                    }
+                }
+            }),
+        ),
+        (
+            "content_block_start",
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": tool_call.id,
+                    "name": tool_call.name,
+                    "input": {}
+                }
+            }),
+        ),
+        (
+            "content_block_delta",
+            serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": "input_json_delta", "partial_json": partial_json }
+            }),
+        ),
+        (
+            "content_block_stop",
+            serde_json::json!({ "type": "content_block_stop", "index": 0 }),
+        ),
+        (
+            "message_delta",
+            serde_json::json!({
+                "type": "message_delta",
+                "delta": { "stop_reason": "tool_use", "stop_sequence": null },
+                "usage": {
+                    "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0)
+                }
+            }),
+        ),
+        (
+            "message_stop",
+            serde_json::json!({ "type": "message_stop" }),
+        ),
+    ];
+    let mut body = String::new();
+    for (event, data) in events {
+        body.push_str("event: ");
+        body.push_str(event);
+        body.push_str("\ndata: ");
+        body.push_str(&data.to_string());
+        body.push_str("\n\n");
+    }
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n{body}"
+    );
+    stream.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedClaudeOutput {
+    pub(crate) text: String,
+    pub(crate) session_id: Option<String>,
+    pub(crate) usage_summary: Option<String>,
+}
+
+pub(crate) fn parse_claude_output(stdout: &str) -> Result<ParsedClaudeOutput> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("Claude returned empty output"));
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        return parsed_from_value(&value);
+    }
+
+    let mut assistant_chunks = Vec::new();
+    let mut final_result = None;
+    let mut session_id = None;
+    let mut usage_summary = None;
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let value: Value = serde_json::from_str(line)
+            .with_context(|| format!("Claude stream-json line was not valid JSON: {line}"))?;
+        if value.get("is_error").and_then(Value::as_bool) == Some(true) {
+            return Err(anyhow!(
+                "Claude returned an error result: {}",
+                claude_error_summary(&value)
+            ));
+        }
+        collect_text_chunks(&value, &mut assistant_chunks);
+        if let Some(result) = value.get("result").and_then(Value::as_str) {
+            final_result = Some(result.to_string());
+        }
+        if session_id.is_none() {
+            session_id = value
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+        }
+        if usage_summary.is_none() {
+            usage_summary = usage_summary_from_value(&value);
+        }
+    }
+
+    let text = final_result
+        .filter(|result| !result.trim().is_empty())
+        .unwrap_or_else(|| assistant_chunks.join(""));
+    if text.trim().is_empty() {
+        return Err(anyhow!("Claude returned no assistant text"));
+    }
+    Ok(ParsedClaudeOutput {
+        text,
+        session_id,
+        usage_summary,
+    })
+}
+
+fn parsed_from_value(value: &Value) -> Result<ParsedClaudeOutput> {
+    if value.get("is_error").and_then(Value::as_bool) == Some(true) {
+        return Err(anyhow!(
+            "Claude returned an error result: {}",
+            claude_error_summary(value)
+        ));
+    }
+    let mut assistant_chunks = Vec::new();
+    collect_text_chunks(value, &mut assistant_chunks);
+    let text = value
+        .get("result")
+        .and_then(Value::as_str)
+        .filter(|result| !result.trim().is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| assistant_chunks.join(""));
+    if text.trim().is_empty() {
+        return Err(anyhow!("Claude returned no assistant text"));
+    }
+    Ok(ParsedClaudeOutput {
+        text,
+        session_id: value
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        usage_summary: usage_summary_from_value(value),
+    })
+}
+
+fn claude_error_summary(value: &Value) -> String {
+    let subtype = value
+        .get("subtype")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let terminal_reason = value
+        .get("terminal_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let errors = value
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(Value::as_str)
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .filter(|errors| !errors.is_empty())
+        .or_else(|| {
+            value
+                .get("result")
+                .and_then(Value::as_str)
+                .filter(|result| !result.trim().is_empty())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| "no error details".to_string());
+    format!("{subtype}; terminal_reason={terminal_reason}; {errors}")
+}
+
+fn collect_text_chunks(value: &Value, chunks: &mut Vec<String>) {
+    if let Some(text) = value.get("text").and_then(Value::as_str)
+        && value.get("type").and_then(Value::as_str) == Some("text")
+    {
+        chunks.push(text.to_string());
+    }
+    if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
+        for item in content {
+            if item.get("type").and_then(Value::as_str) == Some("text")
+                && let Some(text) = item.get("text").and_then(Value::as_str)
+            {
+                chunks.push(text.to_string());
+            }
+        }
+    }
+    if let Some(delta_text) = value.pointer("/delta/text").and_then(Value::as_str) {
+        chunks.push(delta_text.to_string());
+    }
+}
+
+fn usage_summary_from_value(value: &Value) -> Option<String> {
+    let usage = value
+        .get("usage")
+        .or_else(|| value.pointer("/message/usage"))?;
+    if !usage.is_object() {
+        return None;
+    }
+    Some(usage.to_string())
+}
+
+fn truncate_for_display(value: &str, max_chars: usize) -> String {
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
+}
+
+impl App {
+    pub(super) fn open_pane_picker(&mut self) {
+        let mut items = Vec::new();
+        items.push(section_item("User Panes"));
+        items.extend(self.user_pane_items());
+        items.push(section_item("New Claude Pane"));
+        for profile in ClaudeProviderProfileKind::creation_options() {
+            let profile_config = profile.profile();
+            let kind = *profile;
+            items.push(SelectionItem {
+                name: format!("+ {}", profile_config.title),
+                description: Some(profile_config.description.to_string()),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::CreateClaudePane { profile: kind });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
+        items.push(section_item("Agent Panes"));
+        items.extend(self.agent_pane_items());
+
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            title: Some("Panes".to_string()),
+            subtitle: Some("Switch user panes or create Claude Code headless panes.".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            is_searchable: true,
+            search_placeholder: Some("Search panes".to_string()),
+            ..Default::default()
+        });
+    }
+
+    pub(super) fn select_user_pane(&mut self, pane_id: String) {
+        match self.claude_panes.set_active_user_pane(&pane_id) {
+            Ok(()) if pane_id == CODEX_MAIN_PANE_ID => {
+                self.sync_active_agent_label();
+                self.chat_widget.add_info_message(
+                    "Switched to Codex main pane.".to_string(),
+                    /*hint*/ None,
+                );
+            }
+            Ok(()) => {
+                self.sync_active_agent_label();
+                let title = self
+                    .claude_panes
+                    .panes()
+                    .iter()
+                    .find(|pane| pane.id == pane_id)
+                    .map(|pane| pane.title.clone())
+                    .unwrap_or_else(|| pane_id.clone());
+                self.chat_widget
+                    .add_info_message(format!("Switched to {title}."), /*hint*/ None);
+            }
+            Err(err) => self.chat_widget.add_error_message(err.to_string()),
+        }
+    }
+
+    pub(super) fn create_claude_pane(&mut self, profile: ClaudeProviderProfileKind) {
+        match self.claude_panes.create_pane(
+            profile,
+            self.config.cwd.to_path_buf(),
+            self.config.codex_home.as_ref(),
+        ) {
+            Ok(id) => {
+                let title = profile.profile().title;
+                self.sync_active_agent_label();
+                self.chat_widget.add_info_message(
+                    format!("Created and switched to {title}."),
+                    Some("Type normally; turns will run through Claude Code headless.".to_string()),
+                );
+                tracing::info!(pane_id = %id, profile = ?profile, "created Claude headless pane");
+            }
+            Err(err) => self.chat_widget.add_error_message(err.to_string()),
+        }
+    }
+
+    pub(super) fn try_submit_active_claude_pane_op(&mut self, op: &AppCommand) -> bool {
+        let Some(pane_id) = self
+            .claude_panes
+            .active_claude_pane_id()
+            .map(ToString::to_string)
+        else {
+            return false;
+        };
+        let prompt = match prompt_from_user_turn(op) {
+            Ok(Some(prompt)) => prompt,
+            Ok(None) => return false,
+            Err(err) => {
+                self.chat_widget.fail_external_pane_turn(err.to_string());
+                return true;
+            }
+        };
+        let prepared =
+            match self
+                .claude_panes
+                .prepare_turn(&pane_id, prompt, self.config.codex_home.as_ref())
+            {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    self.chat_widget.fail_external_pane_turn(err.to_string());
+                    return true;
+                }
+            };
+
+        self.chat_widget.begin_external_pane_turn();
+        let tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let pane_id = prepared.pane_id.clone();
+            let result = run_prepared_claude_turn(prepared).await;
+            tx.send(AppEvent::ClaudePaneTurnFinished { pane_id, result });
+        });
+        true
+    }
+
+    pub(super) fn on_claude_pane_turn_finished(
+        &mut self,
+        pane_id: String,
+        result: Result<ClaudePaneTurnOutput, String>,
+    ) {
+        self.claude_panes.finish_turn(&pane_id, &result);
+        match result {
+            Ok(output) => {
+                if !output.text.trim().is_empty() {
+                    self.chat_widget
+                        .append_external_pane_response(output.text.clone());
+                }
+                let artifact = output.artifact_path.display().to_string();
+                let hint = output
+                    .usage_summary
+                    .map(|usage| format!("usage: {usage}; artifact: {artifact}"))
+                    .or_else(|| Some(format!("artifact: {artifact}")));
+                self.chat_widget
+                    .complete_external_pane_turn(Some(output.text), Some(output.duration_ms));
+                self.chat_widget
+                    .add_info_message("Claude pane turn complete.".to_string(), hint);
+            }
+            Err(error) => self.chat_widget.fail_external_pane_turn(error),
+        }
+    }
+
+    fn user_pane_items(&self) -> Vec<SelectionItem> {
+        let mut items = Vec::new();
+        let is_current = self.claude_panes.active_user_pane_id() == CODEX_MAIN_PANE_ID;
+        items.push(SelectionItem {
+            name: "Codex - Main".to_string(),
+            description: Some("Current PFTerminal/Codex session".to_string()),
+            is_current,
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::SelectUserPane {
+                    pane_id: CODEX_MAIN_PANE_ID.to_string(),
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+        for pane in self.claude_panes.panes() {
+            let pane_id = pane.id.clone();
+            items.push(SelectionItem {
+                name: pane.title.clone(),
+                description: Some(format!(
+                    "{}{}",
+                    match pane.status {
+                        ClaudePaneStatus::Idle => "idle",
+                        ClaudePaneStatus::Running => "running",
+                    },
+                    pane.latest_usage_summary
+                        .as_deref()
+                        .map(|usage| format!("; latest usage: {usage}"))
+                        .unwrap_or_default()
+                )),
+                is_current: self.claude_panes.active_user_pane_id() == pane.id,
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::SelectUserPane {
+                        pane_id: pane_id.clone(),
+                    });
+                })],
+                dismiss_on_select: true,
+                search_value: Some(format!("{} {}", pane.title, pane.id)),
+                ..Default::default()
+            });
+        }
+        items
+    }
+
+    fn agent_pane_items(&self) -> Vec<SelectionItem> {
+        self.agent_navigation
+            .ordered_threads()
+            .into_iter()
+            .map(|(thread_id, entry)| {
+                agent_thread_item(
+                    self.active_thread_id,
+                    self.primary_thread_id,
+                    thread_id,
+                    entry,
+                )
+            })
+            .collect()
+    }
+}
+
+fn section_item(name: &str) -> SelectionItem {
+    SelectionItem {
+        name: name.to_string(),
+        is_disabled: true,
+        ..Default::default()
+    }
+}
+
+fn agent_thread_item(
+    active_thread_id: Option<ThreadId>,
+    primary_thread_id: Option<ThreadId>,
+    thread_id: ThreadId,
+    entry: &AgentPickerThreadEntry,
+) -> SelectionItem {
+    let is_primary = primary_thread_id == Some(thread_id);
+    let name = format_agent_picker_item_name(
+        entry.agent_nickname.as_deref(),
+        entry.agent_role.as_deref(),
+        is_primary,
+    );
+    let uuid = thread_id.to_string();
+    SelectionItem {
+        name: name.clone(),
+        name_prefix_spans: agent_picker_status_dot_spans(entry.is_closed),
+        description: Some(uuid.clone()),
+        is_current: active_thread_id == Some(thread_id),
+        actions: vec![Box::new(move |tx| {
+            tx.send(AppEvent::SelectAgentThread(thread_id));
+        })],
+        dismiss_on_select: true,
+        search_value: Some(format!("{name} {uuid}")),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    use super::*;
+
+    fn pane(profile: ClaudeProviderProfileKind) -> (tempfile::TempDir, ClaudePane) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = Uuid::new_v4().to_string();
+        let artifact_dir = dir.path().join("panes").join(&id);
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        (
+            dir,
+            ClaudePane {
+                id: format!("claude-{id}"),
+                title: profile.profile().title.to_string(),
+                profile,
+                cwd: std::env::current_dir().expect("cwd"),
+                claude_session_id: None,
+                status: ClaudePaneStatus::Idle,
+                latest_usage_summary: None,
+                artifact_dir,
+                lock: Arc::new(Mutex::new(())),
+                next_turn_index: 1,
+            },
+        )
+    }
+
+    #[test]
+    fn settings_json_uses_helper_without_secret_material() {
+        let profile = ClaudeProviderProfileKind::ZaiGlm52.profile();
+        let settings = settings_json_with_base_url(profile, Some("pfterminal"), None);
+        let rendered = settings.to_string();
+
+        assert!(rendered.contains("https://api.z.ai/api/anthropic"));
+        assert!(rendered.contains("glm-5.2[1m]"));
+        assert!(rendered.contains("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"));
+        assert!(rendered.contains("pfterminal vault auth-helper provider/zai_api_key"));
+        assert!(!rendered.contains("zai-secret"));
+    }
+
+    #[test]
+    fn ambient_profile_is_first_creation_option() {
+        assert_eq!(
+            ClaudeProviderProfileKind::creation_options()
+                .first()
+                .copied(),
+            Some(ClaudeProviderProfileKind::AmbientGlm52)
+        );
+    }
+
+    #[test]
+    fn parse_single_json_output() {
+        let parsed = parse_claude_output(
+            r#"{"type":"result","result":"stored.","session_id":"11111111-2222-4333-8444-555555555555","usage":{"input_tokens":12,"output_tokens":3}}"#,
+        )
+        .expect("parse");
+
+        assert_eq!(parsed.text, "stored.");
+        assert_eq!(
+            parsed.session_id.as_deref(),
+            Some("11111111-2222-4333-8444-555555555555")
+        );
+        assert_eq!(
+            parsed.usage_summary.as_deref(),
+            Some(r#"{"input_tokens":12,"output_tokens":3}"#)
+        );
+    }
+
+    #[test]
+    fn parse_stream_json_output_prefers_final_result() {
+        let parsed = parse_claude_output(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hel"}],"usage":{"input_tokens":1}}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"lo"}]}}
+{"type":"result","result":"hello","session_id":"22222222-2222-4222-8222-222222222222"}"#,
+        )
+        .expect("parse");
+
+        assert_eq!(parsed.text, "hello");
+        assert_eq!(
+            parsed.session_id.as_deref(),
+            Some("22222222-2222-4222-8222-222222222222")
+        );
+        assert_eq!(
+            parsed.usage_summary.as_deref(),
+            Some(r#"{"input_tokens":1}"#)
+        );
+    }
+
+    #[test]
+    fn parse_stream_json_error_result_is_rejected() {
+        let err = parse_claude_output(
+            r#"{"type":"system","subtype":"init","session_id":"22222222-2222-4222-8222-222222222222"}
+{"type":"result","subtype":"success","is_error":true,"result":"API Error: [1305][temporarily overloaded]","session_id":"22222222-2222-4222-8222-222222222222"}"#,
+        )
+        .expect_err("error result should not be treated as assistant text");
+
+        assert!(err.to_string().contains("Claude returned an error result"));
+    }
+
+    #[test]
+    fn prompt_from_user_turn_rejects_images() {
+        let op = AppCommand::UserTurn {
+            items: vec![UserInput::Image {
+                url: "data:image/png;base64,abc".to_string(),
+                detail: None,
+            }],
+            cwd: PathBuf::from("/tmp"),
+            approval_policy: codex_app_server_protocol::AskForApproval::Never,
+            approvals_reviewer: None,
+            active_permission_profile: None,
+            model: "glm-5.2".to_string(),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            final_output_json_schema: None,
+            collaboration_mode: None,
+            personality: None,
+        };
+
+        assert!(prompt_from_user_turn(&op).is_err());
+    }
+
+    #[test]
+    fn command_plan_uses_session_id_then_resume_without_secret_in_args() {
+        let (dir, mut pane) = pane(ClaudeProviderProfileKind::ClaudePlan);
+        let first =
+            build_claude_command_plan(&pane, "hello".to_string(), dir.path()).expect("first plan");
+        assert!(
+            first.args.windows(2).any(|w| {
+                w[0] == "--session-id" && w[1] == pane.id.trim_start_matches("claude-")
+            })
+        );
+        assert!(
+            first
+                .args
+                .windows(2)
+                .any(|w| w[0] == "--output-format" && w[1] == "stream-json")
+        );
+        assert!(first.args.iter().any(|arg| arg == "--verbose"));
+        assert!(
+            first
+                .args
+                .windows(2)
+                .any(|w| w[0] == "--max-turns" && w[1] == CLAUDE_PANE_MAX_TURNS)
+        );
+        assert!(
+            first
+                .args
+                .iter()
+                .any(|arg| arg == "--exclude-dynamic-system-prompt-sections")
+        );
+        assert!(!first.args.iter().any(|arg| arg == "--tools"));
+        assert!(!first.args.iter().any(|arg| arg.contains("secret")));
+
+        pane.claude_session_id = Some("11111111-2222-4333-8444-555555555555".to_string());
+        let second =
+            build_claude_command_plan(&pane, "again".to_string(), dir.path()).expect("second plan");
+        assert!(
+            second
+                .args
+                .windows(2)
+                .any(|w| { w[0] == "--resume" && w[1] == "11111111-2222-4333-8444-555555555555" })
+        );
+        assert!(!second.args.iter().any(|arg| arg.contains("secret")));
+    }
+
+    #[test]
+    fn registry_locks_turns_and_resumes_stored_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut registry = ClaudePaneRegistry::new();
+        let pane_id = registry
+            .create_pane(
+                ClaudeProviderProfileKind::ClaudePlan,
+                std::env::current_dir().expect("cwd"),
+                dir.path(),
+            )
+            .expect("create pane");
+
+        let first = registry
+            .prepare_turn(&pane_id, "first".to_string(), dir.path())
+            .expect("first turn");
+        assert!(
+            registry
+                .prepare_turn(&pane_id, "overlap".to_string(), dir.path())
+                .is_err(),
+            "a pane must not accept overlapping turns"
+        );
+        drop(first);
+
+        let result = Ok(ClaudePaneTurnOutput {
+            text: "done".to_string(),
+            session_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
+            usage_summary: None,
+            artifact_path: dir.path().join("turn-0001.jsonl"),
+            duration_ms: 1,
+        });
+        registry.finish_turn(&pane_id, &result);
+
+        let second = registry
+            .prepare_turn(&pane_id, "second".to_string(), dir.path())
+            .expect("second turn");
+        assert!(
+            second
+                .plan
+                .args
+                .windows(2)
+                .any(|w| { w[0] == "--resume" && w[1] == "11111111-2222-4333-8444-555555555555" })
+        );
+    }
+
+    #[test]
+    fn allowed_auth_helper_labels_are_provider_scoped() {
+        assert!(allowed_provider_vault_label("provider/zai_api_key"));
+        assert!(allowed_provider_vault_label("provider/ambient_api_key"));
+        assert!(allowed_provider_vault_label("provider/baseten_api_key"));
+        assert!(allowed_provider_vault_label("provider/openrouter_api_key"));
+        assert!(!allowed_provider_vault_label("random"));
+    }
+
+    #[test]
+    fn parsed_message_content_can_be_nested() {
+        let value = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "one"},
+                    {"type": "tool_use", "name": "Read"}
+                ]
+            }
+        });
+        let parsed = parsed_from_value(&value).expect("parse");
+        assert_eq!(parsed.text, "one");
+    }
+
+    #[test]
+    fn claude_tools_are_translated_to_ambient_chat_tools() {
+        let request = json!({
+            "tools": [{
+                "name": "Read",
+                "description": "Read a file",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    },
+                    "required": ["path"]
+                }
+            }]
+        });
+        let tools = ambient_chat_tools_from_claude_request(&request);
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(
+            tools[0].pointer("/type").and_then(Value::as_str),
+            Some("function")
+        );
+        assert_eq!(
+            tools[0].pointer("/function/name").and_then(Value::as_str),
+            Some("Read")
+        );
+        assert_eq!(
+            tools[0]
+                .pointer("/function/parameters/required/0")
+                .and_then(Value::as_str),
+            Some("path")
+        );
+    }
+
+    #[test]
+    fn claude_tool_history_is_translated_to_ambient_chat_messages() {
+        let request = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "Read",
+                        "input": { "path": "README.md" }
+                    }]
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": "hello"
+                    }]
+                }
+            ]
+        });
+        let messages = ambient_chat_messages_from_claude_request(&request).expect("messages");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0]
+                .pointer("/tool_calls/0/id")
+                .and_then(Value::as_str),
+            Some("toolu_1")
+        );
+        assert_eq!(
+            messages[1].pointer("/tool_call_id").and_then(Value::as_str),
+            Some("toolu_1")
+        );
+        assert_eq!(
+            messages[1].pointer("/content").and_then(Value::as_str),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn ambient_tool_call_is_translated_to_anthropic_tool_use() {
+        let upstream = json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "chatcmpl-tool-1",
+                        "type": "function",
+                        "function": {
+                            "name": "Read",
+                            "arguments": "{\"path\":\"README.md\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let calls = bridge_tool_calls_from_ambient_response(&upstream);
+        let response = anthropic_tool_use_response(
+            "zai-org/GLM-5.2-FP8",
+            &calls[0],
+            &json!({"prompt_tokens": 5, "completion_tokens": 3}),
+        );
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "Read");
+        assert_eq!(
+            response.pointer("/content/0/type").and_then(Value::as_str),
+            Some("tool_use")
+        );
+        assert_eq!(
+            response.pointer("/stop_reason").and_then(Value::as_str),
+            Some("tool_use")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires claude CLI and a live provider/ambient_api_key vault credential"]
+    async fn live_ambient_bridge_runs_claude_headless_for_two_turns() {
+        let codex_home = std::env::var("PFTERMINAL_LIVE_CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/home/postfiat/.pfterminal"));
+        let (_dir, mut pane) = pane(ClaudeProviderProfileKind::AmbientGlm52);
+
+        let first_plan = build_claude_command_plan(
+            &pane,
+            "Reply with exactly: OK-PFTERMINAL-LIVE".to_string(),
+            &codex_home,
+        )
+        .expect("first live plan");
+        let first = run_claude_command_plan(first_plan)
+            .await
+            .expect("first live Claude turn");
+        assert!(
+            first.text.contains("OK-PFTERMINAL-LIVE"),
+            "first turn did not return the requested marker: {}",
+            first.text
+        );
+        pane.claude_session_id = first.session_id;
+        pane.next_turn_index = 2;
+
+        let second_plan = build_claude_command_plan(
+            &pane,
+            "What exact marker did you just return? Reply with only that marker.".to_string(),
+            &codex_home,
+        )
+        .expect("second live plan");
+        let second = run_claude_command_plan(second_plan)
+            .await
+            .expect("second live Claude turn");
+        assert!(
+            second.text.contains("OK-PFTERMINAL-LIVE"),
+            "second turn did not retain session context: {}",
+            second.text
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires claude CLI and a live provider/ambient_api_key vault credential"]
+    async fn live_ambient_bridge_runs_claude_tool_loop() {
+        let codex_home = std::env::var("PFTERMINAL_LIVE_CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/home/postfiat/.pfterminal"));
+        let (_dir, pane) = pane(ClaudeProviderProfileKind::AmbientGlm52);
+
+        let plan = build_claude_command_plan(
+            &pane,
+            "Use your LS tool to inspect the current working directory. If Cargo.toml is present, reply exactly: FOUND-CARGO-TOML. Do not explain."
+                .to_string(),
+            &codex_home,
+        )
+        .expect("tool-loop live plan");
+        let output = run_claude_command_plan(plan)
+            .await
+            .expect("tool-loop live Claude turn");
+        assert!(
+            output.text.contains("FOUND-CARGO-TOML"),
+            "tool loop did not return expected marker: {}",
+            output.text
+        );
+    }
+}

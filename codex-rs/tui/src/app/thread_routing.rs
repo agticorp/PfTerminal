@@ -181,10 +181,15 @@ impl App {
     /// sessions, that contextual row includes the currently viewed agent label. The label is
     /// intentionally hidden until there is more than one known thread so single-thread sessions do
     /// not spend footer space restating that the user is already on the main conversation.
-    pub(super) fn sync_active_agent_label(&mut self) {
+    pub(crate) fn sync_active_agent_label(&mut self) {
         let label = self
-            .agent_navigation
-            .active_agent_label(self.current_displayed_thread_id(), self.primary_thread_id);
+            .claude_panes
+            .active_claude_pane_title()
+            .map(|title| format!("{title} pane"))
+            .or_else(|| {
+                self.agent_navigation
+                    .active_agent_label(self.current_displayed_thread_id(), self.primary_thread_id)
+            });
         self.chat_widget.set_active_agent_label(label);
         self.sync_side_thread_ui();
     }

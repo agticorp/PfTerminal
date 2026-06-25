@@ -83,6 +83,10 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn begin_external_pane_turn(&mut self) {
+        self.on_task_started();
+    }
+
     pub(super) fn on_task_complete(
         &mut self,
         last_agent_message: Option<String>,
@@ -335,6 +339,28 @@ impl ChatWidget {
         self.request_status_line_branch_refresh();
         self.request_status_line_git_summary_refresh();
         self.maybe_show_pending_rate_limit_prompt();
+    }
+
+    pub(crate) fn append_external_pane_response(&mut self, markdown: String) {
+        if markdown.trim().is_empty() {
+            return;
+        }
+        self.add_to_history(history_cell::AgentMarkdownCell::new(
+            markdown,
+            self.config.cwd.as_path(),
+        ));
+    }
+
+    pub(crate) fn complete_external_pane_turn(
+        &mut self,
+        last_agent_message: Option<String>,
+        duration_ms: Option<i64>,
+    ) {
+        self.on_task_complete(last_agent_message, duration_ms, /*from_replay*/ false);
+    }
+
+    pub(crate) fn fail_external_pane_turn(&mut self, message: String) {
+        self.on_error(message);
     }
 
     pub(super) fn on_server_overloaded_error(&mut self, message: String) {

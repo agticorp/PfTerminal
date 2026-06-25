@@ -145,6 +145,21 @@ pub(crate) enum AppEvent {
     OpenAgentPicker,
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
+    /// Open the user-pane picker for switching Codex/Claude panes.
+    OpenPanePicker,
+    /// Switch the active user pane.
+    SelectUserPane {
+        pane_id: String,
+    },
+    /// Create and switch to a Claude Code headless pane.
+    CreateClaudePane {
+        profile: crate::claude_panes::ClaudeProviderProfileKind,
+    },
+    /// A Claude Code headless pane turn finished.
+    ClaudePaneTurnFinished {
+        pane_id: String,
+        result: Result<crate::claude_panes::ClaudePaneTurnOutput, String>,
+    },
 
     /// Fork the current thread into a transient side conversation.
     StartSide {
