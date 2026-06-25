@@ -1,7 +1,9 @@
 # Claude Code Pane Completion Spec
 
-Status: Ambient provider complete; Z.AI, Baseten, OpenRouter, and Claude Plan
-profiles remain experimental until their workflow suites pass.
+Status: Ambient parity workflow suite passed on June 25, 2026 after removing
+the hidden local tool-call ceiling. The prior Ambient completion claim was
+wrong because the pane runner had a hidden local tool-call ceiling that a real
+Claude Code TUI session does not have.
 
 ## Hard Completion Bar
 
@@ -12,7 +14,8 @@ of this without operator debugging:
   files.
 - [x] Run a concrete NumPy vs Pandas benchmark and output a readable result
   table.
-- [x] Conduct a substantive code review on a local PFTerminal-owned repo.
+- [x] Conduct a substantive code review on a local PFTerminal-owned repo with
+  full patch-body inspection, not commit metadata only.
 - [x] Expose turn-by-turn progress and audit records so a long run is never a
   silent black box.
 
@@ -20,9 +23,9 @@ These are product acceptance tests. A helper command, one-turn smoke response,
 or raw artifact path is not enough.
 
 This is the completion spec for wrapped Claude Code panes in PFTerminal. The
-Ambient profile now passes the required workflow suite and the actual `/panes`
-TUI path. The other provider profiles are still intentionally labeled
-experimental until they pass the same workflow suite.
+Ambient profile parity is accepted for the required workflow suite after the
+fresh evidence recorded below. The other provider profiles are still
+intentionally labeled experimental until they pass the same workflow suite.
 
 Passing smoke tests is not sufficient. "Done" means the interactive `/panes`
 workflow can perform real work repeatedly, with visible progress and useful
@@ -41,37 +44,30 @@ can create that pane, route a turn, and expose artifact/audit paths.
   benchmark command, and render a result table with timings and a short
   interpretation.
 - [x] **Code review task:** conduct a code review on one PFTerminal-owned repo
-  from a Claude pane and return findings with file references. This must pass
-  in a fresh pane and in a resumed pane.
+  from a Claude pane, inspect actual diff hunks, and return findings with file
+  references. This must pass in a fresh pane and in a resumed pane. The test
+  must fail if the output says it could not inspect the full diff or only used
+  commit metadata.
 - [x] **Turn auditability:** every turn must expose enough status to know what
   Claude is doing while it runs, what tools it used, what it produced, and why
   it stopped. A 15-minute silent run is a failure.
 
 ## Current Evidence
 
-Verified on June 25, 2026 with the Ambient profile:
+The earlier June 25, 2026 evidence is superseded where it predates removal of
+the hidden 3-tool-call ceiling. Fresh evidence after the uncapped runner:
 
-- Workflow report:
-  `/home/postfiat/.pfterminal/panes/workflow-reports/claude-pane-workflow-suite-1782399985.json`
-- Summary: `Claude pane workflow suite: 4 passed, 4 checked`.
-- Mock website audit:
-  `/home/postfiat/.pfterminal/panes/claude-00f079fc-f1b5-4829-87b0-e254732e980d/turn-0001.audit.json`
-- NumPy/Pandas benchmark audit:
-  `/home/postfiat/.pfterminal/panes/claude-71832356-e5b6-4568-8839-285865700735/turn-0001.audit.json`
-- Code review resumed-turn audit:
-  `/home/postfiat/.pfterminal/panes/claude-aa5e5aa9-afb9-42f8-8fe6-6999cf39e120/turn-0002.audit.json`
-- Auditability multi-turn audit:
-  `/home/postfiat/.pfterminal/panes/claude-6a9192e8-4a10-4c0e-88bb-ea7d9f6397b5/turn-0003.audit.json`
-- Actual TUI `/panes` smoke:
-  `/home/postfiat/.pfterminal/panes/claude-83ff79a4-b960-49c8-b8bf-8dc949ef18f2/turn-0001.audit.json`
-  showed `status=success`, `usage_status=untrusted`, immediate artifact/audit
-  paths, and the visible marker `PFT_TUI_USAGE_OK`.
+| Workflow | Result | Evidence |
+| --- | --- | --- |
+| Code review, fresh pane | Passed | Report `/home/postfiat/.pfterminal/panes/workflow-reports/claude-pane-workflow-suite-1782408460.json`; artifact `/home/postfiat/.pfterminal/panes/claude-2bc75d2d-c5da-49c3-aa83-6ed027dacaff/turn-0001.jsonl`; audit `/home/postfiat/.pfterminal/panes/claude-2bc75d2d-c5da-49c3-aa83-6ed027dacaff/turn-0001.audit.json`. The audit recorded `tool_use_count=31`, `max_turns=null`, and `timeout_ms=null`. |
+| Code review, resumed pane | Passed | Artifact `/home/postfiat/.pfterminal/panes/claude-2bc75d2d-c5da-49c3-aa83-6ed027dacaff/turn-0002.jsonl`; audit `/home/postfiat/.pfterminal/panes/claude-2bc75d2d-c5da-49c3-aa83-6ed027dacaff/turn-0002.audit.json`. The audit recorded `tool_use_count=6`, `max_turns=null`, and `timeout_ms=null`. |
+| Mock website | Passed | Report `/home/postfiat/.pfterminal/panes/workflow-reports/claude-pane-workflow-suite-1782409303.json`; artifact `/home/postfiat/.pfterminal/panes/claude-388bf5bf-a406-47dd-8e81-72f7c2e8b9cc/turn-0001.jsonl`; audit `/home/postfiat/.pfterminal/panes/claude-388bf5bf-a406-47dd-8e81-72f7c2e8b9cc/turn-0001.audit.json`. |
+| NumPy vs Pandas benchmark | Passed | Artifact `/home/postfiat/.pfterminal/panes/claude-0d36cdb3-6139-4466-9c34-d61a2525ede7/turn-0001.jsonl`; audit `/home/postfiat/.pfterminal/panes/claude-0d36cdb3-6139-4466-9c34-d61a2525ede7/turn-0001.audit.json`. The audit recorded `tool_use_count=12`, `max_turns=null`, and `timeout_ms=null`. |
+| Turn-by-turn auditability | Passed | Artifact `/home/postfiat/.pfterminal/panes/claude-394c2adf-c9a1-40dd-a458-5673974ce774/turn-0003.jsonl`; audit `/home/postfiat/.pfterminal/panes/claude-394c2adf-c9a1-40dd-a458-5673974ce774/turn-0003.audit.json`. |
 
-Important implementation guardrail: the Ambient bridge now enforces a local
-3-tool-call budget per Claude pane turn. The failed runs showed that larger
-tool histories could push GLM-backed Claude Code into API retry loops during
-code review. After three tool calls, the bridge removes tools from the upstream
-request and instructs Claude to produce a final answer using gathered evidence.
+The Ambient bridge must not impose a local tool-call budget, max-turn budget, or
+wall-clock turn timeout that is absent from a real Claude Code session. Cleanup
+guards after process exit are acceptable; hidden work ceilings are not.
 
 ## Repeated Failures This Spec Must Prevent
 
@@ -94,6 +90,9 @@ The following failures already happened and are now explicit release blockers:
 - Tests proved plumbing, not the actual user workflows.
 - The completion report overstated success by counting shallow pass/fail checks
   while the real `/panes` UX still failed a basic code-review prompt.
+- The Ambient bridge imposed a hidden local 3-tool-call ceiling, making the pane
+  a constrained custom agent instead of Claude Code with routing/audit
+  integration.
 
 The corrective principle is simple: do not claim parity with Claude Code until
 PFTerminal can demonstrate comparable multi-turn work through its own pane UI.
@@ -148,21 +147,24 @@ Every turn must write and surface an audit record with:
 If usage is missing or zero because the provider did not report it, the UI must
 say that. It must not imply that a real Claude turn consumed zero tokens.
 
-### Timeout And Resume Policy
+### Runtime And Resume Policy
 
-A timeout is not automatically a provider error.
+A pane turn must not impose hidden PFTerminal ceilings that do not exist in a
+normal Claude Code session. The pane may report Claude Code's own terminal
+reasons, provider failures, or host process cleanup failures, but it must not
+silently remove tools or force a final answer to satisfy a local budget.
 
 The pane backend must distinguish:
 
 - provider returned an error;
-- Claude hit max turns but has a resumable session;
-- PFTerminal wall-clock timeout fired while Claude may still be working;
+- Claude Code itself reported a resumable pause;
+- Claude stdout closed but the process did not exit during cleanup;
 - Claude produced partial useful output;
 - no useful output was produced.
 
-For max-turn or timeout pauses, the pane must remain resumable and the UI must
-offer a clear continue action. If the turn cannot be resumed safely, the UI must
-say so and point to the audit record.
+For resumable pauses, the pane must remain resumable and the UI must offer a
+clear continue action. If the turn cannot be resumed safely, the UI must say so
+and point to the audit record.
 
 ### Secret Handling
 
@@ -244,7 +246,11 @@ Fixture:
 Pass criteria:
 
 - review completes without timeout;
+- artifact proves actual patch-body inspection, including `diff --git` and hunk
+  context from the reviewed diff;
 - output includes concrete findings or "no findings" with file references;
+- output does not contain shallow-review disclaimers such as "based on commit
+  metadata," "could not pull the full diff," or "tool budget was hit";
 - audit shows file-reading/tool activity;
 - resumed-pane review does not lose context;
 - the result is visible in the TUI, not only in a JSONL file.

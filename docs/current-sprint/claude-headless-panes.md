@@ -1,6 +1,8 @@
 # Claude Headless Panes
 
-Status: implemented in PFTerminal for wrapped Claude Code panes.
+Status: Ambient parity workflow suite passed on June 25, 2026 for wrapped
+Claude Code panes. Z.AI, Baseten, OpenRouter, and Claude Plan remain
+experimental until they pass the same workflow suite.
 
 The Ambient path runs real `claude -p` headless turns against a local
 PFTerminal Anthropic Messages bridge. The bridge translates Claude Code
@@ -9,10 +11,11 @@ then returns Claude-compatible JSON/SSE back to the Claude process. Direct
 Z.AI, Baseten, OpenRouter, and Claude Plan profiles are also live-smoke-tested
 through the same pane backend.
 
-The local runner no longer hangs on the `claude -p` rc-124 failure mode. It now
-uses the hardened headless invocation, surfaces structured provider errors from
-Claude Code stream JSON, and has a live two-turn regression test proving actual
-assistant output.
+The local runner uses a hardened headless invocation and surfaces structured
+provider errors from Claude Code stream JSON. The prior Ambient parity claim is
+superseded because the bridge included a hidden 3-tool-call ceiling; the current
+implementation removes that local work cap and records fresh parity evidence
+below.
 
 ## Complete
 
@@ -41,7 +44,7 @@ assistant output.
   turns concurrently.
 - [x] Added tests for pane creation, provider settings generation, resume
   behavior, stream-json error handling, and redaction boundaries.
-- [x] Hardened the headless invocation with `--bare`, `--max-turns 24`,
+- [x] Hardened the headless invocation with `--bare`,
   `--output-format stream-json --verbose`, disabled nonessential traffic and
   experimental betas, and disabled non-streaming fallback to avoid rc-124
   retry hangs.
@@ -64,6 +67,16 @@ assistant output.
   artifact path, duration, usage, terminal reason, and tool-use metadata.
 - [x] Added max-turn pause handling: `error_max_turns` is resumable and no
   longer treated as a fake success or opaque unstructured error.
+- [x] Removed hidden local Claude-pane work ceilings: no local tool-call budget,
+  no forced `--max-turns`, and no wall-clock turn timeout that a real Claude
+  Code TUI session would not impose.
+- [x] Updated the Ambient bridge to forward multiple upstream tool calls,
+  preserve requested output token limits, emit Anthropic-compatible stream
+  heartbeats while waiting on Ambient Chat Completions, and retry rate-limited
+  upstream calls with `Retry-After` support.
+- [x] Live-tested the uncapped Ambient workflow suite:
+  code review with full diff inspection, resumed code review, mock website,
+  NumPy vs Pandas benchmark, and turn-by-turn auditability.
 
 ## Goal
 
@@ -118,7 +131,6 @@ claude -p \
   --output-format stream-json \
   --verbose \
   --permission-mode bypassPermissions \
-  --max-turns 8 \
   --session-id 11111111-2222-4333-8444-555555555555 \
   'This is a continuity test. Remember the marker: PFT-PANE-721. Reply with exactly: stored.'
 ```
@@ -138,7 +150,6 @@ claude -p \
   --output-format stream-json \
   --verbose \
   --permission-mode bypassPermissions \
-  --max-turns 8 \
   --resume 11111111-2222-4333-8444-555555555555 \
   'What marker did I ask you to remember in the previous turn? Reply with only the marker.'
 ```
@@ -191,7 +202,7 @@ PFTerminal
   -> read credential from vault
   -> start local provider bridge if the profile requires one
   -> write pane-local Claude settings
-  -> run claude --bare -p --output-format stream-json --verbose --max-turns 8 --session-id <pane_uuid>
+  -> run claude --bare -p --output-format stream-json --verbose --session-id <pane_uuid>
   -> parse JSON events
   -> render native PFTerminal history cells
 ```
@@ -202,7 +213,7 @@ Later messages to the same pane:
 PFTerminal
   -> acquire pane lock
   -> refresh settings/auth helper
-  -> run claude --bare -p --output-format stream-json --verbose --max-turns 8 --resume <claude_session_id>
+  -> run claude --bare -p --output-format stream-json --verbose --resume <claude_session_id>
   -> parse JSON events
   -> release pane lock
 ```
@@ -257,18 +268,24 @@ provider profile, but raw secret reads should remain host-owned.
 | Pane profile | Claude base URL | Credential source | Notes |
 | --- | --- | --- | --- |
 | Claude Plan | native Claude auth | Claude's own login/keychain | No PFTerminal provider key required. |
-| Ambient GLM 5.2 | local PFTerminal bridge to `https://api.ambient.xyz/v1/chat/completions` | `provider/ambient_api_key` | Working path. Claude Code talks Anthropic Messages to loopback; PFTerminal translates to Ambient Chat Completions. |
+| Ambient GLM 5.2 | local PFTerminal bridge to `https://api.ambient.xyz/v1/chat/completions` | `provider/ambient_api_key` | Primary parity target. Claude Code talks Anthropic Messages to loopback; PFTerminal translates to Ambient Chat Completions without a local tool-call ceiling. |
 | Z.AI GLM 5.2 | `https://api.z.ai/api/anthropic` | `provider/zai_api_key` | Passed live pane smoke with tool use and resume. |
 | Baseten GLM 5.2 | `https://inference.baseten.co` | `provider/baseten_api_key` | Passed live pane smoke with tool use and resume. |
 | OpenRouter | `https://openrouter.ai/api` | `provider/openrouter_api_key` | Passed live pane smoke with tool use and resume. |
 
-## Live Provider Evidence
+## Current Live Provider Evidence
 
 The local implementation was tested with vault-held keys and the freshly built
-`pfterminal` binary.
+`pfterminal` binary. The Ambient workflow rows below were rerun after removing
+the hidden local tool-call ceiling.
 
 | Probe | Result | Interpretation |
 | --- | --- | --- |
+| Ambient uncapped code-review workflow | passed; report `/home/postfiat/.pfterminal/panes/workflow-reports/claude-pane-workflow-suite-1782408460.json` | Fresh pane inspected actual active diff hunks and returned `PFT_CODE_REVIEW_DONE` with `DIFF_INSPECTED: yes`. Audit `/home/postfiat/.pfterminal/panes/claude-2bc75d2d-c5da-49c3-aa83-6ed027dacaff/turn-0001.audit.json` recorded `tool_use_count=31`, `max_turns=null`, and `timeout_ms=null`. |
+| Ambient uncapped resumed code-review workflow | passed | Resume artifact `/home/postfiat/.pfterminal/panes/claude-2bc75d2d-c5da-49c3-aa83-6ed027dacaff/turn-0002.jsonl`; audit `/home/postfiat/.pfterminal/panes/claude-2bc75d2d-c5da-49c3-aa83-6ed027dacaff/turn-0002.audit.json` recorded `tool_use_count=6`, `max_turns=null`, and `timeout_ms=null`. |
+| Ambient uncapped mock website workflow | passed; report `/home/postfiat/.pfterminal/panes/workflow-reports/claude-pane-workflow-suite-1782409303.json` | Artifact `/home/postfiat/.pfterminal/panes/claude-388bf5bf-a406-47dd-8e81-72f7c2e8b9cc/turn-0001.jsonl`; audit `/home/postfiat/.pfterminal/panes/claude-388bf5bf-a406-47dd-8e81-72f7c2e8b9cc/turn-0001.audit.json`. |
+| Ambient uncapped NumPy vs Pandas workflow | passed | Artifact `/home/postfiat/.pfterminal/panes/claude-0d36cdb3-6139-4466-9c34-d61a2525ede7/turn-0001.jsonl`; audit `/home/postfiat/.pfterminal/panes/claude-0d36cdb3-6139-4466-9c34-d61a2525ede7/turn-0001.audit.json` recorded `tool_use_count=12`, `max_turns=null`, and `timeout_ms=null`. |
+| Ambient uncapped auditability workflow | passed | Artifact `/home/postfiat/.pfterminal/panes/claude-394c2adf-c9a1-40dd-a458-5673974ce774/turn-0003.jsonl`; audit `/home/postfiat/.pfterminal/panes/claude-394c2adf-c9a1-40dd-a458-5673974ce774/turn-0003.audit.json`. |
 | Ambient Chat Completions, `https://api.ambient.xyz/v1/chat/completions`, `zai-org/GLM-5.2-FP8` | HTTP 200 | Ambient key and base API are valid. |
 | PFTerminal Ambient Claude bridge, first turn | returned `OK-PFTERMINAL-LIVE` | Real `claude -p` headless process received assistant text through the local bridge. |
 | PFTerminal Ambient Claude bridge, resumed second turn | returned `OK-PFTERMINAL-LIVE` | The pane command path preserves Claude session continuity across `--resume`. |

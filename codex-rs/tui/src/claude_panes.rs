@@ -44,9 +44,8 @@ use crate::multi_agents::agent_picker_status_dot_spans;
 use crate::multi_agents::format_agent_picker_item_name;
 
 pub(crate) const CODEX_MAIN_PANE_ID: &str = "codex-main";
-const CLAUDE_PANE_TURN_TIMEOUT: Duration = Duration::from_secs(600);
-const CLAUDE_PANE_MAX_TURNS: &str = "80";
-const AMBIENT_BRIDGE_TOOL_CALL_BUDGET: usize = 3;
+const CLAUDE_PANE_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(30);
+const AMBIENT_BRIDGE_UPSTREAM_MAX_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -435,10 +434,10 @@ pub(crate) struct ClaudeCommandPlan {
     provider_model: String,
     turn_index: u64,
     command_mode: ClaudeCommandMode,
-    max_turns: String,
+    max_turns: Option<String>,
     artifact_path: PathBuf,
     audit_path: PathBuf,
-    timeout_ms: u64,
+    timeout_ms: Option<u64>,
     bridge: Option<ClaudeBridgePlan>,
 }
 
@@ -451,10 +450,10 @@ pub(crate) struct ClaudePaneTurnAudit {
     session_id: Option<String>,
     turn_index: u64,
     command_mode: ClaudeCommandMode,
-    max_turns: String,
+    max_turns: Option<String>,
     artifact_path: PathBuf,
     audit_path: PathBuf,
-    timeout_ms: u64,
+    timeout_ms: Option<u64>,
     started_at_unix_ms: u128,
     ended_at_unix_ms: u128,
     last_progress_elapsed_ms: Option<i64>,
@@ -613,7 +612,6 @@ fn build_claude_command_plan(
     let audit_path = pane
         .artifact_dir
         .join(format!("turn-{turn_index:04}.audit.json"));
-    let timeout_ms = u64::try_from(CLAUDE_PANE_TURN_TIMEOUT.as_millis()).unwrap_or(u64::MAX);
     let mut bridge = None;
     let mut base_url_override = None;
     if profile.transport == ClaudeProviderTransport::AmbientChatBridge {
@@ -728,8 +726,6 @@ fn build_claude_command_plan(
         settings_path.to_string_lossy().into_owned(),
         "--permission-mode".to_string(),
         "bypassPermissions".to_string(),
-        "--max-turns".to_string(),
-        CLAUDE_PANE_MAX_TURNS.to_string(),
         "--exclude-dynamic-system-prompt-sections".to_string(),
         "--model".to_string(),
         profile.claude_model.to_string(),
@@ -759,10 +755,10 @@ fn build_claude_command_plan(
         provider_model: profile.provider_model.to_string(),
         turn_index,
         command_mode,
-        max_turns: CLAUDE_PANE_MAX_TURNS.to_string(),
+        max_turns: None,
         artifact_path,
         audit_path,
-        timeout_ms,
+        timeout_ms: None,
         bridge,
     })
 }
@@ -1291,11 +1287,16 @@ async fn run_code_review_workflow(
         }
     };
     let prompt = concat!(
-        "Perform a read-only code review of codex-rs/tui/src/app_event_sender.rs in this repo. ",
-        "Use filesystem tools to inspect that file and, if needed, one nearby caller. ",
-        "Keep the review bounded and stop after you have enough evidence. ",
-        "Return marker PFT_CODE_REVIEW_DONE and either concrete findings with file references ",
-        "or say no findings with a short rationale. Do not edit files."
+        "Perform a read-only code review of the active implementation diff in this repo. ",
+        "You must inspect the actual patch body, not only commit metadata or --stat. ",
+        "Start with `git diff --find-renames --find-copies --unified=80`. ",
+        "If there is no working-tree diff, review `git show --format=fuller --find-renames --find-copies --unified=80 HEAD` instead. ",
+        "If the output is too large, continue with narrower `git diff --patch -- <path>` or `git show --patch HEAD -- <path>` ",
+        "commands until you have inspected real diff hunks for the changed files. ",
+        "Review that patch as the source of truth and stop reading once the changed diff hunks are understood. ",
+        "Return marker PFT_CODE_REVIEW_DONE, include `DIFF_INSPECTED: yes`, and give concrete ",
+        "findings with file references or say no findings with a short rationale. ",
+        "Do not edit files."
     )
     .to_string();
     let first_output = match run_smoke_turn(&mut registry, &pane_id, prompt, codex_home).await {
@@ -1313,25 +1314,27 @@ async fn run_code_review_workflow(
         }
     };
     let has_review = first_output.text.contains("PFT_CODE_REVIEW_DONE")
-        && first_output
-            .text
-            .contains("codex-rs/tui/src/app_event_sender.rs");
+        && first_output.text.contains("DIFF_INSPECTED: yes")
+        && artifact_contains_patch_body(&first_output.artifact_path)
+        && shallow_review_rejection_reason(&first_output.text).is_none();
     if !(first_output.status.is_success() && has_review && !first_output.tool_names.is_empty()) {
+        let error = shallow_review_rejection_reason(&first_output.text)
+            .unwrap_or_else(|| "fresh code review did not prove full diff inspection".to_string());
         return workflow_entry_from_output(
             provider_name,
             profile,
             workflow,
             first_output,
             None,
-            "fresh code review verification failed".to_string(),
+            error,
         );
     }
 
     let resume_prompt = concat!(
         "Continue the same read-only code review. Use the context already gathered. ",
-        "Use at most one more filesystem tool only if necessary. Return marker ",
-        "PFT_CODE_REVIEW_RESUME_DONE and either one additional concrete finding ",
-        "with a file reference or say no additional findings with a short rationale. ",
+        "You may use additional filesystem tools if needed. Return marker ",
+        "PFT_CODE_REVIEW_RESUME_DONE and include either one additional concrete finding ",
+        "with a file reference or `NO_ADDITIONAL_FINDINGS` with a short rationale. ",
         "Do not edit files."
     )
     .to_string();
@@ -1350,7 +1353,8 @@ async fn run_code_review_workflow(
                 );
             }
         };
-    let has_resume_review = resume_output.text.contains("PFT_CODE_REVIEW_RESUME_DONE");
+    let has_resume_review = resume_output.text.contains("PFT_CODE_REVIEW_RESUME_DONE")
+        && shallow_review_rejection_reason(&resume_output.text).is_none();
     if resume_output.status.is_success()
         && has_resume_review
         && matches!(resume_output.command_mode, ClaudeCommandMode::Resume)
@@ -1462,6 +1466,38 @@ async fn run_auditability_workflow(
             "auditability workflow verification failed".to_string(),
         )
     }
+}
+
+fn artifact_contains_patch_body(path: &Path) -> bool {
+    let Ok(artifact) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    artifact.contains("diff --git")
+        && artifact.contains("@@")
+        && (artifact.contains("+") || artifact.contains("-"))
+}
+
+fn shallow_review_rejection_reason(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let rejected = [
+        "couldn't pull the full diff",
+        "could not pull the full diff",
+        "couldn't read the full diff",
+        "could not read the full diff",
+        "unable to pull the full diff",
+        "unable to read the full diff",
+        "unable to inspect the full diff",
+        "based on the commit metadata",
+        "based on the commit message",
+        "based on the change description",
+        "local tool budget",
+        "tool budget was hit",
+        "without seeing the full diff",
+    ];
+    rejected
+        .iter()
+        .find(|phrase| lower.contains(**phrase))
+        .map(|phrase| format!("shallow code review output: `{phrase}`"))
 }
 
 fn workflow_fixture_path(fixture_root: &Path, provider: &str, workflow: &str) -> PathBuf {
@@ -1750,20 +1786,13 @@ async fn run_claude_command_plan(
         })?;
     let mut stdout_lines = BufReader::new(stdout).lines();
     let mut stdout_text = String::new();
-    let mut heartbeat = interval(Duration::from_secs(30));
+    let mut heartbeat = interval(CLAUDE_PANE_PROGRESS_HEARTBEAT);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     heartbeat.tick().await;
-    let timeout_sleep = tokio::time::sleep(CLAUDE_PANE_TURN_TIMEOUT);
-    tokio::pin!(timeout_sleep);
     let mut timed_out = false;
     let mut last_progress_key: Option<String> = None;
     loop {
         tokio::select! {
-            _ = &mut timeout_sleep => {
-                timed_out = true;
-                let _ = child.kill().await;
-                break;
-            }
             line = stdout_lines.next_line() => {
                 let Some(line) = line.context("failed to read Claude stdout")? else {
                     break;
@@ -1845,10 +1874,8 @@ async fn run_claude_command_plan(
             &plan,
             duration_ms,
             ClaudePaneTurnStatus::TimeoutPause,
-            Some("timeout".to_string()),
-            format!(
-                "Claude pane turn hit PFTerminal's wall-clock timeout after {CLAUDE_PANE_TURN_TIMEOUT:?}. Type `continue` in this pane to resume if a Claude session id was captured."
-            ),
+            Some("process_wait_timeout".to_string()),
+            "Claude stdout closed, but the Claude process did not exit within the cleanup grace period. Type `continue` in this pane to resume if a Claude session id was captured.".to_string(),
             &stdout_text,
         );
         write_turn_audit(
@@ -2149,7 +2176,24 @@ async fn handle_ambient_bridge_connection(
         return Ok(());
     }
 
-    let request: Value = serde_json::from_slice(body).context("invalid Claude Messages request")?;
+    let request: Value = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(err) => {
+            write_json_status_response(
+                &mut stream,
+                400,
+                serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": format!("invalid Claude Messages request: {err}")
+                    }
+                }),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
     let wants_stream = request
         .get("stream")
         .and_then(Value::as_bool)
@@ -2158,21 +2202,26 @@ async fn handle_ambient_bridge_connection(
         .get("max_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(1024)
-        .clamp(64, 4096);
-    let mut chat_messages = ambient_chat_messages_from_claude_request(&request)?;
-    let prior_tool_calls = claude_tool_use_count(&request);
-    let tool_budget_exhausted = prior_tool_calls >= AMBIENT_BRIDGE_TOOL_CALL_BUDGET;
-    if tool_budget_exhausted {
-        chat_messages.push(serde_json::json!({
-            "role": "user",
-            "content": "PFTerminal has reached the local Claude pane tool-call budget for this turn. Do not call more tools. Produce the final answer now using the evidence already gathered. Preserve any required completion marker from the original user request."
-        }));
-    }
-    let chat_tools = if tool_budget_exhausted {
-        Vec::new()
-    } else {
-        ambient_chat_tools_from_claude_request(&request)
+        .max(1);
+    let chat_messages = match ambient_chat_messages_from_claude_request(&request) {
+        Ok(messages) => messages,
+        Err(err) => {
+            write_json_status_response(
+                &mut stream,
+                400,
+                serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "request_translation_error",
+                        "message": err.to_string()
+                    }
+                }),
+            )
+            .await?;
+            return Ok(());
+        }
     };
+    let chat_tools = ambient_chat_tools_from_claude_request(&request);
     let mut upstream_body = serde_json::json!({
         "model": upstream_model.as_str(),
         "messages": chat_messages,
@@ -2182,33 +2231,100 @@ async fn handle_ambient_bridge_connection(
         upstream_body["tools"] = Value::Array(chat_tools);
         upstream_body["tool_choice"] = Value::String("auto".to_string());
     }
-    let response = http
-        .post("https://api.ambient.xyz/v1/chat/completions")
-        .bearer_auth(api_key.as_str())
-        .json(&upstream_body)
-        .send()
-        .await
-        .context("Ambient Chat bridge upstream request failed")?;
-    let status = response.status();
-    let response_text = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        write_json_status_response(
+    let response = if wants_stream {
+        send_ambient_chat_request_with_stream_heartbeat(
             &mut stream,
-            status.as_u16(),
-            serde_json::json!({
-                "type": "error",
-                "error": {
-                    "type": "upstream_error",
-                    "message": response_text
-                }
-            }),
+            upstream_model.as_str(),
+            &http,
+            api_key.as_str(),
+            &upstream_body,
         )
-        .await?;
+        .await
+    } else {
+        send_ambient_chat_request_with_retry(&http, api_key.as_str(), &upstream_body).await
+    };
+    let (status, response_text) = match response {
+        Ok(response) => response,
+        Err(err) => {
+            if wants_stream {
+                write_anthropic_stream_text_completion(
+                    &mut stream,
+                    &format!("Ambient Claude bridge upstream transport error: {err}"),
+                    &Value::Null,
+                )
+                .await?;
+            } else {
+                write_json_status_response(
+                    &mut stream,
+                    502,
+                    serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "type": "upstream_transport_error",
+                            "message": err.to_string()
+                        }
+                    }),
+                )
+                .await?;
+            }
+            return Ok(());
+        }
+    };
+    if !status.is_success() {
+        if wants_stream {
+            write_anthropic_stream_text_completion(
+                &mut stream,
+                &format!(
+                    "Ambient Claude bridge upstream returned HTTP {}: {response_text}",
+                    status.as_u16()
+                ),
+                &Value::Null,
+            )
+            .await?;
+        } else {
+            write_json_status_response(
+                &mut stream,
+                status.as_u16(),
+                serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "upstream_error",
+                        "message": response_text
+                    }
+                }),
+            )
+            .await?;
+        }
         return Ok(());
     }
 
-    let upstream: Value =
-        serde_json::from_str(&response_text).context("Ambient Chat response was not JSON")?;
+    let upstream: Value = match serde_json::from_str(&response_text) {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            if wants_stream {
+                write_anthropic_stream_text_completion(
+                    &mut stream,
+                    &format!("Ambient Chat response was not JSON: {err}"),
+                    &Value::Null,
+                )
+                .await?;
+            } else {
+                write_json_status_response(
+                    &mut stream,
+                    502,
+                    serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "type": "upstream_invalid_json",
+                            "message": format!("Ambient Chat response was not JSON: {err}")
+                        }
+                    }),
+                )
+                .await?;
+            }
+            return Ok(());
+        }
+    };
     let usage = upstream.get("usage").cloned().unwrap_or_else(|| {
         serde_json::json!({
             "prompt_tokens": 0,
@@ -2217,19 +2333,13 @@ async fn handle_ambient_bridge_connection(
         })
     });
     let tool_calls = bridge_tool_calls_from_ambient_response(&upstream);
-    if let Some(tool_call) = tool_calls.first() {
+    if !tool_calls.is_empty() {
         if wants_stream {
-            write_anthropic_stream_tool_use_response(
-                &mut stream,
-                upstream_model.as_str(),
-                tool_call,
-                &usage,
-            )
-            .await?;
+            write_anthropic_stream_tool_use_completion(&mut stream, &tool_calls, &usage).await?;
         } else {
             write_json_response(
                 &mut stream,
-                anthropic_tool_use_response(upstream_model.as_str(), tool_call, &usage),
+                anthropic_tool_use_response(upstream_model.as_str(), &tool_calls, &usage),
             )
             .await?;
         }
@@ -2243,8 +2353,7 @@ async fn handle_ambient_bridge_connection(
         .unwrap_or("OK")
         .to_string();
     if wants_stream {
-        write_anthropic_stream_response(&mut stream, upstream_model.as_str(), &text, &usage)
-            .await?;
+        write_anthropic_stream_text_completion(&mut stream, &text, &usage).await?;
     } else {
         write_json_response(
             &mut stream,
@@ -2253,6 +2362,114 @@ async fn handle_ambient_bridge_connection(
         .await?;
     }
     Ok(())
+}
+
+async fn send_ambient_chat_request_with_retry(
+    http: &reqwest::Client,
+    api_key: &str,
+    upstream_body: &Value,
+) -> Result<(reqwest::StatusCode, String)> {
+    let mut last_error = None;
+    for attempt in 1..=AMBIENT_BRIDGE_UPSTREAM_MAX_ATTEMPTS {
+        let response = http
+            .post("https://api.ambient.xyz/v1/chat/completions")
+            .bearer_auth(api_key)
+            .json(upstream_body)
+            .send()
+            .await;
+
+        match response {
+            Ok(response) => {
+                let status = response.status();
+                let should_retry =
+                    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+                let retry_delay = ambient_retry_after_delay(response.headers())
+                    .unwrap_or_else(|| ambient_bridge_retry_delay(attempt));
+                match response.text().await {
+                    Ok(response_text) => {
+                        if should_retry && attempt < AMBIENT_BRIDGE_UPSTREAM_MAX_ATTEMPTS {
+                            tracing::warn!(
+                                status = status.as_u16(),
+                                attempt,
+                                max_attempts = AMBIENT_BRIDGE_UPSTREAM_MAX_ATTEMPTS,
+                                "Ambient Claude bridge upstream returned retriable status"
+                            );
+                            sleep_ambient_bridge_retry(retry_delay).await;
+                            continue;
+                        }
+                        return Ok((status, response_text));
+                    }
+                    Err(err) => {
+                        last_error = Some(anyhow!(
+                            "Ambient Chat bridge failed to read response: {err}"
+                        ));
+                    }
+                }
+            }
+            Err(err) => {
+                last_error = Some(anyhow!(
+                    "Ambient Chat bridge upstream request failed: {err}"
+                ));
+            }
+        }
+
+        if attempt < AMBIENT_BRIDGE_UPSTREAM_MAX_ATTEMPTS {
+            let error = last_error
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "unknown upstream transport failure".to_string());
+            tracing::warn!(
+                attempt,
+                max_attempts = AMBIENT_BRIDGE_UPSTREAM_MAX_ATTEMPTS,
+                error = %error,
+                "Ambient Claude bridge upstream transport failed"
+            );
+            sleep_ambient_bridge_retry(ambient_bridge_retry_delay(attempt)).await;
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("Ambient Chat bridge upstream request failed")))
+}
+
+async fn send_ambient_chat_request_with_stream_heartbeat(
+    stream: &mut tokio::net::TcpStream,
+    model: &str,
+    http: &reqwest::Client,
+    api_key: &str,
+    upstream_body: &Value,
+) -> Result<(reqwest::StatusCode, String)> {
+    write_anthropic_stream_start(stream, model, &Value::Null).await?;
+    let request = send_ambient_chat_request_with_retry(http, api_key, upstream_body);
+    tokio::pin!(request);
+    let mut heartbeat = interval(Duration::from_secs(10));
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    heartbeat.tick().await;
+    loop {
+        tokio::select! {
+            result = &mut request => return result,
+            _ = heartbeat.tick() => {
+                write_anthropic_stream_ping(stream).await?;
+            }
+        }
+    }
+}
+
+fn ambient_retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let retry_after = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    let seconds = retry_after.parse::<u64>().ok()?;
+    Some(Duration::from_secs(seconds.min(300)))
+}
+
+fn ambient_bridge_retry_delay(attempt: usize) -> Duration {
+    Duration::from_millis((attempt as u64).saturating_mul(250))
+}
+
+async fn sleep_ambient_bridge_retry(delay: Duration) {
+    tokio::time::sleep(delay).await;
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
@@ -2340,19 +2557,6 @@ fn ambient_chat_tools_from_claude_request(request: &Value) -> Vec<Value> {
             }))
         })
         .collect()
-}
-
-fn claude_tool_use_count(request: &Value) -> usize {
-    request
-        .get("messages")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
-        .filter_map(|message| message.get("content").and_then(Value::as_array))
-        .flatten()
-        .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_use"))
-        .count()
 }
 
 fn ambient_assistant_tool_calls_from_claude_content(content: &Value) -> Vec<Value> {
@@ -2475,18 +2679,24 @@ fn bridge_tool_calls_from_ambient_response(upstream: &Value) -> Vec<BridgeToolCa
         .collect()
 }
 
-fn anthropic_tool_use_response(model: &str, tool_call: &BridgeToolCall, usage: &Value) -> Value {
+fn anthropic_tool_use_response(model: &str, tool_calls: &[BridgeToolCall], usage: &Value) -> Value {
+    let content = tool_calls
+        .iter()
+        .map(|tool_call| {
+            serde_json::json!({
+                "type": "tool_use",
+                "id": tool_call.id,
+                "name": tool_call.name,
+                "input": tool_call.input
+            })
+        })
+        .collect::<Vec<_>>();
     serde_json::json!({
         "id": format!("msg_pfterminal_{}", Uuid::new_v4().simple()),
         "type": "message",
         "role": "assistant",
         "model": model,
-        "content": [{
-            "type": "tool_use",
-            "id": tool_call.id,
-            "name": tool_call.name,
-            "input": tool_call.input
-        }],
+        "content": content,
         "stop_reason": "tool_use",
         "stop_sequence": null,
         "usage": {
@@ -2520,116 +2730,88 @@ async fn write_json_status_response(
     Ok(())
 }
 
-async fn write_anthropic_stream_response(
+async fn write_anthropic_stream_start(
     stream: &mut tokio::net::TcpStream,
     model: &str,
+    usage: &Value,
+) -> Result<()> {
+    let response = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n";
+    stream.write_all(response.as_bytes()).await?;
+    let message_id = format!("msg_pfterminal_{}", Uuid::new_v4().simple());
+    write_sse_event(
+        stream,
+        "message_start",
+        &serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
+                    "output_tokens": 0
+                }
+            }
+        }),
+    )
+    .await
+}
+
+async fn write_anthropic_stream_ping(stream: &mut tokio::net::TcpStream) -> Result<()> {
+    write_sse_event(stream, "ping", &serde_json::json!({ "type": "ping" })).await
+}
+
+async fn write_anthropic_stream_text_completion(
+    stream: &mut tokio::net::TcpStream,
     text: &str,
     usage: &Value,
 ) -> Result<()> {
-    let message_id = format!("msg_pfterminal_{}", Uuid::new_v4().simple());
-    let events = vec![
-        (
-            "message_start",
-            serde_json::json!({
-                "type": "message_start",
-                "message": {
-                    "id": message_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "model": model,
-                    "content": [],
-                    "stop_reason": null,
-                    "stop_sequence": null,
-                    "usage": {
-                        "input_tokens": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-                        "output_tokens": 0
-                    }
-                }
-            }),
-        ),
-        (
-            "content_block_start",
-            serde_json::json!({
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": { "type": "text", "text": "" }
-            }),
-        ),
-        (
-            "content_block_delta",
-            serde_json::json!({
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": { "type": "text_delta", "text": text }
-            }),
-        ),
-        (
-            "content_block_stop",
-            serde_json::json!({ "type": "content_block_stop", "index": 0 }),
-        ),
-        (
-            "message_delta",
-            serde_json::json!({
-                "type": "message_delta",
-                "delta": { "stop_reason": "end_turn", "stop_sequence": null },
-                "usage": {
-                    "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0)
-                }
-            }),
-        ),
-        (
-            "message_stop",
-            serde_json::json!({ "type": "message_stop" }),
-        ),
-    ];
-    let mut body = String::new();
-    for (event, data) in events {
-        body.push_str("event: ");
-        body.push_str(event);
-        body.push_str("\ndata: ");
-        body.push_str(&data.to_string());
-        body.push_str("\n\n");
-    }
-    let response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n{body}"
-    );
-    stream.write_all(response.as_bytes()).await?;
-    Ok(())
+    write_sse_event(
+        stream,
+        "content_block_start",
+        &serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "text", "text": "" }
+        }),
+    )
+    .await?;
+    write_sse_event(
+        stream,
+        "content_block_delta",
+        &serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "text_delta", "text": text }
+        }),
+    )
+    .await?;
+    write_sse_event(
+        stream,
+        "content_block_stop",
+        &serde_json::json!({ "type": "content_block_stop", "index": 0 }),
+    )
+    .await?;
+    write_anthropic_stream_stop(stream, "end_turn", usage).await
 }
 
-async fn write_anthropic_stream_tool_use_response(
+async fn write_anthropic_stream_tool_use_completion(
     stream: &mut tokio::net::TcpStream,
-    model: &str,
-    tool_call: &BridgeToolCall,
+    tool_calls: &[BridgeToolCall],
     usage: &Value,
 ) -> Result<()> {
-    let message_id = format!("msg_pfterminal_{}", Uuid::new_v4().simple());
-    let partial_json = tool_call.input.to_string();
-    let events = vec![
-        (
-            "message_start",
-            serde_json::json!({
-                "type": "message_start",
-                "message": {
-                    "id": message_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "model": model,
-                    "content": [],
-                    "stop_reason": null,
-                    "stop_sequence": null,
-                    "usage": {
-                        "input_tokens": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-                        "output_tokens": 0
-                    }
-                }
-            }),
-        ),
-        (
+    for (index, tool_call) in tool_calls.iter().enumerate() {
+        let partial_json = tool_call.input.to_string();
+        write_sse_event(
+            stream,
             "content_block_start",
-            serde_json::json!({
+            &serde_json::json!({
                 "type": "content_block_start",
-                "index": 0,
+                "index": index,
                 "content_block": {
                     "type": "tool_use",
                     "id": tool_call.id,
@@ -2637,46 +2819,61 @@ async fn write_anthropic_stream_tool_use_response(
                     "input": {}
                 }
             }),
-        ),
-        (
+        )
+        .await?;
+        write_sse_event(
+            stream,
             "content_block_delta",
-            serde_json::json!({
+            &serde_json::json!({
                 "type": "content_block_delta",
-                "index": 0,
+                "index": index,
                 "delta": { "type": "input_json_delta", "partial_json": partial_json }
             }),
-        ),
-        (
+        )
+        .await?;
+        write_sse_event(
+            stream,
             "content_block_stop",
-            serde_json::json!({ "type": "content_block_stop", "index": 0 }),
-        ),
-        (
-            "message_delta",
-            serde_json::json!({
-                "type": "message_delta",
-                "delta": { "stop_reason": "tool_use", "stop_sequence": null },
-                "usage": {
-                    "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0)
-                }
-            }),
-        ),
-        (
-            "message_stop",
-            serde_json::json!({ "type": "message_stop" }),
-        ),
-    ];
-    let mut body = String::new();
-    for (event, data) in events {
-        body.push_str("event: ");
-        body.push_str(event);
-        body.push_str("\ndata: ");
-        body.push_str(&data.to_string());
-        body.push_str("\n\n");
+            &serde_json::json!({ "type": "content_block_stop", "index": index }),
+        )
+        .await?;
     }
-    let response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n{body}"
-    );
-    stream.write_all(response.as_bytes()).await?;
+    write_anthropic_stream_stop(stream, "tool_use", usage).await
+}
+
+async fn write_anthropic_stream_stop(
+    stream: &mut tokio::net::TcpStream,
+    stop_reason: &str,
+    usage: &Value,
+) -> Result<()> {
+    write_sse_event(
+        stream,
+        "message_delta",
+        &serde_json::json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": stop_reason, "stop_sequence": null },
+            "usage": {
+                "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0)
+            }
+        }),
+    )
+    .await?;
+    write_sse_event(
+        stream,
+        "message_stop",
+        &serde_json::json!({ "type": "message_stop" }),
+    )
+    .await
+}
+
+async fn write_sse_event(
+    stream: &mut tokio::net::TcpStream,
+    event: &str,
+    data: &Value,
+) -> Result<()> {
+    let body = format!("event: {event}\ndata: {data}\n\n");
+    stream.write_all(body.as_bytes()).await?;
+    stream.flush().await?;
     Ok(())
 }
 
@@ -3586,12 +3783,9 @@ mod tests {
                 .any(|w| w[0] == "--output-format" && w[1] == "stream-json")
         );
         assert!(first.args.iter().any(|arg| arg == "--verbose"));
-        assert!(
-            first
-                .args
-                .windows(2)
-                .any(|w| w[0] == "--max-turns" && w[1] == CLAUDE_PANE_MAX_TURNS)
-        );
+        assert!(!first.args.iter().any(|arg| arg == "--max-turns"));
+        assert_eq!(first.max_turns, None);
+        assert_eq!(first.timeout_ms, None);
         assert!(
             first
                 .args
@@ -3860,64 +4054,68 @@ mod tests {
     }
 
     #[test]
-    fn claude_tool_use_count_counts_prior_assistant_tool_calls() {
-        let request = json!({
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "tool_use", "id": "toolu_1", "name": "Read"},
-                        {"type": "text", "text": "checking"}
-                    ]
-                },
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "tool_use", "id": "toolu_2", "name": "Bash"}
-                    ]
-                },
-                {
-                    "role": "user",
-                    "content": "continue"
-                }
-            ]
-        });
-
-        assert_eq!(claude_tool_use_count(&request), 2);
-    }
-
-    #[test]
-    fn ambient_tool_call_is_translated_to_anthropic_tool_use() {
+    fn ambient_tool_calls_are_translated_to_anthropic_tool_uses() {
         let upstream = json!({
             "choices": [{
                 "message": {
-                    "tool_calls": [{
-                        "id": "chatcmpl-tool-1",
-                        "type": "function",
-                        "function": {
-                            "name": "Read",
-                            "arguments": "{\"path\":\"README.md\"}"
+                    "tool_calls": [
+                        {
+                            "id": "chatcmpl-tool-1",
+                            "type": "function",
+                            "function": {
+                                "name": "Read",
+                                "arguments": "{\"path\":\"README.md\"}"
+                            }
+                        },
+                        {
+                            "id": "chatcmpl-tool-2",
+                            "type": "function",
+                            "function": {
+                                "name": "Bash",
+                                "arguments": "{\"command\":\"git status --short\"}"
+                            }
                         }
-                    }]
+                    ]
                 }
             }]
         });
         let calls = bridge_tool_calls_from_ambient_response(&upstream);
         let response = anthropic_tool_use_response(
             "zai-org/GLM-5.2-FP8",
-            &calls[0],
+            &calls,
             &json!({"prompt_tokens": 5, "completion_tokens": 3}),
         );
 
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].name, "Read");
+        assert_eq!(calls[1].name, "Bash");
         assert_eq!(
             response.pointer("/content/0/type").and_then(Value::as_str),
             Some("tool_use")
         );
         assert_eq!(
+            response.pointer("/content/1/name").and_then(Value::as_str),
+            Some("Bash")
+        );
+        assert_eq!(
             response.pointer("/stop_reason").and_then(Value::as_str),
             Some("tool_use")
+        );
+    }
+
+    #[test]
+    fn ambient_retry_after_delay_parses_seconds_and_caps_large_values() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "42".parse().expect("header"));
+        assert_eq!(
+            ambient_retry_after_delay(&headers),
+            Some(Duration::from_secs(42))
+        );
+
+        headers.insert(reqwest::header::RETRY_AFTER, "999".parse().expect("header"));
+        assert_eq!(
+            ambient_retry_after_delay(&headers),
+            Some(Duration::from_secs(300))
         );
     }
 
