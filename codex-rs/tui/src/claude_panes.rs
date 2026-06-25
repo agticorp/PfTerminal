@@ -2247,10 +2247,10 @@ async fn handle_ambient_bridge_connection(
         Ok(response) => response,
         Err(err) => {
             if wants_stream {
-                write_anthropic_stream_text_completion(
+                write_anthropic_stream_error(
                     &mut stream,
+                    "upstream_transport_error",
                     &format!("Ambient Claude bridge upstream transport error: {err}"),
-                    &Value::Null,
                 )
                 .await?;
             } else {
@@ -2272,13 +2272,13 @@ async fn handle_ambient_bridge_connection(
     };
     if !status.is_success() {
         if wants_stream {
-            write_anthropic_stream_text_completion(
+            write_anthropic_stream_error(
                 &mut stream,
+                "upstream_error",
                 &format!(
                     "Ambient Claude bridge upstream returned HTTP {}: {response_text}",
                     status.as_u16()
                 ),
-                &Value::Null,
             )
             .await?;
         } else {
@@ -2302,10 +2302,10 @@ async fn handle_ambient_bridge_connection(
         Ok(upstream) => upstream,
         Err(err) => {
             if wants_stream {
-                write_anthropic_stream_text_completion(
+                write_anthropic_stream_error(
                     &mut stream,
+                    "upstream_invalid_json",
                     &format!("Ambient Chat response was not JSON: {err}"),
-                    &Value::Null,
                 )
                 .await?;
             } else {
@@ -2335,7 +2335,13 @@ async fn handle_ambient_bridge_connection(
     let tool_calls = bridge_tool_calls_from_ambient_response(&upstream);
     if !tool_calls.is_empty() {
         if wants_stream {
-            write_anthropic_stream_tool_use_completion(&mut stream, &tool_calls, &usage).await?;
+            write_anthropic_stream_tool_use_completion(
+                &mut stream,
+                upstream_model.as_str(),
+                &tool_calls,
+                &usage,
+            )
+            .await?;
         } else {
             write_json_response(
                 &mut stream,
@@ -2353,7 +2359,8 @@ async fn handle_ambient_bridge_connection(
         .unwrap_or("OK")
         .to_string();
     if wants_stream {
-        write_anthropic_stream_text_completion(&mut stream, &text, &usage).await?;
+        write_anthropic_stream_text_completion(&mut stream, upstream_model.as_str(), &text, &usage)
+            .await?;
     } else {
         write_json_response(
             &mut stream,
@@ -2400,9 +2407,19 @@ async fn send_ambient_chat_request_with_retry(
                         return Ok((status, response_text));
                     }
                     Err(err) => {
-                        last_error = Some(anyhow!(
-                            "Ambient Chat bridge failed to read response: {err}"
-                        ));
+                        let error = anyhow!("Ambient Chat bridge failed to read response: {err}");
+                        if should_retry && attempt < AMBIENT_BRIDGE_UPSTREAM_MAX_ATTEMPTS {
+                            tracing::warn!(
+                                status = status.as_u16(),
+                                attempt,
+                                max_attempts = AMBIENT_BRIDGE_UPSTREAM_MAX_ATTEMPTS,
+                                error = %error,
+                                "Ambient Claude bridge failed to read retriable upstream response"
+                            );
+                            sleep_ambient_bridge_retry(retry_delay).await;
+                            continue;
+                        }
+                        return Err(error);
                     }
                 }
             }
@@ -2433,12 +2450,12 @@ async fn send_ambient_chat_request_with_retry(
 
 async fn send_ambient_chat_request_with_stream_heartbeat(
     stream: &mut tokio::net::TcpStream,
-    model: &str,
+    _model: &str,
     http: &reqwest::Client,
     api_key: &str,
     upstream_body: &Value,
 ) -> Result<(reqwest::StatusCode, String)> {
-    write_anthropic_stream_start(stream, model, &Value::Null).await?;
+    write_anthropic_stream_headers(stream).await?;
     let request = send_ambient_chat_request_with_retry(http, api_key, upstream_body);
     tokio::pin!(request);
     let mut heartbeat = interval(Duration::from_secs(10));
@@ -2644,10 +2661,7 @@ fn anthropic_message_response(model: &str, text: &str, usage: &Value) -> Value {
         "content": [{ "type": "text", "text": text }],
         "stop_reason": "end_turn",
         "stop_sequence": null,
-        "usage": {
-            "input_tokens": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-            "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0)
-        }
+        "usage": anthropic_response_usage(usage)
     })
 }
 
@@ -2699,11 +2713,36 @@ fn anthropic_tool_use_response(model: &str, tool_calls: &[BridgeToolCall], usage
         "content": content,
         "stop_reason": "tool_use",
         "stop_sequence": null,
-        "usage": {
-            "input_tokens": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-            "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0)
-        }
+        "usage": anthropic_response_usage(usage)
     })
+}
+
+fn anthropic_response_usage(usage: &Value) -> Value {
+    let mut usage_map = serde_json::Map::new();
+    usage_map.insert(
+        "input_tokens".to_string(),
+        Value::from(
+            usage
+                .get("prompt_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        ),
+    );
+    usage_map.insert(
+        "output_tokens".to_string(),
+        Value::from(
+            usage
+                .get("completion_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        ),
+    );
+    for source in ["cached_tokens", "cache_read_input_tokens"] {
+        if let Some(value) = usage.get(source).and_then(Value::as_u64) {
+            usage_map.insert("cache_read_input_tokens".to_string(), Value::from(value));
+        }
+    }
+    Value::Object(usage_map)
 }
 
 async fn write_json_response(stream: &mut tokio::net::TcpStream, body: Value) -> Result<()> {
@@ -2730,33 +2769,21 @@ async fn write_json_status_response(
     Ok(())
 }
 
+async fn write_anthropic_stream_headers(stream: &mut tokio::net::TcpStream) -> Result<()> {
+    let response = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n";
+    stream.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
 async fn write_anthropic_stream_start(
     stream: &mut tokio::net::TcpStream,
     model: &str,
     usage: &Value,
 ) -> Result<()> {
-    let response = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n";
-    stream.write_all(response.as_bytes()).await?;
-    let message_id = format!("msg_pfterminal_{}", Uuid::new_v4().simple());
     write_sse_event(
         stream,
         "message_start",
-        &serde_json::json!({
-            "type": "message_start",
-            "message": {
-                "id": message_id,
-                "type": "message",
-                "role": "assistant",
-                "model": model,
-                "content": [],
-                "stop_reason": null,
-                "stop_sequence": null,
-                "usage": {
-                    "input_tokens": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-                    "output_tokens": 0
-                }
-            }
-        }),
+        &anthropic_stream_start_event(model, usage),
     )
     .await
 }
@@ -2765,11 +2792,68 @@ async fn write_anthropic_stream_ping(stream: &mut tokio::net::TcpStream) -> Resu
     write_sse_event(stream, "ping", &serde_json::json!({ "type": "ping" })).await
 }
 
+async fn write_anthropic_stream_error(
+    stream: &mut tokio::net::TcpStream,
+    error_type: &str,
+    message: &str,
+) -> Result<()> {
+    write_sse_event(
+        stream,
+        "error",
+        &anthropic_stream_error_event(error_type, message),
+    )
+    .await
+}
+
+fn anthropic_stream_error_event(error_type: &str, message: &str) -> Value {
+    serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": error_type,
+            "message": message
+        }
+    })
+}
+
+fn anthropic_stream_start_event(model: &str, usage: &Value) -> Value {
+    let mut usage_map = serde_json::Map::new();
+    usage_map.insert(
+        "input_tokens".to_string(),
+        Value::from(
+            usage
+                .get("prompt_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        ),
+    );
+    usage_map.insert("output_tokens".to_string(), Value::from(0_u64));
+    for source in ["cached_tokens", "cache_read_input_tokens"] {
+        if let Some(value) = usage.get(source).and_then(Value::as_u64) {
+            usage_map.insert("cache_read_input_tokens".to_string(), Value::from(value));
+        }
+    }
+    serde_json::json!({
+        "type": "message_start",
+        "message": {
+            "id": format!("msg_pfterminal_{}", Uuid::new_v4().simple()),
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [],
+            "stop_reason": null,
+            "stop_sequence": null,
+            "usage": Value::Object(usage_map)
+        }
+    })
+}
+
 async fn write_anthropic_stream_text_completion(
     stream: &mut tokio::net::TcpStream,
+    model: &str,
     text: &str,
     usage: &Value,
 ) -> Result<()> {
+    write_anthropic_stream_start(stream, model, usage).await?;
     write_sse_event(
         stream,
         "content_block_start",
@@ -2801,9 +2885,11 @@ async fn write_anthropic_stream_text_completion(
 
 async fn write_anthropic_stream_tool_use_completion(
     stream: &mut tokio::net::TcpStream,
+    model: &str,
     tool_calls: &[BridgeToolCall],
     usage: &Value,
 ) -> Result<()> {
+    write_anthropic_stream_start(stream, model, usage).await?;
     for (index, tool_call) in tool_calls.iter().enumerate() {
         let partial_json = tool_call.input.to_string();
         write_sse_event(
@@ -2849,13 +2935,7 @@ async fn write_anthropic_stream_stop(
     write_sse_event(
         stream,
         "message_delta",
-        &serde_json::json!({
-            "type": "message_delta",
-            "delta": { "stop_reason": stop_reason, "stop_sequence": null },
-            "usage": {
-                "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0)
-            }
-        }),
+        &anthropic_stream_stop_event(stop_reason, usage),
     )
     .await?;
     write_sse_event(
@@ -2864,6 +2944,16 @@ async fn write_anthropic_stream_stop(
         &serde_json::json!({ "type": "message_stop" }),
     )
     .await
+}
+
+fn anthropic_stream_stop_event(stop_reason: &str, usage: &Value) -> Value {
+    serde_json::json!({
+        "type": "message_delta",
+        "delta": { "stop_reason": stop_reason, "stop_sequence": null },
+        "usage": {
+            "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0)
+        }
+    })
 }
 
 async fn write_sse_event(
@@ -4083,7 +4173,7 @@ mod tests {
         let response = anthropic_tool_use_response(
             "zai-org/GLM-5.2-FP8",
             &calls,
-            &json!({"prompt_tokens": 5, "completion_tokens": 3}),
+            &json!({"prompt_tokens": 5, "cached_tokens": 2, "completion_tokens": 3}),
         );
 
         assert_eq!(calls.len(), 2);
@@ -4101,6 +4191,12 @@ mod tests {
             response.pointer("/stop_reason").and_then(Value::as_str),
             Some("tool_use")
         );
+        assert_eq!(
+            response
+                .pointer("/usage/cache_read_input_tokens")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
     }
 
     #[test]
@@ -4117,6 +4213,66 @@ mod tests {
             ambient_retry_after_delay(&headers),
             Some(Duration::from_secs(300))
         );
+    }
+
+    #[test]
+    fn anthropic_stream_events_preserve_upstream_usage_in_protocol_fields() {
+        let start = anthropic_stream_start_event(
+            "zai-org/GLM-5.2-FP8",
+            &serde_json::json!({
+                "prompt_tokens": 120,
+                "cached_tokens": 80,
+                "completion_tokens": 34
+            }),
+        );
+        let stop = anthropic_stream_stop_event(
+            "end_turn",
+            &serde_json::json!({
+                "prompt_tokens": 120,
+                "cached_tokens": 80,
+                "completion_tokens": 34
+            }),
+        );
+
+        assert_eq!(
+            start
+                .pointer("/message/usage/input_tokens")
+                .and_then(Value::as_u64),
+            Some(120)
+        );
+        assert_eq!(
+            start
+                .pointer("/message/usage/cache_read_input_tokens")
+                .and_then(Value::as_u64),
+            Some(80)
+        );
+        assert_eq!(
+            start
+                .pointer("/message/usage/output_tokens")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            stop.pointer("/usage/output_tokens").and_then(Value::as_u64),
+            Some(34)
+        );
+        assert!(stop.pointer("/usage/input_tokens").is_none());
+    }
+
+    #[test]
+    fn anthropic_stream_error_event_is_protocol_error() {
+        let event = anthropic_stream_error_event("upstream_transport_error", "boom");
+
+        assert_eq!(event.get("type").and_then(Value::as_str), Some("error"));
+        assert_eq!(
+            event.pointer("/error/type").and_then(Value::as_str),
+            Some("upstream_transport_error")
+        );
+        assert_eq!(
+            event.pointer("/error/message").and_then(Value::as_str),
+            Some("boom")
+        );
+        assert!(event.get("content").is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

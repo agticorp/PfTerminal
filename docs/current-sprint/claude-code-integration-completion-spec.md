@@ -1,9 +1,11 @@
 # Claude Code Pane Completion Spec
 
 Status: Ambient parity workflow suite passed on June 25, 2026 after removing
-the hidden local tool-call ceiling. The prior Ambient completion claim was
-wrong because the pane runner had a hidden local tool-call ceiling that a real
-Claude Code TUI session does not have.
+the hidden local tool-call ceiling. A later protocol patch fixed streaming
+usage/error handling and has live smoke/tool-loop/substantive-review evidence,
+but a full four-workflow rerun after that patch is still pending. The prior
+Ambient completion claim was wrong because the pane runner had a hidden local
+tool-call ceiling that a real Claude Code TUI session does not have.
 
 ## Hard Completion Bar
 
@@ -64,6 +66,32 @@ the hidden 3-tool-call ceiling. Fresh evidence after the uncapped runner:
 | Mock website | Passed | Report `/home/postfiat/.pfterminal/panes/workflow-reports/claude-pane-workflow-suite-1782409303.json`; artifact `/home/postfiat/.pfterminal/panes/claude-388bf5bf-a406-47dd-8e81-72f7c2e8b9cc/turn-0001.jsonl`; audit `/home/postfiat/.pfterminal/panes/claude-388bf5bf-a406-47dd-8e81-72f7c2e8b9cc/turn-0001.audit.json`. |
 | NumPy vs Pandas benchmark | Passed | Artifact `/home/postfiat/.pfterminal/panes/claude-0d36cdb3-6139-4466-9c34-d61a2525ede7/turn-0001.jsonl`; audit `/home/postfiat/.pfterminal/panes/claude-0d36cdb3-6139-4466-9c34-d61a2525ede7/turn-0001.audit.json`. The audit recorded `tool_use_count=12`, `max_turns=null`, and `timeout_ms=null`. |
 | Turn-by-turn auditability | Passed | Artifact `/home/postfiat/.pfterminal/panes/claude-394c2adf-c9a1-40dd-a458-5673974ce774/turn-0003.jsonl`; audit `/home/postfiat/.pfterminal/panes/claude-394c2adf-c9a1-40dd-a458-5673974ce774/turn-0003.audit.json`. |
+
+Additional June 25, 2026 evidence:
+
+- Direct Claude Code baseline against commit `57c3272f7c` completed with
+  `PFT_DIRECT_CLAUDE_BASELINE_DONE` and `DIFF_INSPECTED: yes`; artifact
+  `/tmp/pfterminal-claude-baseline-1782410342.jsonl`. This was direct Claude
+  Code on Z.AI GLM 5.2, not the PFTerminal pane path.
+- PFTerminal Ambient pane review of the same large commit completed with
+  `PFT_CODE_REVIEW_DONE` and `DIFF_INSPECTED: yes`; report
+  `/home/postfiat/.pfterminal/panes/workflow-reports/claude-pane-workflow-suite-1782409740.json`;
+  artifacts
+  `/home/postfiat/.pfterminal/panes/claude-8fef5d19-67d7-44aa-ab07-a1d07155c915/turn-0001.jsonl`
+  and
+  `/home/postfiat/.pfterminal/panes/claude-8fef5d19-67d7-44aa-ab07-a1d07155c915/turn-0002.jsonl`.
+- That live pane review found follow-up protocol issues. The implementation
+  now emits streaming upstream failures as Anthropic `event: error`, defers
+  `message_start` until upstream usage is known, places input/cache usage on
+  `message_start`, keeps `message_delta` to output usage, and maps cached
+  usage in non-streaming responses.
+- After those protocol fixes, live tests passed:
+  `live_ambient_bridge_runs_claude_headless_for_two_turns`,
+  `live_ambient_bridge_runs_claude_tool_loop`, and
+  `live_ambient_bridge_runs_substantive_code_review`.
+- A full four-workflow rerun after the protocol fixes was interrupted because
+  the code-review resume turn stopped making artifact progress for several
+  minutes after an already long first turn. That is not recorded as a pass.
 
 The Ambient bridge must not impose a local tool-call budget, max-turn budget, or
 wall-clock turn timeout that is absent from a real Claude Code session. Cleanup

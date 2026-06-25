@@ -1,8 +1,11 @@
 # Claude Headless Panes
 
 Status: Ambient parity workflow suite passed on June 25, 2026 for wrapped
-Claude Code panes. Z.AI, Baseten, OpenRouter, and Claude Plan remain
-experimental until they pass the same workflow suite.
+Claude Code panes after the hidden local tool-call ceiling was removed. A later
+streaming protocol patch has live smoke/tool-loop/substantive-review evidence,
+but the full four-workflow rerun after that protocol patch is still pending.
+Z.AI, Baseten, OpenRouter, and Claude Plan remain experimental until they pass
+the same workflow suite.
 
 The Ambient path runs real `claude -p` headless turns against a local
 PFTerminal Anthropic Messages bridge. The bridge translates Claude Code
@@ -74,6 +77,10 @@ below.
   preserve requested output token limits, emit Anthropic-compatible stream
   heartbeats while waiting on Ambient Chat Completions, and retry rate-limited
   upstream calls with `Retry-After` support.
+- [x] Fixed Ambient streaming protocol handling after live review: upstream
+  failures emit Anthropic `event: error`, `message_start` is deferred until
+  upstream usage is known, input/cache usage lives on `message_start`, and
+  non-streaming responses preserve cache-read usage.
 - [x] Live-tested the uncapped Ambient workflow suite:
   code review with full diff inspection, resumed code review, mock website,
   NumPy vs Pandas benchmark, and turn-by-turn auditability.
