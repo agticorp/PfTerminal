@@ -138,6 +138,10 @@ enum Subcommand {
     /// Internal vault helpers for PFTerminal integrations.
     Vault(VaultCommand),
 
+    /// Run live Claude pane smoke checks and write a machine-readable report.
+    #[clap(name = "claude-pane-smoke")]
+    ClaudePaneSmoke(ClaudePaneSmokeCommand),
+
     /// Manage external MCP servers for Codex.
     Mcp(McpCli),
 
@@ -538,6 +542,24 @@ enum VaultSubcommand {
 struct VaultAuthHelperCommand {
     /// Vault label to reveal.
     label: String,
+}
+
+#[derive(Debug, Parser)]
+struct ClaudePaneSmokeCommand {
+    #[clap(skip)]
+    config_overrides: CliConfigOverrides,
+
+    /// Comma-separated provider list: ambient,zai,baseten,openrouter,claude-plan.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "ambient,zai,baseten,openrouter,claude-plan"
+    )]
+    providers: Vec<String>,
+
+    /// Working directory for Claude pane smoke tasks.
+    #[arg(long, value_name = "DIR")]
+    cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -1433,6 +1455,18 @@ async fn cli_main(
             );
             run_vault_command(vault_cli).await?;
         }
+        Some(Subcommand::ClaudePaneSmoke(mut smoke_cli)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "claude-pane-smoke",
+            )?;
+            prepend_config_flags(
+                &mut smoke_cli.config_overrides,
+                root_config_overrides.clone(),
+            );
+            run_claude_pane_smoke_command(smoke_cli).await?;
+        }
         Some(Subcommand::Completion(completion_cli)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2111,6 +2145,48 @@ async fn run_vault_auth_helper(
     Ok(())
 }
 
+async fn run_claude_pane_smoke_command(command: ClaudePaneSmokeCommand) -> anyhow::Result<()> {
+    let cli_kv_overrides = command
+        .config_overrides
+        .parse_overrides()
+        .map_err(anyhow::Error::msg)?;
+    let config = ConfigBuilder::default()
+        .cli_overrides(cli_kv_overrides)
+        .build()
+        .await?;
+    let cwd = command.cwd.unwrap_or_else(|| config.cwd.to_path_buf());
+    let report = codex_tui::claude_panes::run_claude_pane_smoke(
+        codex_tui::claude_panes::ClaudePaneSmokeOptions {
+            codex_home: config.codex_home.to_path_buf(),
+            cwd,
+            providers: command.providers,
+        },
+    )
+    .await?;
+    writeln!(std::io::stdout(), "{}", report.summary)?;
+    for entry in &report.entries {
+        let profile = entry.profile.as_deref().unwrap_or("unknown profile");
+        let error = entry
+            .error
+            .as_deref()
+            .map(|error| format!(" - {error}"))
+            .unwrap_or_default();
+        writeln!(
+            std::io::stdout(),
+            "{}: {} ({profile}){error}",
+            entry.provider,
+            entry.status
+        )?;
+    }
+    if !report.passed {
+        anyhow::bail!(
+            "Claude pane smoke did not pass the required Ambient-backed baseline; report: {}",
+            report.report_path.display()
+        );
+    }
+    Ok(())
+}
+
 fn provider_vault_label_allowed_for_auth_helper(label: &str) -> bool {
     matches!(
         label,
@@ -2203,6 +2279,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Login(_)) => Some("login"),
         Some(Subcommand::Logout(_)) => Some("logout"),
         Some(Subcommand::Vault(_)) => Some("vault"),
+        Some(Subcommand::ClaudePaneSmoke(_)) => Some("claude-pane-smoke"),
         Some(Subcommand::Completion(_)) => Some("completion"),
         Some(Subcommand::Update) => Some("update"),
         Some(Subcommand::Cloud(_)) => Some("cloud"),
@@ -2917,6 +2994,26 @@ mod tests {
         assert!(provider_vault_label_allowed_for_auth_helper(
             "provider/ambient_api_key"
         ));
+    }
+
+    #[test]
+    fn claude_pane_smoke_parses_provider_list() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "claude-pane-smoke",
+            "--providers",
+            "ambient,zai",
+            "--cwd",
+            "/tmp",
+        ])
+        .expect("parse");
+
+        let Some(Subcommand::ClaudePaneSmoke(command)) = cli.subcommand else {
+            panic!("expected claude-pane-smoke subcommand");
+        };
+
+        assert_eq!(command.providers, vec!["ambient", "zai"]);
+        assert_eq!(command.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
     }
 
     #[test]

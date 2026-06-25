@@ -20,7 +20,7 @@ credentials, created automatically on login/startup and usable through
 | Tool-call runaway remedy | Live worker logs show malformed oversized `structured_write` calls looping through normal follow-up handling. The remedy is a non-retriable malformed-tool boundary plus bounded/chunked write mechanics. | [Tool Call Runaway Remedy](tool-call-runaway-remedy.md) |
 | Subagents | Current Codex supports explicit subagent workflows, but PFTerminal must make the tool exposure reliable and diagnosable across third-party provider sessions. | [PFTerminal Subagents](subagents.md) |
 | Codex account login | OpenAI Codex account login should appear as a provider credential, use device auth from `/providers`, expose only GPT-5.5, and avoid wiping provider vault keys on default logout. | [Codex Account Login](codex-account-login.md) |
-| Claude headless panes | Implemented `/panes` user panes with Claude Code headless JSON mode, vault-backed provider credentials, and a verified Ambient bridge for live Claude execs. | [Claude Headless Panes](claude-headless-panes.md) |
+| Claude headless panes | `/panes` now has wrapped Claude Code panes with provider smoke coverage, multi-turn resume, audit artifacts, max-turn pause handling, and live review/edit tests. | [Implementation Note](claude-headless-panes.md), [Completion Spec](claude-code-integration-completion-spec.md) |
 
 ## Sprint Reading Path
 
@@ -42,8 +42,11 @@ credentials, created automatically on login/startup and usable through
    subagent delegation visible, provider-compatible, and debuggable.
 8. Read [Codex Account Login](codex-account-login.md) for the plan to
    reintegrate OpenAI Codex account auth into `/providers` and Coding Plans.
-9. Read [Claude Headless Panes](claude-headless-panes.md) for the implemented
-   `/panes` Claude headless pane path and remaining provider validation work.
+9. Read [Claude Headless Panes](claude-headless-panes.md) for the current
+   Ambient-backed `/panes` implementation.
+10. Read [Claude Code Completion Spec](claude-code-integration-completion-spec.md)
+   for the actual completion bar before calling the Claude Code integration
+   done.
 
 ## Boundary
 

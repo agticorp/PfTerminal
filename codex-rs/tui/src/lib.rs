@@ -99,7 +99,7 @@ mod ascii_animation;
 mod bottom_pane;
 mod branch_summary;
 mod chatwidget;
-mod claude_panes;
+pub mod claude_panes;
 mod cli;
 mod clipboard_copy;
 mod clipboard_paste;

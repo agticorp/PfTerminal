@@ -55,6 +55,7 @@ nav:
       - PFTerminal Subagents: current-sprint/subagents.md
       - Codex Account Login: current-sprint/codex-account-login.md
       - Claude Headless Panes: current-sprint/claude-headless-panes.md
+      - Claude Code Completion Spec: current-sprint/claude-code-integration-completion-spec.md
   - Integrations:
       - Overview: integrations/index.md
       - Ambient: integrations/ambient.md
