@@ -227,6 +227,7 @@ impl App {
             Err(err) => {
                 if Self::is_terminal_thread_read_error(&err) && !has_replay_channel {
                     self.agent_navigation.remove(thread_id);
+                    self.spawn_parent_by_thread.remove(&thread_id);
                     return false;
                 }
                 let is_closed = Self::closed_state_for_thread_read_error(
@@ -476,6 +477,7 @@ impl App {
         self.abort_all_thread_event_listeners();
         self.thread_event_channels.clear();
         self.agent_navigation.clear();
+        self.spawn_parent_by_thread.clear();
         self.side_threads.clear();
         self.active_thread_id = None;
         self.active_thread_rx = None;

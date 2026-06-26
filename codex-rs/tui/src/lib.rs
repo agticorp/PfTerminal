@@ -167,6 +167,7 @@ mod session_state;
 mod shimmer;
 mod skills_helpers;
 mod slash_command;
+pub(crate) mod spawn_orchestration;
 mod startup_error;
 mod startup_hooks_review;
 mod status;

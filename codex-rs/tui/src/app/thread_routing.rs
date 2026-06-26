@@ -946,6 +946,7 @@ impl App {
             return;
         }
 
+        let sender_thread_id = collab_sender_thread_id(notification);
         let Some(receiver_thread_ids) = collab_receiver_thread_ids(notification) else {
             return;
         };
@@ -962,6 +963,11 @@ impl App {
                 );
                 continue;
             };
+
+            if let Some(sender_thread_id) = sender_thread_id {
+                self.spawn_parent_by_thread
+                    .insert(thread_id, sender_thread_id);
+            }
 
             if self.agent_navigation.get(&thread_id).is_some() {
                 continue;

@@ -229,6 +229,12 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn show_custom_prompt_view(&mut self, view: CustomPromptView) {
+        self.bottom_pane.show_view(Box::new(view));
+        self.refresh_plan_mode_nudge();
+        self.request_redraw();
+    }
+
     pub(crate) fn no_modal_or_popup_active(&self) -> bool {
         self.bottom_pane.no_modal_or_popup_active()
     }

@@ -1926,6 +1926,30 @@ impl App {
             AppEvent::OpenPanePicker => {
                 self.open_pane_picker();
             }
+            AppEvent::OpenSpawnRolePicker => {
+                self.open_spawn_role_picker();
+            }
+            AppEvent::OpenSpawnNazgulPanePicker => {
+                self.open_spawn_nazgul_pane_picker();
+            }
+            AppEvent::BindSpawnNazgulPane { pane_id } => {
+                self.bind_spawn_nazgul_pane(pane_id);
+            }
+            AppEvent::OpenSpawnHarnessPicker { role } => {
+                self.open_spawn_harness_picker(role);
+            }
+            AppEvent::OpenSpawnModelPicker { role } => {
+                self.open_spawn_model_picker(role);
+            }
+            AppEvent::OpenSpawnTaskPrompt { role } => {
+                self.open_spawn_task_prompt(role);
+            }
+            AppEvent::SubmitSpawnTask { role, task } => {
+                self.submit_spawn_task(role, task);
+            }
+            AppEvent::OpenSpawnStatus => {
+                self.open_spawn_status();
+            }
             AppEvent::SelectUserPane { pane_id } => {
                 self.select_user_pane(pane_id);
             }

@@ -147,6 +147,33 @@ pub(crate) enum AppEvent {
     SelectAgentThread(ThreadId),
     /// Open the user-pane picker for switching Codex/Claude panes.
     OpenPanePicker,
+    /// Open the `/spawn` role picker.
+    OpenSpawnRolePicker,
+    /// Open the `/spawn` Nazgul pane-binding picker.
+    OpenSpawnNazgulPanePicker,
+    /// Bind an existing user pane as the Nazgul/root orchestration pane.
+    BindSpawnNazgulPane {
+        pane_id: String,
+    },
+    /// Open the P0 harness picker for a spawn role.
+    OpenSpawnHarnessPicker {
+        role: crate::spawn_orchestration::SpawnRole,
+    },
+    /// Open the inherited model/effort confirmation step for a spawn role.
+    OpenSpawnModelPicker {
+        role: crate::spawn_orchestration::SpawnRole,
+    },
+    /// Open the task prompt for a spawn role.
+    OpenSpawnTaskPrompt {
+        role: crate::spawn_orchestration::SpawnRole,
+    },
+    /// Submit a concrete spawn task from `/spawn` inline args or prompt entry.
+    SubmitSpawnTask {
+        role: crate::spawn_orchestration::SpawnRole,
+        task: String,
+    },
+    /// Show the current orchestration tree.
+    OpenSpawnStatus,
     /// Switch the active user pane.
     SelectUserPane {
         pane_id: String,

@@ -15,7 +15,6 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use codex_app_server_protocol::UserInput;
-use codex_protocol::ThreadId;
 use codex_vault::Vault;
 use serde::Deserialize;
 use serde::Serialize;
@@ -39,9 +38,6 @@ use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
-use crate::multi_agents::AgentPickerThreadEntry;
-use crate::multi_agents::agent_picker_status_dot_spans;
-use crate::multi_agents::format_agent_picker_item_name;
 
 pub(crate) const CODEX_MAIN_PANE_ID: &str = "codex-main";
 const CLAUDE_PANE_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(30);
@@ -3875,7 +3871,7 @@ impl App {
             });
         }
         items.push(section_item("Agent Panes"));
-        items.extend(self.agent_pane_items());
+        items.extend(self.spawn_tree_items());
 
         self.chat_widget.show_selection_view(SelectionViewParams {
             title: Some("Panes".to_string()),
@@ -4064,54 +4060,12 @@ impl App {
         }
         items
     }
-
-    fn agent_pane_items(&self) -> Vec<SelectionItem> {
-        self.agent_navigation
-            .ordered_threads()
-            .into_iter()
-            .map(|(thread_id, entry)| {
-                agent_thread_item(
-                    self.active_thread_id,
-                    self.primary_thread_id,
-                    thread_id,
-                    entry,
-                )
-            })
-            .collect()
-    }
 }
 
 fn section_item(name: &str) -> SelectionItem {
     SelectionItem {
         name: name.to_string(),
         is_disabled: true,
-        ..Default::default()
-    }
-}
-
-fn agent_thread_item(
-    active_thread_id: Option<ThreadId>,
-    primary_thread_id: Option<ThreadId>,
-    thread_id: ThreadId,
-    entry: &AgentPickerThreadEntry,
-) -> SelectionItem {
-    let is_primary = primary_thread_id == Some(thread_id);
-    let name = format_agent_picker_item_name(
-        entry.agent_nickname.as_deref(),
-        entry.agent_role.as_deref(),
-        is_primary,
-    );
-    let uuid = thread_id.to_string();
-    SelectionItem {
-        name: name.clone(),
-        name_prefix_spans: agent_picker_status_dot_spans(entry.is_closed),
-        description: Some(uuid.clone()),
-        is_current: active_thread_id == Some(thread_id),
-        actions: vec![Box::new(move |tx| {
-            tx.send(AppEvent::SelectAgentThread(thread_id));
-        })],
-        dismiss_on_select: true,
-        search_value: Some(format!("{name} {uuid}")),
         ..Default::default()
     }
 }

@@ -41,6 +41,7 @@ pub enum SlashCommand {
     Plan,
     Goal,
     Agent,
+    Spawn,
     Panes,
     Side,
     Btw,
@@ -124,6 +125,7 @@ impl SlashCommand {
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Goal => "set or view the goal for a long-running task",
             SlashCommand::Agent | SlashCommand::MultiAgents => "switch the active agent thread",
+            SlashCommand::Spawn => "orchestrate Nazgul, Troll, and Orc agent roles",
             SlashCommand::Panes => "switch Codex, Claude Code, or agent panes",
             SlashCommand::Side | SlashCommand::Btw => {
                 "start a side conversation in an ephemeral fork"
@@ -173,6 +175,7 @@ impl SlashCommand {
                 | SlashCommand::Btw
                 | SlashCommand::Resume
                 | SlashCommand::SandboxReadRoot
+                | SlashCommand::Spawn
                 | SlashCommand::Vault
         )
     }
@@ -190,6 +193,7 @@ impl SlashCommand {
                 | SlashCommand::Ide
                 | SlashCommand::Providers
                 | SlashCommand::Panes
+                | SlashCommand::Spawn
                 | SlashCommand::Vault
         )
     }
@@ -239,6 +243,7 @@ impl SlashCommand {
             | SlashCommand::Plugins
             | SlashCommand::Providers
             | SlashCommand::Panes
+            | SlashCommand::Spawn
             | SlashCommand::Title
             | SlashCommand::Statusline
             | SlashCommand::Vault

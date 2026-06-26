@@ -1205,6 +1205,57 @@ async fn slash_rename_without_existing_thread_name_starts_empty() {
 }
 
 #[tokio::test]
+async fn slash_spawn_opens_role_picker() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command(SlashCommand::Spawn);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenSpawnRolePicker));
+}
+
+#[tokio::test]
+async fn slash_spawn_status_opens_status_picker() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Spawn, "status".to_string(), Vec::new());
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenSpawnStatus));
+}
+
+#[tokio::test]
+async fn slash_spawn_role_without_task_opens_harness_picker() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Spawn, "troll".to_string(), Vec::new());
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::OpenSpawnHarnessPicker {
+            role: crate::spawn_orchestration::SpawnRole::Troll
+        })
+    );
+}
+
+#[tokio::test]
+async fn slash_spawn_role_with_task_submits_spawn_task() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Spawn,
+        "orc run the benchmark".to_string(),
+        Vec::new(),
+    );
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SubmitSpawnTask {
+            role: crate::spawn_orchestration::SpawnRole::Orc,
+            task
+        }) if task == "run the benchmark"
+    );
+}
+
+#[tokio::test]
 async fn usage_error_slash_command_is_available_from_local_recall() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
 
