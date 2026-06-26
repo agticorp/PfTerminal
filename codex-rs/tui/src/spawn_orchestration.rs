@@ -183,6 +183,9 @@ impl App {
                 .add_error_message("Nazgul is a pane binding, not a spawned worker.".to_string());
             return;
         };
+        if !self.ensure_native_spawn_surface() {
+            return;
+        }
         let model_catalog = self.chat_widget.model_catalog();
         let Some(mask) = collaboration_modes::default_mode_mask(model_catalog.as_ref())
             .or_else(|| collaboration_modes::default_mask(model_catalog.as_ref()))
@@ -299,19 +302,11 @@ impl App {
     fn spawn_role_disabled_reason(&self, role: SpawnRole) -> Option<String> {
         match role {
             SpawnRole::Nazgul => None,
-            SpawnRole::Troll => {
-                if self.claude_panes.active_claude_pane_id().is_some() {
-                    return Some(
-                        "Switch to Codex - Main or a native agent pane before spawning native agents."
-                            .to_string(),
-                    );
-                }
-                match self.current_agent_role().as_deref() {
-                    Some(TROLL_ROLE) => Some("A Troll may only spawn Orcs.".to_string()),
-                    Some(ORC_ROLE) => Some("An Orc cannot spawn child agents.".to_string()),
-                    _ => None,
-                }
-            }
+            SpawnRole::Troll => match self.current_agent_role().as_deref() {
+                Some(TROLL_ROLE) => Some("A Troll may only spawn Orcs.".to_string()),
+                Some(ORC_ROLE) => Some("An Orc cannot spawn child agents.".to_string()),
+                _ => None,
+            },
             SpawnRole::Orc => match self.current_agent_role().as_deref() {
                 Some(TROLL_ROLE) => None,
                 Some(ORC_ROLE) => Some("An Orc cannot spawn child agents.".to_string()),
@@ -328,6 +323,24 @@ impl App {
         self.agent_navigation
             .get(&thread_id)
             .and_then(|entry| entry.agent_role.clone())
+    }
+
+    fn ensure_native_spawn_surface(&mut self) -> bool {
+        if self.claude_panes.active_claude_pane_id().is_none() {
+            return true;
+        }
+        if let Err(err) = self.claude_panes.set_active_user_pane(CODEX_MAIN_PANE_ID) {
+            self.chat_widget.add_error_message(format!(
+                "Failed to switch to Codex Main for native spawn: {err}"
+            ));
+            return false;
+        }
+        self.sync_active_agent_label();
+        self.chat_widget.add_info_message(
+            "Routing native spawn through Codex Main.".to_string(),
+            Some("The bound Nazgul pane is unchanged; P0 Troll/Orc workers use the native PFTerminal agent runtime.".to_string()),
+        );
+        true
     }
 
     pub(crate) fn is_spawn_orchestration_thread(&self, thread_id: ThreadId) -> bool {
