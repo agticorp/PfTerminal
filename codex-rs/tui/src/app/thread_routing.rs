@@ -969,6 +969,19 @@ impl App {
                     .insert(thread_id, sender_thread_id);
             }
 
+            if let Some(status) = collab_receiver_status(notification, receiver_thread_id) {
+                self.spawn_status_by_thread
+                    .insert(thread_id, status.clone());
+                self.agent_navigation.set_running(
+                    thread_id,
+                    matches!(
+                        status.status,
+                        codex_app_server_protocol::CollabAgentStatus::PendingInit
+                            | codex_app_server_protocol::CollabAgentStatus::Running
+                    ),
+                );
+            }
+
             if self.agent_navigation.get(&thread_id).is_some() {
                 continue;
             }

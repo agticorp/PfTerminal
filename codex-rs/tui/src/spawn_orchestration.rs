@@ -231,19 +231,19 @@ impl App {
             ..Default::default()
         });
 
-        let trolls = self.spawn_threads_with_role(TROLL_ROLE);
+        let trolls = self.spawn_troll_threads();
         items.push(section_item("Trolls"));
         if trolls.is_empty() {
             items.push(disabled_item("No Trolls spawned yet"));
         }
         for (troll_thread_id, troll_entry) in trolls {
-            items.push(self.spawn_agent_item(troll_thread_id, troll_entry, 0));
-            let orcs = self.spawn_children_with_role(troll_thread_id, ORC_ROLE);
+            items.push(self.spawn_agent_item(troll_thread_id, troll_entry, 0, Some(TROLL_ROLE)));
+            let orcs = self.spawn_orc_children(troll_thread_id);
             if orcs.is_empty() {
                 items.push(disabled_item("  No Orcs for this Troll yet"));
             }
             for (orc_thread_id, orc_entry) in orcs {
-                items.push(self.spawn_agent_item(orc_thread_id, orc_entry, 2));
+                items.push(self.spawn_agent_item(orc_thread_id, orc_entry, 2, Some(ORC_ROLE)));
             }
         }
 
@@ -261,7 +261,7 @@ impl App {
         if !orphan_orcs.is_empty() {
             items.push(section_item("Unlinked Orcs"));
             for (thread_id, entry) in orphan_orcs {
-                items.push(self.spawn_agent_item(thread_id, entry, 0));
+                items.push(self.spawn_agent_item(thread_id, entry, 0, Some(ORC_ROLE)));
             }
         }
 
@@ -330,6 +330,20 @@ impl App {
             .and_then(|entry| entry.agent_role.clone())
     }
 
+    pub(crate) fn is_spawn_orchestration_thread(&self, thread_id: ThreadId) -> bool {
+        self.spawn_status_by_thread.contains_key(&thread_id)
+            || self.spawn_parent_by_thread.contains_key(&thread_id)
+            || self
+                .spawn_parent_by_thread
+                .values()
+                .any(|parent| *parent == thread_id)
+            || self
+                .agent_navigation
+                .get(&thread_id)
+                .and_then(|entry| entry.agent_role.as_deref())
+                .is_some_and(|role| role == TROLL_ROLE || role == ORC_ROLE)
+    }
+
     fn nazgul_pane_item(
         &self,
         pane_id: String,
@@ -374,17 +388,33 @@ impl App {
             .collect()
     }
 
-    fn spawn_children_with_role(
+    fn spawn_troll_threads(&self) -> Vec<(ThreadId, &crate::multi_agents::AgentPickerThreadEntry)> {
+        self.agent_navigation
+            .ordered_threads()
+            .into_iter()
+            .filter(|(thread_id, entry)| {
+                if entry.agent_role.as_deref() == Some(TROLL_ROLE) {
+                    return true;
+                }
+                entry.agent_role.is_none()
+                    && self
+                        .spawn_parent_by_thread
+                        .get(thread_id)
+                        .is_some_and(|parent| Some(*parent) == self.primary_thread_id)
+            })
+            .collect()
+    }
+
+    fn spawn_orc_children(
         &self,
         parent_thread_id: ThreadId,
-        role: &str,
     ) -> Vec<(ThreadId, &crate::multi_agents::AgentPickerThreadEntry)> {
         self.agent_navigation
             .ordered_threads()
             .into_iter()
             .filter(|(thread_id, entry)| {
                 self.spawn_parent_by_thread.get(thread_id) == Some(&parent_thread_id)
-                    && entry.agent_role.as_deref() == Some(role)
+                    && (entry.agent_role.as_deref() == Some(ORC_ROLE) || entry.agent_role.is_none())
             })
             .collect()
     }
@@ -394,14 +424,17 @@ impl App {
         thread_id: ThreadId,
         entry: &crate::multi_agents::AgentPickerThreadEntry,
         indent: usize,
+        fallback_role: Option<&str>,
     ) -> SelectionItem {
         let name = format_agent_picker_item_name(
             entry.agent_nickname.as_deref(),
-            entry.agent_role.as_deref(),
+            entry.agent_role.as_deref().or(fallback_role),
             self.primary_thread_id == Some(thread_id),
         );
         let prefix = " ".repeat(indent);
-        let status = if entry.is_closed {
+        let status = if let Some(status) = self.spawn_status_by_thread.get(&thread_id) {
+            spawn_status_label(status)
+        } else if entry.is_closed {
             "done"
         } else if entry.is_running {
             "running"
@@ -448,6 +481,18 @@ fn disabled_item(name: &str) -> SelectionItem {
         name: name.to_string(),
         is_disabled: true,
         ..Default::default()
+    }
+}
+
+fn spawn_status_label(status: &codex_app_server_protocol::CollabAgentState) -> &'static str {
+    match status.status {
+        codex_app_server_protocol::CollabAgentStatus::PendingInit => "pending",
+        codex_app_server_protocol::CollabAgentStatus::Running => "running",
+        codex_app_server_protocol::CollabAgentStatus::Interrupted => "interrupted",
+        codex_app_server_protocol::CollabAgentStatus::Completed => "done",
+        codex_app_server_protocol::CollabAgentStatus::Errored => "error",
+        codex_app_server_protocol::CollabAgentStatus::Shutdown => "closed",
+        codex_app_server_protocol::CollabAgentStatus::NotFound => "not found",
     }
 }
 

@@ -289,6 +289,27 @@ fn collab_sender_thread_id(notification: &ServerNotification) -> Option<ThreadId
     ThreadId::from_string(sender_thread_id).ok()
 }
 
+fn collab_receiver_status<'a>(
+    notification: &'a ServerNotification,
+    receiver_thread_id: &str,
+) -> Option<&'a codex_app_server_protocol::CollabAgentState> {
+    match notification {
+        ServerNotification::ItemStarted(notification) => match &notification.item {
+            ThreadItem::CollabAgentToolCall { agents_states, .. } => {
+                agents_states.get(receiver_thread_id)
+            }
+            _ => None,
+        },
+        ServerNotification::ItemCompleted(notification) => match &notification.item {
+            ThreadItem::CollabAgentToolCall { agents_states, .. } => {
+                agents_states.get(receiver_thread_id)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn sub_agent_activity_item(notification: &ServerNotification) -> Option<&ThreadItem> {
     match notification {
         ServerNotification::ItemStarted(notification) => match &notification.item {
@@ -590,6 +611,8 @@ pub(crate) struct App {
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     pub(crate) agent_navigation: AgentNavigationState,
     pub(crate) spawn_parent_by_thread: HashMap<ThreadId, ThreadId>,
+    pub(crate) spawn_status_by_thread:
+        HashMap<ThreadId, codex_app_server_protocol::CollabAgentState>,
     pub(crate) spawn_nazgul_pane_id: Option<String>,
     side_threads: HashMap<ThreadId, SideThreadState>,
     pub(crate) claude_panes: crate::claude_panes::ClaudePaneRegistry,
@@ -1067,6 +1090,7 @@ See the PFTerminal keymap documentation for supported actions and examples."
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             spawn_parent_by_thread: HashMap::new(),
+            spawn_status_by_thread: HashMap::new(),
             spawn_nazgul_pane_id: None,
             side_threads: HashMap::new(),
             claude_panes: crate::claude_panes::ClaudePaneRegistry::new(),

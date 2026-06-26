@@ -478,6 +478,7 @@ impl App {
         self.thread_event_channels.clear();
         self.agent_navigation.clear();
         self.spawn_parent_by_thread.clear();
+        self.spawn_status_by_thread.clear();
         self.side_threads.clear();
         self.active_thread_id = None;
         self.active_thread_rx = None;

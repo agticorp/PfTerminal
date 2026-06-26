@@ -141,6 +141,8 @@ impl App {
             _ => {}
         }
 
+        self.cache_collab_receiver_threads_for_notification(&notification);
+
         match server_notification_thread_target(&notification) {
             ServerNotificationThreadTarget::Thread(thread_id) => {
                 let result = if self.primary_thread_id == Some(thread_id)

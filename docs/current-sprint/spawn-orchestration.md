@@ -1,7 +1,7 @@
 # Scoped `/spawn` Orchestration
 
-Status: P0 runtime and TUI implementation landed locally; live acceptance
-demonstration still pending.
+Status: P0 runtime and TUI implementation landed locally; live Troll -> Orc
+acceptance passed in the installed `pfterminal`.
 
 This is intentionally smaller than the full Nazgul orchestration spec. The
 full spec includes Balrog planning, Grimoire model memory, Wyverns, Golems,
@@ -56,17 +56,20 @@ as isolated tabs with no visible chain of command.
   role picker, Nazgul binding lists `Codex - Main`, binding reports "No worker
   was spawned", Troll shows Harness -> Model/Effort -> Task, and
   `/spawn status` renders the Nazgul root plus Troll section.
+- [x] Ran a live Troll -> Orc workflow in the installed `pfterminal`: `/spawn
+  troll` created a Troll, the Troll spawned one Orc, the Orc ran `pwd`, the
+  Troll waited for and reviewed the Orc result, and the Nazgul/root pane saw
+  the final Troll report.
+- [x] Fixed `/spawn status` persistence after completion by caching collab
+  receiver statuses and retaining completed spawn hierarchy rows after
+  side-thread cleanup.
 
 ## To Do
 
-- [ ] Run the live acceptance walkthrough in a fresh PFTerminal session.
-- [ ] Verify that the `/spawn` wizard-created Troll performs the native
-  `spawn_agent` call, not just a shallow explanatory response.
-- [ ] Verify that a Troll-spawned Orc can finish real work and that the Troll
-  can see the final Orc status.
-- [ ] Verify that the Nazgul/root pane sees the Troll and nested Orc final
-  status after completion.
-- [ ] Add broader end-to-end coverage once the live workflow is confirmed.
+- [ ] Add broader end-to-end coverage for larger realistic tasks: code review,
+  mock implementation, and benchmark-table workflows.
+- [ ] Add a richer `/spawn status` detail view with task summaries, final
+  reports, and audit/artifact links.
 
 ## Source Spec
 
@@ -566,17 +569,21 @@ track work, and report completion without isolated agent panes.
   such as `Codex - Main` and Claude Code panes, and binds the selected pane as
   the active Nazgul root.
 - [x] Selecting `Nazgul` never creates a spawned worker.
-- [ ] From the Nazgul pane, the user can spawn a Troll.
-- [ ] A Troll can spawn an Orc and wait for it.
-- [ ] The Nazgul view shows the Troll and the nested Orc.
-- [ ] The Troll view shows its Orcs and their statuses.
-- [ ] When an Orc completes, the Troll can see that it is done.
-- [ ] When a Troll completes, the Nazgul can see that it is done.
+- [x] From the Nazgul pane, the user can spawn a Troll.
+- [x] A Troll can spawn an Orc and wait for it.
+- [x] The Nazgul view shows the Troll and the nested Orc.
+- [x] The Troll view shows its Orcs and their statuses.
+- [x] When an Orc completes, the Troll can see that it is done.
+- [x] When a Troll completes, the Nazgul can see that it is done.
 - [x] Invalid hierarchy attempts are rejected with clear errors in the native
   spawn handler tests.
 - [x] Existing `/panes` behavior compiles with hierarchical agent rendering.
 - [x] Existing provider-compatible subagent tool visibility stays green for
   third-party providers.
 
-The unchecked criteria require a live PFTerminal walkthrough, not just unit
-tests. They should be checked only after the fresh-session workflow is run.
+The live acceptance walkthrough used the installed `pfterminal` and the task
+`/spawn troll Spawn exactly one Orc to run pwd in the current repository and
+report the output. Wait for the Orc to finish, review the result, and summarize
+the evidence.` The spawned Troll reported that it spawned one Orc, the Orc ran
+`pwd` and returned `/home/postfiat/repos/PfTerminal`, and `/spawn status`
+showed the completed Troll with the nested completed Orc after the turn ended.

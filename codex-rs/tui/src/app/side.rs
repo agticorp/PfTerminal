@@ -390,8 +390,19 @@ impl App {
         self.abort_thread_event_listener(thread_id);
         self.thread_event_channels.remove(&thread_id);
         self.side_threads.remove(&thread_id);
-        self.agent_navigation.remove(thread_id);
-        self.spawn_parent_by_thread.remove(&thread_id);
+        if self.is_spawn_orchestration_thread(thread_id) {
+            self.agent_navigation.mark_closed(thread_id);
+            self.spawn_status_by_thread
+                .entry(thread_id)
+                .or_insert_with(|| codex_app_server_protocol::CollabAgentState {
+                    status: codex_app_server_protocol::CollabAgentStatus::Shutdown,
+                    message: None,
+                });
+        } else {
+            self.agent_navigation.remove(thread_id);
+            self.spawn_parent_by_thread.remove(&thread_id);
+            self.spawn_status_by_thread.remove(&thread_id);
+        }
         if self.active_thread_id == Some(thread_id) {
             self.clear_active_thread().await;
         } else {
