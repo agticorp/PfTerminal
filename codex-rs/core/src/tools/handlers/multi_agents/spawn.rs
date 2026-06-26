@@ -9,7 +9,12 @@ use crate::agent::role::apply_role_to_config;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v1;
 use crate::turn_timing::now_unix_timestamp_ms;
+use codex_protocol::protocol::SessionSource;
 use codex_tools::ToolSpec;
+
+const NAZGUL_ROLE_NAME: &str = "nazgul";
+const TROLL_ROLE_NAME: &str = "troll";
+const ORC_ROLE_NAME: &str = "orc";
 
 #[derive(Default)]
 pub(crate) struct Handler {
@@ -65,6 +70,7 @@ async fn handle_spawn_agent(
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
     let max_depth = turn.config.agent_max_depth;
+    validate_spawn_role_graph(&session_source, role_name, child_depth)?;
     if exceeds_thread_spawn_depth_limit(child_depth, max_depth) {
         return Err(FunctionCallError::RespondToModel(
             "Agent depth limit reached. Solve the task yourself.".to_string(),
@@ -208,6 +214,60 @@ async fn handle_spawn_agent(
         agent_id: new_thread_id.to_string(),
         nickname,
     })
+}
+
+fn validate_spawn_role_graph(
+    parent_session_source: &SessionSource,
+    requested_role: Option<&str>,
+    child_depth: i32,
+) -> Result<(), FunctionCallError> {
+    let parent_role = parent_session_source
+        .get_agent_role()
+        .map(|role| role.trim().to_ascii_lowercase())
+        .filter(|role| !role.is_empty());
+    let target_role = requested_role
+        .unwrap_or(DEFAULT_ROLE_NAME)
+        .trim()
+        .to_ascii_lowercase();
+
+    if target_role == NAZGUL_ROLE_NAME {
+        return Err(FunctionCallError::RespondToModel(
+            "Nazgul is a pane binding, not a spawned worker. Use /spawn to bind an existing pane as Nazgul.".to_string(),
+        ));
+    }
+
+    if parent_role.as_deref() == Some(ORC_ROLE_NAME) {
+        return Err(FunctionCallError::RespondToModel(
+            "Orcs cannot spawn child agents.".to_string(),
+        ));
+    }
+
+    if parent_role.as_deref() == Some(TROLL_ROLE_NAME) && target_role != ORC_ROLE_NAME {
+        return Err(FunctionCallError::RespondToModel(
+            "Trolls may only spawn Orc agents.".to_string(),
+        ));
+    }
+
+    if target_role == TROLL_ROLE_NAME && child_depth != 1 {
+        return Err(FunctionCallError::RespondToModel(
+            "Trolls must be spawned directly by the Nazgul/root pane.".to_string(),
+        ));
+    }
+
+    if target_role == ORC_ROLE_NAME {
+        if parent_role.as_deref() != Some(TROLL_ROLE_NAME) {
+            return Err(FunctionCallError::RespondToModel(
+                "Orcs must be spawned by a Troll supervisor.".to_string(),
+            ));
+        }
+        if child_depth != 2 {
+            return Err(FunctionCallError::RespondToModel(
+                "Orcs must run at depth 2 under a Troll supervisor.".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 impl CoreToolRuntime for Handler {

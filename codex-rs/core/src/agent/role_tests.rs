@@ -558,9 +558,17 @@ fn spawn_tool_spec_marks_role_locked_service_tier() {
 }
 
 #[test]
-fn built_in_config_file_contents_resolves_explorer_only() {
+fn built_in_config_file_contents_resolves_known_roles() {
     assert_eq!(
         built_in::config_file_contents(Path::new("missing.toml")),
         None
+    );
+    assert!(
+        built_in::config_file_contents(Path::new("troll.toml"))
+            .is_some_and(|contents| contents.contains("You are a Troll"))
+    );
+    assert!(
+        built_in::config_file_contents(Path::new("orc.toml"))
+            .is_some_and(|contents| contents.contains("You are an Orc"))
     );
 }

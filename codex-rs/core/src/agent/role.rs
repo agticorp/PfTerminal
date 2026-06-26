@@ -346,6 +346,24 @@ Rules:
                         nickname_candidates: None,
                     }
                 ),
+                (
+                    "troll".to_string(),
+                    AgentRoleConfig {
+                        description: Some(r#"Use `troll` for supervisory review and coordination.
+Trolls report to a Nazgul parent, may spawn Orc executors, must wait for Orcs to finish before claiming completion, and must critically review Orc output before reporting final results."#.to_string()),
+                        config_file: Some("troll.toml".to_string().parse().unwrap_or_default()),
+                        nickname_candidates: None,
+                    }
+                ),
+                (
+                    "orc".to_string(),
+                    AgentRoleConfig {
+                        description: Some(r#"Use `orc` for direct execution work under a supervising Troll.
+Orcs produce concrete evidence such as changed files, tests, benchmark output, or findings, and must not spawn child agents."#.to_string()),
+                        config_file: Some("orc.toml".to_string().parse().unwrap_or_default()),
+                        nickname_candidates: None,
+                    }
+                ),
                 // Awaiter is temp removed
 //                 (
 //                     "awaiter".to_string(),
@@ -373,9 +391,13 @@ Rules:
     pub(super) fn config_file_contents(path: &Path) -> Option<&'static str> {
         const EXPLORER: &str = include_str!("builtins/explorer.toml");
         const AWAITER: &str = include_str!("builtins/awaiter.toml");
+        const TROLL: &str = include_str!("builtins/troll.toml");
+        const ORC: &str = include_str!("builtins/orc.toml");
         match path.to_str()? {
             "explorer.toml" => Some(EXPLORER),
             "awaiter.toml" => Some(AWAITER),
+            "troll.toml" => Some(TROLL),
+            "orc.toml" => Some(ORC),
             _ => None,
         }
     }

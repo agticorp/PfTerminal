@@ -2550,6 +2550,226 @@ async fn spawn_agent_allows_depth_up_to_configured_max_depth() {
 }
 
 #[tokio::test]
+async fn spawn_agent_allows_root_to_spawn_troll() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "supervise this implementation",
+            "agent_type": "troll"
+        })),
+    );
+    let output = SpawnAgentHandler::default()
+        .handle(invocation)
+        .await
+        .expect("root should spawn troll");
+    let (content, success) = expect_text_output(output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let agent_id = parse_agent_id(&result.agent_id);
+    let snapshot = manager
+        .get_thread(agent_id)
+        .await
+        .expect("spawned troll should exist")
+        .config_snapshot()
+        .await;
+    assert_eq!(
+        snapshot.session_source.get_agent_role().as_deref(),
+        Some("troll")
+    );
+    assert_eq!(success, Some(true));
+}
+
+#[test]
+fn spawn_agent_allows_troll_to_spawn_orc() {
+    std::thread::Builder::new()
+        .name("spawn_agent_allows_troll_to_spawn_orc".to_string())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(async {
+                #[derive(Debug, Deserialize)]
+                struct SpawnAgentResult {
+                    agent_id: String,
+                }
+
+                let (mut session, turn) = make_session_and_context().await;
+                let manager = thread_manager();
+                session.services.agent_control = manager.agent_control();
+
+                let troll_output = SpawnAgentHandler::default()
+                    .handle(invocation(
+                        Arc::new(session),
+                        Arc::new(turn),
+                        "spawn_agent",
+                        function_payload(json!({
+                            "message": "supervise this implementation",
+                            "agent_type": "troll"
+                        })),
+                    ))
+                    .await
+                    .expect("root should spawn troll");
+                let (content, _) = expect_text_output(troll_output);
+                let troll_result: SpawnAgentResult =
+                    serde_json::from_str(&content).expect("spawn_agent result should be json");
+                let troll_id = parse_agent_id(&troll_result.agent_id);
+                let troll_snapshot = manager
+                    .get_thread(troll_id)
+                    .await
+                    .expect("spawned troll should exist")
+                    .config_snapshot()
+                    .await;
+
+                assert_eq!(
+                    troll_snapshot.session_source.get_agent_role().as_deref(),
+                    Some("troll")
+                );
+                let troll_thread = manager
+                    .get_thread(troll_id)
+                    .await
+                    .expect("spawned troll should exist");
+                let troll_turn = troll_thread.codex.session.new_default_turn().await;
+                let orc_output = SpawnAgentHandler::default()
+                    .handle(invocation(
+                        Arc::clone(&troll_thread.codex.session),
+                        troll_turn,
+                        "spawn_agent",
+                        function_payload(json!({
+                            "message": "implement the assigned fix and report evidence",
+                            "agent_type": "orc"
+                        })),
+                    ))
+                    .await
+                    .expect("troll should spawn orc");
+                let (content, success) = expect_text_output(orc_output);
+                let orc_result: SpawnAgentResult =
+                    serde_json::from_str(&content).expect("spawn_agent result should be json");
+                let orc_id = parse_agent_id(&orc_result.agent_id);
+                let orc_snapshot = manager
+                    .get_thread(orc_id)
+                    .await
+                    .expect("spawned orc should exist")
+                    .config_snapshot()
+                    .await;
+                assert_eq!(
+                    orc_snapshot.session_source.get_agent_role().as_deref(),
+                    Some("orc")
+                );
+                assert_eq!(success, Some(true));
+            });
+        })
+        .expect("test thread should spawn")
+        .join()
+        .expect("test thread should finish");
+}
+
+#[tokio::test]
+async fn spawn_agent_rejects_invalid_spawn_orchestration_graphs() {
+    let (mut session, turn) = make_session_and_context().await;
+    session.services.agent_control = thread_manager().agent_control();
+    let Err(root_orc_err) = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({"message": "do work", "agent_type": "orc"})),
+        ))
+        .await
+    else {
+        panic!("root should not spawn orc directly");
+    };
+    assert_eq!(
+        root_orc_err,
+        FunctionCallError::RespondToModel(
+            "Orcs must be spawned by a Troll supervisor.".to_string()
+        )
+    );
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    session.services.agent_control = thread_manager().agent_control();
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: session.thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: Some("troll".to_string()),
+    });
+    let Err(troll_troll_err) = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({"message": "supervise work", "agent_type": "troll"})),
+        ))
+        .await
+    else {
+        panic!("troll should not spawn troll");
+    };
+    assert_eq!(
+        troll_troll_err,
+        FunctionCallError::RespondToModel("Trolls may only spawn Orc agents.".to_string())
+    );
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    session.services.agent_control = thread_manager().agent_control();
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: session.thread_id,
+        depth: 2,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: Some("orc".to_string()),
+    });
+    let Err(orc_spawn_err) = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({"message": "delegate", "agent_type": "worker"})),
+        ))
+        .await
+    else {
+        panic!("orc should not spawn anything");
+    };
+    assert_eq!(
+        orc_spawn_err,
+        FunctionCallError::RespondToModel("Orcs cannot spawn child agents.".to_string())
+    );
+
+    let (mut session, turn) = make_session_and_context().await;
+    session.services.agent_control = thread_manager().agent_control();
+    let Err(nazgul_worker_err) = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({"message": "bind pane", "agent_type": "nazgul"})),
+        ))
+        .await
+    else {
+        panic!("nazgul should not be spawned as worker");
+    };
+    assert_eq!(
+        nazgul_worker_err,
+        FunctionCallError::RespondToModel(
+            "Nazgul is a pane binding, not a spawned worker. Use /spawn to bind an existing pane as Nazgul.".to_string()
+        )
+    );
+}
+
+#[tokio::test]
 async fn multi_agent_v2_spawn_agent_ignores_configured_max_depth() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
