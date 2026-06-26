@@ -19,6 +19,7 @@ credentials, created automatically on login/startup and usable through
 | Hammer reduction | Current sprint study compares PFTerminal/Codex, OpenCode, Hermes Agent, Kilo Code, and Cline to reduce repeated large provider requests, 429 loops, and context bloat. | [Hammer Reduction Process](hammer-reduction-process.md) |
 | Tool-call runaway remedy | Live worker logs show malformed oversized `structured_write` calls looping through normal follow-up handling. The remedy is a non-retriable malformed-tool boundary plus bounded/chunked write mechanics. | [Tool Call Runaway Remedy](tool-call-runaway-remedy.md) |
 | Subagents | Current Codex supports explicit subagent workflows, but PFTerminal must make the tool exposure reliable and diagnosable across third-party provider sessions. | [PFTerminal Subagents](subagents.md) |
+| Spawn orchestration | Scope down `docs/nazgul_spec.md` into `/spawn`: a user-facing creation flow for Troll and Orc roles with explicit model, harness, parent/child status, and upward reporting to the Nazgul pane. | [Spawn Orchestration](spawn-orchestration.md) |
 | Codex account login | OpenAI Codex account login should appear as a provider credential, use device auth from `/providers`, expose only GPT-5.5, and avoid wiping provider vault keys on default logout. | [Codex Account Login](codex-account-login.md) |
 | Claude headless panes | Ambient `/panes` parity workflow suite passed after removing the hidden local tool-call ceiling; non-Ambient profiles remain experimental until they pass the same suite. | [Implementation Note](claude-headless-panes.md), [Completion Spec](claude-code-integration-completion-spec.md) |
 
@@ -40,11 +41,14 @@ credentials, created automatically on login/startup and usable through
    structural fix needed before editing the runtime loop.
 7. Read [PFTerminal Subagents](subagents.md) for the plan to make basic
    subagent delegation visible, provider-compatible, and debuggable.
-8. Read [Codex Account Login](codex-account-login.md) for the plan to
+8. Read [Spawn Orchestration](spawn-orchestration.md) for the scoped `/spawn`
+   plan that turns the Nazgul/Troll/Orc hierarchy into a concrete
+   parent-aware workflow.
+9. Read [Codex Account Login](codex-account-login.md) for the plan to
    reintegrate OpenAI Codex account auth into `/providers` and Coding Plans.
-9. Read [Claude Headless Panes](claude-headless-panes.md) for the current
+10. Read [Claude Headless Panes](claude-headless-panes.md) for the current
    Ambient-backed `/panes` implementation.
-10. Read [Claude Code Completion Spec](claude-code-integration-completion-spec.md)
+11. Read [Claude Code Completion Spec](claude-code-integration-completion-spec.md)
    for the actual completion bar before calling the Claude Code integration
    done.
 
