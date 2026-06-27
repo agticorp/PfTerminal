@@ -1,9 +1,6 @@
 # `/spawn` Orchestration Acceptance Criteria
 
-Status: live persistent-pane orchestration is passing on the GLM/Vercel path;
-the exact GPT-5.5 Orc gate remains blocked by missing PFTerminal OpenAI auth;
-known limitation: native Codex Troll cannot dispatch to Claude-backed Orc (see
-Known Limitation section).
+Status: live persistent-pane orchestration is passing on the GLM/Vercel path; the exact GPT-5.5 Orc gate remains blocked by missing PFTerminal OpenAI auth; known limitation: native Codex Troll cannot dispatch to Claude-backed Orc (see Known Limitation section).
 
 Current live evidence:
 
