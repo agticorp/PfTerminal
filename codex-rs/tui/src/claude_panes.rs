@@ -311,6 +311,8 @@ struct ClaudePaneLiveTurn {
     current: String,
     phase: String,
     thinking_tokens: Option<String>,
+    assistant_commentary_buffer: String,
+    assistant_blurbs: Vec<String>,
     reasoning_blurbs: Vec<String>,
     tool_blurbs: Vec<String>,
     assistant_dispatch_buffer: String,
@@ -330,6 +332,8 @@ impl ClaudePaneLiveTurn {
             current: "starting Claude".to_string(),
             phase: "starting".to_string(),
             thinking_tokens: None,
+            assistant_commentary_buffer: String::new(),
+            assistant_blurbs: Vec::new(),
             reasoning_blurbs: Vec::new(),
             tool_blurbs: Vec::new(),
             assistant_dispatch_buffer: String::new(),
@@ -341,6 +345,18 @@ impl ClaudePaneLiveTurn {
         self.elapsed_ms = progress.elapsed_ms;
         self.phase = progress.phase.clone();
         match progress.phase.as_str() {
+            "assistant-text" => {
+                if let Some(delta) = progress.assistant_text_delta.as_deref() {
+                    self.assistant_commentary_buffer.push_str(delta);
+                    self.assistant_blurbs =
+                        assistant_update_blurbs_from_buffer(&self.assistant_commentary_buffer);
+                }
+                if let Some(update) = self.assistant_blurbs.last() {
+                    self.current = format!("Claude: {update}");
+                } else if self.current.trim().is_empty() {
+                    self.current = "Claude is responding".to_string();
+                }
+            }
             "tool-call" => {
                 let tool = tool_blurb_from_progress(progress);
                 self.current = tool.clone();
@@ -385,6 +401,17 @@ impl ClaudePaneLiveTurn {
     fn display(&self) -> ClaudePaneLiveStatus {
         let header = format!("Claude running · {}", format_elapsed_ms(self.elapsed_ms));
         let mut lines = vec![format!("Current: {}", self.current)];
+        if !self.assistant_blurbs.is_empty() {
+            lines.push("Updates:".to_string());
+            let hidden = self.assistant_blurbs.len().saturating_sub(4);
+            if hidden > 0 {
+                lines.push(format!("  +{hidden} earlier"));
+            }
+            let visible_start = self.assistant_blurbs.len().saturating_sub(4);
+            for update in self.assistant_blurbs.iter().skip(visible_start) {
+                lines.push(format!("  {update}"));
+            }
+        }
         if self.thinking_tokens.is_some() || !self.reasoning_blurbs.is_empty() {
             lines.push("Reasoning:".to_string());
             if let Some(thinking_tokens) = &self.thinking_tokens {
@@ -408,7 +435,7 @@ impl ClaudePaneLiveTurn {
             let visible_start = self.tool_blurbs.len().saturating_sub(5);
             let all_done = matches!(
                 self.phase.as_str(),
-                "assistant-result" | "error" | "reasoning" | "reasoning-tokens"
+                "assistant-result" | "assistant-text" | "error" | "reasoning" | "reasoning-tokens"
             );
             for (index, tool) in self.tool_blurbs.iter().enumerate().skip(visible_start) {
                 let is_last = index + 1 == self.tool_blurbs.len();
@@ -3955,14 +3982,78 @@ fn collect_tool_events(value: &Value, tool_events: &mut Vec<ClaudePaneToolEvent>
 
 const TOOL_PREVIEW_MAX_CHARS: usize = 120;
 const REASONING_PREVIEW_MAX_CHARS: usize = 240;
+const ASSISTANT_UPDATE_MAX_CHARS: usize = 220;
 const CLAUDE_TOOL_CALL_PREFIX: &str = "Claude tool call: ";
 const CLAUDE_REASONING_PREFIX: &str = "Claude reasoning: ";
+const SEND_TASK_FENCE_OPEN_MARKER: &str = "```pfterminal-send-task";
+const SEND_TASK_FENCE_CLOSE_MARKER: &str = "```";
+const SEND_TASK_XML_OPEN_MARKER: &str = "<pfterminal_send_task";
+const SEND_TASK_XML_CLOSE_MARKER: &str = "</pfterminal_send_task>";
 
 fn summarize_reasoning_text(text: &str) -> String {
     truncate_for_display(
         &collapse_whitespace(text.trim()),
         REASONING_PREVIEW_MAX_CHARS,
     )
+}
+
+fn assistant_update_blurbs_from_buffer(buffer: &str) -> Vec<String> {
+    let stable_text = strip_incomplete_spawn_dispatch_tail(buffer);
+    let (visible, _) = crate::spawn_orchestration::extract_spawn_task_dispatches(stable_text);
+    let mut blurbs = Vec::new();
+    let mut paragraph = String::new();
+
+    for raw_line in visible.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            push_assistant_update_blurb(&mut blurbs, &mut paragraph);
+            continue;
+        }
+        if line.starts_with("```") {
+            continue;
+        }
+        if !paragraph.is_empty() {
+            paragraph.push(' ');
+        }
+        paragraph.push_str(line);
+    }
+    push_assistant_update_blurb(&mut blurbs, &mut paragraph);
+    blurbs
+}
+
+fn push_assistant_update_blurb(blurbs: &mut Vec<String>, paragraph: &mut String) {
+    let compact = collapse_whitespace(paragraph.trim());
+    paragraph.clear();
+    if compact.is_empty() {
+        return;
+    }
+    let chars = compact.chars().collect::<Vec<_>>();
+    for chunk in chars.chunks(ASSISTANT_UPDATE_MAX_CHARS) {
+        let blurb = chunk.iter().collect::<String>();
+        if blurbs.last() != Some(&blurb) {
+            blurbs.push(blurb);
+        }
+    }
+}
+
+fn strip_incomplete_spawn_dispatch_tail(text: &str) -> &str {
+    let mut end = text.len();
+    if let Some(index) = text.rfind(SEND_TASK_FENCE_OPEN_MARKER) {
+        let tail = &text[index..];
+        if !tail
+            .get(SEND_TASK_FENCE_OPEN_MARKER.len()..)
+            .is_some_and(|rest| rest.contains(SEND_TASK_FENCE_CLOSE_MARKER))
+        {
+            end = end.min(index);
+        }
+    }
+    if let Some(index) = text.rfind(SEND_TASK_XML_OPEN_MARKER) {
+        let tail = &text[index..];
+        if !tail.contains(SEND_TASK_XML_CLOSE_MARKER) {
+            end = end.min(index);
+        }
+    }
+    &text[..end]
 }
 
 fn summarize_tool_call_input(name: &str, input: &Value) -> String {
@@ -5000,9 +5091,6 @@ impl App {
             if !dispatches.is_empty() {
                 self.dispatch_spawn_task_blocks(&progress.pane_id, dispatches);
             }
-            if progress.phase == "assistant-text" {
-                return;
-            }
         }
         if self.claude_panes.active_user_pane_id() != progress.pane_id {
             return;
@@ -5537,6 +5625,84 @@ mod tests {
             "```pfterminal-send-task\ntarget: Snaga\ntask:\nbuild site\n```",
         );
         assert!(duplicate.is_empty());
+    }
+
+    #[test]
+    fn live_status_panel_tracks_assistant_commentary_without_dispatch_payload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut registry = ClaudePaneRegistry::new();
+        let pane_id = registry
+            .create_pane(
+                ClaudeProviderProfileKind::ClaudePlan,
+                std::env::current_dir().expect("cwd"),
+                dir.path(),
+            )
+            .expect("pane");
+        let artifact_path = dir.path().join("turn-0001.jsonl");
+        let audit_path = dir.path().join("turn-0001.audit.json");
+
+        let commentary = ClaudePaneTurnProgress {
+            pane_id: pane_id.clone(),
+            phase: "assistant-text".to_string(),
+            summary: "Claude assistant text.".to_string(),
+            assistant_text_delta: Some(
+                "Let me trace the allow flags and wrap_owned relationship.".to_string(),
+            ),
+            hint: None,
+            elapsed_ms: 25_000,
+            artifact_path: artifact_path.clone(),
+            audit_path: audit_path.clone(),
+        };
+        let status = registry.update_live_progress(&commentary).expect("status");
+        let details = status.details.expect("details");
+        assert!(details.contains(
+            "Current: Claude: Let me trace the allow flags and wrap_owned relationship."
+        ));
+        assert!(details.contains("Updates:"));
+        assert!(details.contains("Let me trace the allow flags and wrap_owned relationship."));
+        assert!(!details.contains("artifact:"));
+        assert!(!details.contains("audit:"));
+
+        let partial_dispatch = ClaudePaneTurnProgress {
+            pane_id: pane_id.clone(),
+            phase: "assistant-text".to_string(),
+            summary: "Claude assistant text.".to_string(),
+            assistant_text_delta: Some(
+                "\nDispatching to Snaga.\n```pfterminal-send-task\ntarget: Snaga\n".to_string(),
+            ),
+            hint: None,
+            elapsed_ms: 30_000,
+            artifact_path: artifact_path.clone(),
+            audit_path: audit_path.clone(),
+        };
+        let status = registry
+            .update_live_progress(&partial_dispatch)
+            .expect("partial dispatch status");
+        let details = status.details.expect("details");
+        assert!(details.contains("Dispatching to Snaga."));
+        assert!(!details.contains("pfterminal-send-task"));
+        assert!(!details.contains("target: Snaga"));
+
+        let complete_dispatch = ClaudePaneTurnProgress {
+            pane_id,
+            phase: "assistant-text".to_string(),
+            summary: "Claude assistant text.".to_string(),
+            assistant_text_delta: Some(
+                "task:\nbuild site\n```\nBack to reviewing the result.".to_string(),
+            ),
+            hint: None,
+            elapsed_ms: 35_000,
+            artifact_path,
+            audit_path,
+        };
+        let status = registry
+            .update_live_progress(&complete_dispatch)
+            .expect("complete dispatch status");
+        let details = status.details.expect("details");
+        assert!(details.contains("Back to reviewing the result."));
+        assert!(!details.contains("pfterminal-send-task"));
+        assert!(!details.contains("target: Snaga"));
+        assert!(!details.contains("build site"));
     }
 
     #[test]
