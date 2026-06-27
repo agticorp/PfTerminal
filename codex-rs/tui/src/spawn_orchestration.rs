@@ -642,13 +642,37 @@ impl App {
                     Arc::new(crate::history_cell::new_info_event(summary, hint)),
                 );
             }
+            if !self.claude_panes.claude_pane_is_running(parent_pane_id) {
+                let trigger_prompt = format!(
+                    "A child pane has reported back. Review the child report below and act on it immediately — triage, dispatch follow-up work, or acknowledge. Do not wait for Sauron to prompt you.\n\n{report}"
+                );
+                self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
+                    pane_id: parent_pane_id.to_string(),
+                    task: trigger_prompt,
+                });
+            }
             return;
         }
-        if let Some(parent_thread_id) = node_id_thread(parent_node_id)
-            && self.active_thread_id == Some(parent_thread_id)
-            && self.claude_panes.active_user_pane_id() == CODEX_MAIN_PANE_ID
-        {
-            self.chat_widget.add_info_message(summary, hint);
+        if let Some(parent_thread_id) = node_id_thread(parent_node_id) {
+            if self.active_thread_id == Some(parent_thread_id)
+                && self.claude_panes.active_user_pane_id() == CODEX_MAIN_PANE_ID
+            {
+                self.chat_widget.add_info_message(summary, hint);
+            }
+            let is_running = self
+                .agent_navigation
+                .get(&parent_thread_id)
+                .map(|e| e.is_running)
+                .unwrap_or(false);
+            if !is_running {
+                let trigger_prompt = format!(
+                    "A child pane has reported back. Review the child report below and act on it immediately — triage, dispatch follow-up work, or acknowledge. Do not wait for Sauron to prompt you.\n\n{report}"
+                );
+                self.app_event_tx.send(AppEvent::SubmitSpawnAgentTask {
+                    thread_id: parent_thread_id,
+                    task: trigger_prompt,
+                });
+            }
         }
     }
 
