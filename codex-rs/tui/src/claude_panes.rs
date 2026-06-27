@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::io::Write as _;
 use std::net::SocketAddr;
 use std::net::TcpListener as StdTcpListener;
@@ -15,6 +16,12 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use codex_app_server_protocol::UserInput;
+use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
+use codex_model_provider_info::BASETEN_DEFAULT_MODEL;
+use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
+use codex_model_provider_info::VERCEL_DEFAULT_MODEL;
+use codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL;
+use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_vault::Vault;
 use serde::Deserialize;
 use serde::Serialize;
@@ -24,11 +31,13 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::net::TcpListener;
+use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::sync::OwnedMutexGuard;
 use tokio::time::MissedTickBehavior;
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::app::App;
@@ -38,6 +47,9 @@ use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+use crate::chatwidget::ChatWidget;
+use crate::spawn_orchestration::SpawnRole;
+use crate::tui;
 
 pub(crate) const CODEX_MAIN_PANE_ID: &str = "codex-main";
 const CLAUDE_PANE_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(30);
@@ -51,6 +63,8 @@ pub(crate) enum ClaudeProviderProfileKind {
     ZaiGlm52,
     BasetenGlm52,
     OpenRouterGlm52,
+    VercelGlm52,
+    VercelGlm52Fast,
 }
 
 impl ClaudeProviderProfileKind {
@@ -116,6 +130,30 @@ impl ClaudeProviderProfileKind {
                 uses_bare_mode: true,
                 transport: ClaudeProviderTransport::DirectAnthropic,
             },
+            Self::VercelGlm52 => ClaudeProviderProfile {
+                kind: self,
+                title: "Claude Code - GLM 5.2 Vercel",
+                description: "Use Vercel AI Gateway's Anthropic-compatible Claude Code route with the Vercel vault key.",
+                claude_model: "opus",
+                provider_model: "zai/glm-5.2",
+                small_model: "zai/glm-5.2-fast",
+                base_url: Some("https://ai-gateway.vercel.sh"),
+                vault_label: Some("provider/ai_gateway_api_key"),
+                uses_bare_mode: true,
+                transport: ClaudeProviderTransport::AnthropicPassthroughBridge,
+            },
+            Self::VercelGlm52Fast => ClaudeProviderProfile {
+                kind: self,
+                title: "Claude Code - GLM 5.2 Fast Vercel",
+                description: "Use Vercel AI Gateway's fast GLM 5.2 route with the Vercel vault key.",
+                claude_model: "opus",
+                provider_model: "zai/glm-5.2-fast",
+                small_model: "zai/glm-5.2-fast",
+                base_url: Some("https://ai-gateway.vercel.sh"),
+                vault_label: Some("provider/ai_gateway_api_key"),
+                uses_bare_mode: true,
+                transport: ClaudeProviderTransport::AnthropicPassthroughBridge,
+            },
         }
     }
 
@@ -128,12 +166,26 @@ impl ClaudeProviderProfileKind {
             .to_string()
     }
 
+    pub(crate) fn native_codex_model(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudePlan => None,
+            Self::AmbientGlm52 => Some(AMBIENT_DEFAULT_MODEL),
+            Self::ZaiGlm52 => Some(ZAI_DEFAULT_MODEL),
+            Self::BasetenGlm52 => Some(BASETEN_DEFAULT_MODEL),
+            Self::OpenRouterGlm52 => Some(OPENROUTER_DEFAULT_MODEL),
+            Self::VercelGlm52 => Some(VERCEL_DEFAULT_MODEL),
+            Self::VercelGlm52Fast => Some(VERCEL_GLM_5_2_FAST_MODEL),
+        }
+    }
+
     pub(crate) fn creation_options() -> &'static [Self] {
         &[
             Self::AmbientGlm52,
             Self::ZaiGlm52,
             Self::BasetenGlm52,
             Self::OpenRouterGlm52,
+            Self::VercelGlm52,
+            Self::VercelGlm52Fast,
             Self::ClaudePlan,
         ]
     }
@@ -143,6 +195,7 @@ impl ClaudeProviderProfileKind {
 pub(crate) enum ClaudeProviderTransport {
     DirectAnthropic,
     AmbientChatBridge,
+    AnthropicPassthroughBridge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,16 +224,18 @@ pub enum ClaudePaneTurnStatus {
     Success,
     MaxTurnsPause,
     TimeoutPause,
+    Interrupted,
     ProviderError,
     ParseFailure,
 }
 
 impl ClaudePaneTurnStatus {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Success => "success",
             Self::MaxTurnsPause => "max-turn-pause",
             Self::TimeoutPause => "timeout-pause",
+            Self::Interrupted => "interrupted",
             Self::ProviderError => "provider-error",
             Self::ParseFailure => "parse-failure",
         }
@@ -232,6 +287,8 @@ pub(crate) struct ClaudePane {
     pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) profile: ClaudeProviderProfileKind,
+    pub(crate) spawn_role: Option<SpawnRole>,
+    pub(crate) spawn_nickname: Option<String>,
     pub(crate) cwd: PathBuf,
     pub(crate) claude_session_id: Option<String>,
     pub(crate) status: ClaudePaneStatus,
@@ -239,8 +296,11 @@ pub(crate) struct ClaudePane {
     pub(crate) latest_usage_status: Option<ClaudePaneUsageStatus>,
     pub(crate) latest_turn_status: Option<ClaudePaneTurnStatus>,
     pub(crate) latest_audit_path: Option<PathBuf>,
+    pub(crate) latest_task_message: Option<String>,
+    pub(crate) latest_result_message: Option<String>,
     pub(crate) artifact_dir: PathBuf,
     live_turn: Option<ClaudePaneLiveTurn>,
+    cancel_token: Option<CancellationToken>,
     lock: Arc<Mutex<()>>,
     next_turn_index: u64,
 }
@@ -250,7 +310,10 @@ struct ClaudePaneLiveTurn {
     elapsed_ms: i64,
     current: String,
     phase: String,
+    reasoning_blurbs: Vec<String>,
     tool_blurbs: Vec<String>,
+    assistant_dispatch_buffer: String,
+    sent_dispatch_keys: HashSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,7 +328,10 @@ impl ClaudePaneLiveTurn {
             elapsed_ms: 0,
             current: "starting Claude".to_string(),
             phase: "starting".to_string(),
+            reasoning_blurbs: Vec::new(),
             tool_blurbs: Vec::new(),
+            assistant_dispatch_buffer: String::new(),
+            sent_dispatch_keys: HashSet::new(),
         }
     }
 
@@ -278,6 +344,13 @@ impl ClaudePaneLiveTurn {
                 self.current = tool.clone();
                 if self.tool_blurbs.last() != Some(&tool) {
                     self.tool_blurbs.push(tool);
+                }
+            }
+            "reasoning" => {
+                let reasoning = reasoning_blurb_from_progress(progress);
+                self.current = format!("reasoning: {reasoning}");
+                if self.reasoning_blurbs.last() != Some(&reasoning) {
+                    self.reasoning_blurbs.push(reasoning);
                 }
             }
             "waiting" => {
@@ -305,6 +378,17 @@ impl ClaudePaneLiveTurn {
     fn display(&self) -> ClaudePaneLiveStatus {
         let header = format!("Claude running · {}", format_elapsed_ms(self.elapsed_ms));
         let mut lines = vec![format!("Current: {}", self.current)];
+        if !self.reasoning_blurbs.is_empty() {
+            lines.push("Reasoning:".to_string());
+            let hidden = self.reasoning_blurbs.len().saturating_sub(3);
+            if hidden > 0 {
+                lines.push(format!("  +{hidden} earlier"));
+            }
+            let visible_start = self.reasoning_blurbs.len().saturating_sub(3);
+            for reasoning in self.reasoning_blurbs.iter().skip(visible_start) {
+                lines.push(format!("  {reasoning}"));
+            }
+        }
         if !self.tool_blurbs.is_empty() {
             lines.push("Tools:".to_string());
             let hidden = self.tool_blurbs.len().saturating_sub(5);
@@ -328,6 +412,20 @@ impl ClaudePaneLiveTurn {
             details: Some(lines.join("\n")),
         }
     }
+
+    fn filter_new_dispatches(
+        &mut self,
+        dispatches: Vec<crate::spawn_orchestration::SpawnTaskDispatch>,
+    ) -> Vec<crate::spawn_orchestration::SpawnTaskDispatch> {
+        dispatches
+            .into_iter()
+            .filter(|dispatch| self.sent_dispatch_keys.insert(spawn_dispatch_key(dispatch)))
+            .collect()
+    }
+}
+
+fn spawn_dispatch_key(dispatch: &crate::spawn_orchestration::SpawnTaskDispatch) -> String {
+    format!("{}\n{}", dispatch.target.trim(), dispatch.task.trim())
 }
 
 #[derive(Debug)]
@@ -373,6 +471,28 @@ impl ClaudePaneRegistry {
             .map(|pane| pane.profile.status_model_label())
     }
 
+    pub(crate) fn claude_pane_spawn_role(&self, pane_id: &str) -> Option<SpawnRole> {
+        self.panes
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .and_then(|pane| pane.spawn_role)
+    }
+
+    pub(crate) fn claude_pane_is_running(&self, pane_id: &str) -> bool {
+        self.panes
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .is_some_and(|pane| pane.status == ClaudePaneStatus::Running)
+    }
+
+    pub(crate) fn live_status_for_pane(&self, pane_id: &str) -> Option<ClaudePaneLiveStatus> {
+        self.panes
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .and_then(|pane| pane.live_turn.as_ref())
+            .map(ClaudePaneLiveTurn::display)
+    }
+
     pub(crate) fn set_active_user_pane(&mut self, pane_id: &str) -> Result<()> {
         if pane_id == CODEX_MAIN_PANE_ID {
             self.active_user_pane_id = CODEX_MAIN_PANE_ID.to_string();
@@ -392,11 +512,42 @@ impl ClaudePaneRegistry {
         cwd: PathBuf,
         codex_home: &Path,
     ) -> Result<String> {
+        self.create_pane_with_role(profile, cwd, codex_home, None, None)
+    }
+
+    pub(crate) fn create_pane_with_role(
+        &mut self,
+        profile: ClaudeProviderProfileKind,
+        cwd: PathBuf,
+        codex_home: &Path,
+        spawn_role: Option<SpawnRole>,
+        spawn_nickname: Option<String>,
+    ) -> Result<String> {
         let profile_config = profile.profile();
         if let Some(label) = profile_config.vault_label {
             ensure_vault_label_exists(codex_home, label)?;
         }
+        self.push_pane(profile, cwd, codex_home, spawn_role, spawn_nickname)
+    }
 
+    #[cfg(test)]
+    pub(crate) fn create_pane_without_vault_for_test(
+        &mut self,
+        profile: ClaudeProviderProfileKind,
+        cwd: PathBuf,
+        codex_home: &Path,
+    ) -> Result<String> {
+        self.push_pane(profile, cwd, codex_home, None, None)
+    }
+
+    fn push_pane(
+        &mut self,
+        profile: ClaudeProviderProfileKind,
+        cwd: PathBuf,
+        codex_home: &Path,
+        spawn_role: Option<SpawnRole>,
+        spawn_nickname: Option<String>,
+    ) -> Result<String> {
         let id = format!("claude-{}", Uuid::new_v4());
         let artifact_dir = codex_home.join("panes").join(&id);
         std::fs::create_dir_all(&artifact_dir).with_context(|| {
@@ -407,8 +558,10 @@ impl ClaudePaneRegistry {
         })?;
         let pane = ClaudePane {
             id: id.clone(),
-            title: profile_config.title.to_string(),
+            title: claude_pane_title(profile, spawn_role, spawn_nickname.as_deref()),
             profile,
+            spawn_role,
+            spawn_nickname,
             cwd,
             claude_session_id: None,
             status: ClaudePaneStatus::Idle,
@@ -416,8 +569,11 @@ impl ClaudePaneRegistry {
             latest_usage_status: None,
             latest_turn_status: None,
             latest_audit_path: None,
+            latest_task_message: None,
+            latest_result_message: None,
             artifact_dir,
             live_turn: None,
+            cancel_token: None,
             lock: Arc::new(Mutex::new(())),
             next_turn_index: 1,
         };
@@ -447,13 +603,39 @@ impl ClaudePaneRegistry {
             .map_err(|_| anyhow!("Claude pane `{}` is already running", pane.title))?;
 
         let plan = build_claude_command_plan(pane, prompt, codex_home)?;
+        let cancel_token = CancellationToken::new();
         pane.status = ClaudePaneStatus::Running;
         pane.live_turn = Some(ClaudePaneLiveTurn::starting());
+        pane.cancel_token = Some(cancel_token.clone());
         Ok(PreparedClaudePaneTurn {
             pane_id: pane.id.clone(),
             plan,
+            cancel_token,
             _lock: lock,
         })
+    }
+
+    pub(crate) fn interrupt_turn(&mut self, pane_id: &str) -> Result<()> {
+        let pane = self
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == pane_id)
+            .ok_or_else(|| anyhow!("Claude pane `{pane_id}` does not exist"))?;
+        if pane.status != ClaudePaneStatus::Running {
+            return Err(anyhow!("Claude pane `{}` is not running", pane.title));
+        }
+        let Some(cancel_token) = pane.cancel_token.as_ref() else {
+            return Err(anyhow!(
+                "Claude pane `{}` has no cancellable turn",
+                pane.title
+            ));
+        };
+        cancel_token.cancel();
+        if let Some(live_turn) = pane.live_turn.as_mut() {
+            live_turn.phase = "interrupted".to_string();
+            live_turn.current = "interrupting Claude".to_string();
+        }
+        Ok(())
     }
 
     pub(crate) fn finish_turn(
@@ -466,15 +648,35 @@ impl ClaudePaneRegistry {
         };
         pane.status = ClaudePaneStatus::Idle;
         pane.live_turn = None;
+        pane.cancel_token = None;
         if let Ok(output) = result {
-            if let Some(session_id) = &output.session_id {
-                pane.claude_session_id = Some(session_id.clone());
+            match output.status {
+                ClaudePaneTurnStatus::Success | ClaudePaneTurnStatus::MaxTurnsPause => {
+                    if let Some(session_id) = &output.session_id {
+                        pane.claude_session_id = Some(session_id.clone());
+                    }
+                }
+                ClaudePaneTurnStatus::TimeoutPause
+                | ClaudePaneTurnStatus::Interrupted
+                | ClaudePaneTurnStatus::ProviderError
+                | ClaudePaneTurnStatus::ParseFailure => {
+                    pane.claude_session_id = None;
+                }
             }
             pane.latest_usage_summary = output.usage_summary.clone();
             pane.latest_usage_status = Some(output.usage_status);
             pane.latest_turn_status = Some(output.status);
             pane.latest_audit_path = Some(output.audit_path.clone());
+            if !output.text.trim().is_empty() {
+                pane.latest_result_message = Some(compact_claude_pane_metadata(&output.text, 240));
+            }
             pane.next_turn_index = pane.next_turn_index.saturating_add(1);
+        }
+    }
+
+    pub(crate) fn set_latest_task_message(&mut self, pane_id: &str, task: Option<String>) {
+        if let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == pane_id) {
+            pane.latest_task_message = task.map(|task| compact_claude_pane_metadata(&task, 240));
         }
     }
 
@@ -492,6 +694,38 @@ impl ClaudePaneRegistry {
         live_turn.update(progress);
         Some(live_turn.display())
     }
+
+    pub(crate) fn collect_spawn_dispatches_from_assistant_delta(
+        &mut self,
+        pane_id: &str,
+        delta: &str,
+    ) -> Vec<crate::spawn_orchestration::SpawnTaskDispatch> {
+        let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == pane_id) else {
+            return Vec::new();
+        };
+        let live_turn = pane
+            .live_turn
+            .get_or_insert_with(ClaudePaneLiveTurn::starting);
+        live_turn.assistant_dispatch_buffer.push_str(delta);
+        let (_, dispatches) = crate::spawn_orchestration::extract_spawn_task_dispatches(
+            &live_turn.assistant_dispatch_buffer,
+        );
+        live_turn.filter_new_dispatches(dispatches)
+    }
+
+    pub(crate) fn filter_new_spawn_dispatches(
+        &mut self,
+        pane_id: &str,
+        dispatches: Vec<crate::spawn_orchestration::SpawnTaskDispatch>,
+    ) -> Vec<crate::spawn_orchestration::SpawnTaskDispatch> {
+        let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == pane_id) else {
+            return dispatches;
+        };
+        let Some(live_turn) = pane.live_turn.as_mut() else {
+            return dispatches;
+        };
+        live_turn.filter_new_dispatches(dispatches)
+    }
 }
 
 impl Default for ClaudePaneRegistry {
@@ -503,6 +737,7 @@ impl Default for ClaudePaneRegistry {
 pub(crate) struct PreparedClaudePaneTurn {
     pub(crate) pane_id: String,
     plan: ClaudeCommandPlan,
+    cancel_token: CancellationToken,
     _lock: OwnedMutexGuard<()>,
 }
 
@@ -520,6 +755,7 @@ pub(crate) struct ClaudePaneTurnOutput {
     pub(crate) error_summary: Option<String>,
     pub(crate) tool_names: Vec<String>,
     pub(crate) tool_events: Vec<ClaudePaneToolEvent>,
+    pub(crate) reasoning_events: Vec<ClaudePaneReasoningEvent>,
     pub(crate) command_mode: ClaudeCommandMode,
 }
 
@@ -530,10 +766,16 @@ pub(crate) struct ClaudePaneToolEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ClaudePaneReasoningEvent {
+    pub(crate) preview: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ClaudePaneTurnProgress {
     pub(crate) pane_id: String,
     pub(crate) phase: String,
     pub(crate) summary: String,
+    pub(crate) assistant_text_delta: Option<String>,
     /// Non-rendered diagnostic metadata used to deduplicate progress events.
     /// Artifact/audit paths are intentionally shown only in final turn messages.
     pub(crate) hint: Option<String>,
@@ -582,6 +824,8 @@ pub(crate) struct ClaudePaneTurnAudit {
     terminal_reason: Option<String>,
     status: ClaudePaneTurnStatus,
     error_summary: Option<String>,
+    reasoning_event_count: usize,
+    reasoning_events: Vec<ClaudePaneReasoningEvent>,
     tool_use_count: usize,
     tool_names: Vec<String>,
     tool_events: Vec<ClaudePaneToolEvent>,
@@ -594,6 +838,11 @@ impl ClaudePaneTurnOutput {
         } else {
             format!("tools: {}", self.tool_names.join(", "))
         };
+        let reasoning = if self.reasoning_events.is_empty() {
+            String::new()
+        } else {
+            format!("; reasoning: {}", self.reasoning_events.len())
+        };
         let terminal = self
             .terminal_reason
             .as_deref()
@@ -604,7 +853,7 @@ impl ClaudePaneTurnOutput {
             .map(|usage| format!("; usage: {usage}"))
             .unwrap_or_default();
         format!(
-            "status: {}; mode: {}; {tools}{terminal}{usage}; artifact: {}; audit: {}",
+            "status: {}; mode: {}; {tools}{reasoning}{terminal}{usage}; artifact: {}; audit: {}",
             self.status.label(),
             self.command_mode.label(),
             self.artifact_path.display(),
@@ -624,6 +873,9 @@ impl ClaudePaneTurnOutput {
             ClaudePaneTurnStatus::TimeoutPause => format!(
                 "Claude pane timed out locally. Type `continue` in this pane to resume if the audit captured a Claude session id. {summary}"
             ),
+            ClaudePaneTurnStatus::Interrupted => {
+                format!("Claude pane turn interrupted. {summary}")
+            }
             ClaudePaneTurnStatus::ProviderError => {
                 format!("Claude pane provider error. {summary}")
             }
@@ -647,10 +899,18 @@ impl ClaudePaneTurnOutput {
 }
 
 struct ClaudeBridgePlan {
+    kind: ClaudeBridgeKind,
     listener: StdTcpListener,
     bind_addr: SocketAddr,
+    upstream_base_url: String,
     upstream_api_key: String,
     upstream_model: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeBridgeKind {
+    AmbientChat,
+    AnthropicPassthrough,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -714,6 +974,7 @@ pub(crate) fn allowed_provider_vault_label(label: &str) -> bool {
             | "provider/ambient_api_key"
             | "provider/baseten_api_key"
             | "provider/openrouter_api_key"
+            | "provider/ai_gateway_api_key"
     )
 }
 
@@ -733,27 +994,50 @@ fn build_claude_command_plan(
         .join(format!("turn-{turn_index:04}.audit.json"));
     let mut bridge = None;
     let mut base_url_override = None;
-    if profile.transport == ClaudeProviderTransport::AmbientChatBridge {
+    if matches!(
+        profile.transport,
+        ClaudeProviderTransport::AmbientChatBridge
+            | ClaudeProviderTransport::AnthropicPassthroughBridge
+    ) {
         let Some(label) = profile.vault_label else {
-            return Err(anyhow!(
-                "Ambient Claude bridge requires a provider vault label"
-            ));
+            return Err(anyhow!("Claude bridge requires a provider vault label"));
         };
         let secret = reveal_provider_secret(codex_home, label)?;
         let listener = StdTcpListener::bind("127.0.0.1:0")
-            .context("failed to bind Ambient Claude bridge loopback listener")?;
+            .context("failed to bind Claude bridge loopback listener")?;
         listener
             .set_nonblocking(true)
-            .context("failed to set Ambient Claude bridge listener nonblocking")?;
+            .context("failed to set Claude bridge listener nonblocking")?;
         let bind_addr = listener
             .local_addr()
-            .context("failed to read Ambient Claude bridge listener address")?;
+            .context("failed to read Claude bridge listener address")?;
+        let (kind, upstream_base_url, upstream_model) = match profile.transport {
+            ClaudeProviderTransport::AmbientChatBridge => (
+                ClaudeBridgeKind::AmbientChat,
+                "https://api.ambient.xyz/v1/chat/completions".to_string(),
+                "zai-org/GLM-5.2-FP8".to_string(),
+            ),
+            ClaudeProviderTransport::AnthropicPassthroughBridge => (
+                ClaudeBridgeKind::AnthropicPassthrough,
+                profile
+                    .base_url
+                    .ok_or_else(|| anyhow!("Anthropic passthrough bridge requires base URL"))?
+                    .trim_end_matches('/')
+                    .to_string(),
+                profile.provider_model.to_string(),
+            ),
+            ClaudeProviderTransport::DirectAnthropic => {
+                unreachable!("direct providers do not use bridge")
+            }
+        };
         base_url_override = Some(format!("http://{bind_addr}"));
         bridge = Some(ClaudeBridgePlan {
+            kind,
             listener,
             bind_addr,
+            upstream_base_url,
             upstream_api_key: secret,
-            upstream_model: "zai-org/GLM-5.2-FP8".to_string(),
+            upstream_model,
         });
     }
     let settings = settings_json_with_base_url(
@@ -858,7 +1142,7 @@ fn build_claude_command_plan(
         ClaudeCommandMode::Resume
     } else {
         args.push("--session-id".to_string());
-        args.push(pane.id.trim_start_matches("claude-").to_string());
+        args.push(Uuid::new_v4().to_string());
         ClaudeCommandMode::NewSession
     };
     args.push(prompt);
@@ -982,11 +1266,42 @@ pub(crate) fn prompt_from_user_turn(op: &AppCommand) -> Result<Option<String>> {
     Ok(Some(chunks.join("\n\n")))
 }
 
+pub(crate) fn compose_claude_pane_prompt(prompt: String, spawn_context: Option<&str>) -> String {
+    let Some(spawn_context) = spawn_context
+        .map(str::trim)
+        .filter(|context| !context.is_empty())
+    else {
+        return prompt;
+    };
+    format!("{spawn_context}\n\nUser message:\n{prompt}")
+}
+
+fn claude_pane_title(
+    profile: ClaudeProviderProfileKind,
+    spawn_role: Option<SpawnRole>,
+    spawn_nickname: Option<&str>,
+) -> String {
+    match (spawn_role, spawn_nickname) {
+        (Some(role), Some(nickname)) => format!(
+            "Claude Code {} [{}] - {}",
+            nickname,
+            role.agent_type().unwrap_or_else(|| role.label()),
+            profile.status_model_label()
+        ),
+        (Some(role), None) => format!(
+            "Claude Code {} - {}",
+            role.label(),
+            profile.status_model_label()
+        ),
+        (None, _) => profile.profile().title.to_string(),
+    }
+}
+
 pub(crate) async fn run_prepared_claude_turn(
     prepared: PreparedClaudePaneTurn,
     progress_tx: Option<AppEventSender>,
 ) -> Result<ClaudePaneTurnOutput, String> {
-    run_claude_command_plan(prepared.plan, progress_tx)
+    run_claude_command_plan(prepared.plan, prepared.cancel_token, progress_tx)
         .await
         .map_err(|err| format!("{err:#}"))
 }
@@ -1050,7 +1365,8 @@ pub struct ClaudePaneWorkflowEntry {
 pub async fn run_claude_pane_smoke(
     options: ClaudePaneSmokeOptions,
 ) -> Result<ClaudePaneSmokeReport> {
-    let provider_names = if options.providers.is_empty() {
+    let uses_default_baseline = options.providers.is_empty();
+    let provider_names = if uses_default_baseline {
         vec![
             "ambient".to_string(),
             "zai".to_string(),
@@ -1073,9 +1389,13 @@ pub async fn run_claude_pane_smoke(
         );
     }
 
-    let passed = entries
-        .iter()
-        .any(|entry| entry.status == "passed" && entry.provider == "ambient");
+    let passed = if uses_default_baseline {
+        entries
+            .iter()
+            .any(|entry| entry.status == "passed" && entry.provider == "ambient")
+    } else {
+        !entries.is_empty() && entries.iter().all(|entry| entry.status == "passed")
+    };
     let report_dir = options.codex_home.join("panes").join("smoke-reports");
     std::fs::create_dir_all(&report_dir).with_context(|| {
         format!(
@@ -1825,6 +2145,8 @@ fn smoke_provider_profile(provider_name: &str) -> Option<ClaudeProviderProfileKi
         "zai" | "zai-glm-52" => Some(ClaudeProviderProfileKind::ZaiGlm52),
         "baseten" | "baseten-glm-52" => Some(ClaudeProviderProfileKind::BasetenGlm52),
         "openrouter" | "openrouter-glm-52" => Some(ClaudeProviderProfileKind::OpenRouterGlm52),
+        "vercel" | "vercel-glm-52" => Some(ClaudeProviderProfileKind::VercelGlm52),
+        "vercel-fast" | "vercel-glm-52-fast" => Some(ClaudeProviderProfileKind::VercelGlm52Fast),
         "claude-plan" | "claude" => Some(ClaudeProviderProfileKind::ClaudePlan),
         _ => None,
     }
@@ -1846,6 +2168,7 @@ fn smoke_first_turn_prompt() -> String {
 
 async fn run_claude_command_plan(
     mut plan: ClaudeCommandPlan,
+    cancel_token: CancellationToken,
     progress_tx: Option<AppEventSender>,
 ) -> Result<ClaudePaneTurnOutput> {
     let started_at = Instant::now();
@@ -1867,8 +2190,14 @@ async fn run_claude_command_plan(
     let bridge_handle = plan
         .bridge
         .take()
-        .map(|bridge| tokio::spawn(run_ambient_chat_bridge(bridge)));
-    let mut child = Command::new(&plan.executable)
+        .map(|bridge| tokio::spawn(run_claude_bridge(bridge)));
+    let mut command = Command::new(&plan.executable);
+    command.kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+    let mut child = command
         .args(&plan.args)
         .envs(&plan.env)
         .current_dir(&plan.cwd)
@@ -1909,9 +2238,18 @@ async fn run_claude_command_plan(
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     heartbeat.tick().await;
     let mut timed_out = false;
+    let mut interrupted = false;
+    let mut cleanup_error: Option<String> = None;
     let mut last_progress_key: Option<String> = None;
     loop {
         tokio::select! {
+            _ = cancel_token.cancelled() => {
+                interrupted = true;
+                if let Err(err) = stop_claude_child(&mut child).await {
+                    cleanup_error = Some(err.to_string());
+                }
+                break;
+            }
             line = stdout_lines.next_line() => {
                 let Some(line) = line.context("failed to read Claude stdout")? else {
                     break;
@@ -1925,17 +2263,20 @@ async fn run_claude_command_plan(
                         plan.artifact_path.display()
                     )
                 })?;
-                if let Ok(value) = serde_json::from_str::<Value>(&line)
-                    && let Some(progress) = progress_from_claude_value(&plan, &started_at, &value)
-                {
-                    last_progress_elapsed_ms = Some(progress.elapsed_ms);
-                    let key = progress_key(&progress);
-                    if last_progress_key.as_deref() != Some(key.as_str())
-                        && let Some(tx) = progress_tx.as_ref()
-                    {
-                        tx.send(AppEvent::ClaudePaneTurnProgress { progress });
+                if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                    for progress in progresses_from_claude_value(&plan, &started_at, &value) {
+                        last_progress_elapsed_ms = Some(progress.elapsed_ms);
+                        let is_assistant_text = progress.phase == "assistant-text";
+                        let key = progress_key(&progress);
+                        if (is_assistant_text || last_progress_key.as_deref() != Some(key.as_str()))
+                            && let Some(tx) = progress_tx.as_ref()
+                        {
+                            tx.send(AppEvent::ClaudePaneTurnProgress { progress });
+                        }
+                        if !is_assistant_text {
+                            last_progress_key = Some(key);
+                        }
                     }
-                    last_progress_key = Some(key);
                 }
             }
             _ = heartbeat.tick() => {
@@ -1958,7 +2299,7 @@ async fn run_claude_command_plan(
         )
     })?;
 
-    let wait_result = if timed_out {
+    let wait_result = if timed_out || interrupted {
         None
     } else {
         Some(
@@ -1973,15 +2314,60 @@ async fn run_claude_command_plan(
                 }),
         )
     };
-    if timed_out {
-        let _ = child.kill().await;
+    if timed_out && let Err(err) = stop_claude_child(&mut child).await {
+        cleanup_error = Some(err.to_string());
     }
-    let stderr = stderr_task.await.unwrap_or_default();
+    let stderr = if timed_out || interrupted {
+        stderr_task.abort();
+        String::new()
+    } else {
+        stderr_task.await.unwrap_or_default()
+    };
     if let Some(handle) = bridge_handle {
         handle.abort();
     }
     let duration_ms = elapsed_ms(&started_at);
     let ended_at_unix_ms = unix_epoch_ms();
+
+    if let Some(err) = cleanup_error {
+        let output = partial_failed_turn_output(
+            &plan,
+            duration_ms,
+            ClaudePaneTurnStatus::ProviderError,
+            Some("cleanup_failed".to_string()),
+            format!(
+                "Claude pane process cleanup failed after interrupt/timeout; the turn is not considered safely stopped: {err}"
+            ),
+            &stdout_text,
+        );
+        write_turn_audit(
+            &plan,
+            &output,
+            started_at_unix_ms,
+            ended_at_unix_ms,
+            last_progress_elapsed_ms,
+        )?;
+        return Ok(output);
+    }
+
+    if interrupted {
+        let output = partial_failed_turn_output(
+            &plan,
+            duration_ms,
+            ClaudePaneTurnStatus::Interrupted,
+            Some("interrupted".to_string()),
+            "Claude pane turn interrupted by user.".to_string(),
+            &stdout_text,
+        );
+        write_turn_audit(
+            &plan,
+            &output,
+            started_at_unix_ms,
+            ended_at_unix_ms,
+            last_progress_elapsed_ms,
+        )?;
+        return Ok(output);
+    }
 
     if timed_out {
         let output = partial_failed_turn_output(
@@ -2085,6 +2471,39 @@ async fn run_claude_command_plan(
     Ok(output)
 }
 
+async fn stop_claude_child(child: &mut Child) -> Result<()> {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // Claude may have an active tool subprocess. The pane starts Claude in its own process
+        // group, so kill the group first, then reap the direct child below.
+        let kill_result = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+        if kill_result == -1 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                return Err(anyhow!(
+                    "failed to send SIGKILL to Claude process group {pid}: {err}"
+                ));
+            }
+        }
+    }
+
+    if let Err(err) = child.start_kill()
+        && err.kind() != std::io::ErrorKind::InvalidInput
+    {
+        return Err(anyhow!("failed to kill Claude process: {err}"));
+    }
+
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(err)) => Err(anyhow!(
+            "failed to wait for Claude process after kill: {err}"
+        )),
+        Err(_) => Err(anyhow!(
+            "Claude process did not exit after SIGKILL within cleanup timeout"
+        )),
+    }
+}
+
 fn turn_output_from_parsed(
     plan: &ClaudeCommandPlan,
     parsed: ParsedClaudeOutput,
@@ -2103,6 +2522,7 @@ fn turn_output_from_parsed(
         error_summary: parsed.error_summary,
         tool_names: parsed.tool_names,
         tool_events: parsed.tool_events,
+        reasoning_events: parsed.reasoning_events,
         command_mode: plan.command_mode,
     }
 }
@@ -2127,6 +2547,7 @@ fn failed_turn_output(
         error_summary: Some(error_summary),
         tool_names: Vec::new(),
         tool_events: Vec::new(),
+        reasoning_events: Vec::new(),
         command_mode: plan.command_mode,
     }
 }
@@ -2152,6 +2573,7 @@ fn partial_failed_turn_output(
         }
         output.tool_names = parsed.tool_names;
         output.tool_events = parsed.tool_events;
+        output.reasoning_events = parsed.reasoning_events;
     } else {
         output.tool_events = tool_events_from_stdout(stdout);
         output.tool_names = dedupe_tool_names(
@@ -2161,6 +2583,7 @@ fn partial_failed_turn_output(
                 .map(|event| event.name.clone())
                 .collect(),
         );
+        output.reasoning_events = reasoning_events_from_stdout(stdout);
     }
     output
 }
@@ -2196,6 +2619,8 @@ fn write_turn_audit(
         terminal_reason: output.terminal_reason.clone(),
         status: output.status,
         error_summary: output.error_summary.clone(),
+        reasoning_event_count: output.reasoning_events.len(),
+        reasoning_events: output.reasoning_events.clone(),
         tool_use_count: output.tool_events.len(),
         tool_names: output.tool_names.clone(),
         tool_events: output.tool_events.clone(),
@@ -2210,22 +2635,37 @@ fn write_turn_audit(
     })
 }
 
-async fn run_ambient_chat_bridge(plan: ClaudeBridgePlan) -> Result<()> {
+async fn run_claude_bridge(plan: ClaudeBridgePlan) -> Result<()> {
     let listener = TcpListener::from_std(plan.listener)
-        .context("failed to create async Ambient Claude bridge listener")?;
+        .context("failed to create async Claude bridge listener")?;
     let api_key = Arc::new(plan.upstream_api_key);
+    let upstream_base_url = Arc::new(plan.upstream_base_url);
     let upstream_model = Arc::new(plan.upstream_model);
+    let kind = plan.kind;
     let http = reqwest::Client::new();
     loop {
         let (stream, _) = listener.accept().await?;
         let api_key = api_key.clone();
+        let upstream_base_url = upstream_base_url.clone();
         let upstream_model = upstream_model.clone();
         let http = http.clone();
         tokio::spawn(async move {
-            if let Err(err) =
-                handle_ambient_bridge_connection(stream, api_key, upstream_model, http).await
-            {
-                tracing::debug!(error = %err, "Ambient Claude bridge connection failed");
+            let result = match kind {
+                ClaudeBridgeKind::AmbientChat => {
+                    handle_ambient_bridge_connection(stream, api_key, upstream_model, http).await
+                }
+                ClaudeBridgeKind::AnthropicPassthrough => {
+                    handle_anthropic_passthrough_bridge_connection(
+                        stream,
+                        api_key,
+                        upstream_base_url,
+                        http,
+                    )
+                    .await
+                }
+            };
+            if let Err(err) = result {
+                tracing::debug!(error = %err, "Claude bridge connection failed");
             }
         });
     }
@@ -2485,6 +2925,104 @@ async fn handle_ambient_bridge_connection(
     Ok(())
 }
 
+async fn handle_anthropic_passthrough_bridge_connection(
+    mut stream: tokio::net::TcpStream,
+    api_key: Arc<String>,
+    upstream_base_url: Arc<String>,
+    http: reqwest::Client,
+) -> Result<()> {
+    let mut buffer = Vec::new();
+    let mut temp = [0_u8; 4096];
+    let header_end = loop {
+        let read = stream.read(&mut temp).await?;
+        if read == 0 {
+            return Ok(());
+        }
+        buffer.extend_from_slice(&temp[..read]);
+        if let Some(pos) = find_header_end(&buffer) {
+            break pos;
+        }
+        if buffer.len() > 1024 * 1024 {
+            return Err(anyhow!(
+                "Anthropic passthrough bridge request headers too large"
+            ));
+        }
+    };
+
+    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+    let request_line = headers.lines().next().unwrap_or_default().to_string();
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+
+    let body_start = header_end + 4;
+    while buffer.len() < body_start + content_length {
+        let read = stream.read(&mut temp).await?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&temp[..read]);
+    }
+    let body = &buffer[body_start..buffer.len().min(body_start + content_length)];
+
+    if request_line.contains("/v1/messages/count_tokens") {
+        write_json_response(&mut stream, serde_json::json!({ "input_tokens": 1 })).await?;
+        return Ok(());
+    }
+
+    if !request_line.contains("/v1/messages") {
+        write_json_status_response(
+            &mut stream,
+            404,
+            serde_json::json!({ "error": { "type": "not_found", "message": "not found" } }),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let upstream_path = request_target_from_request_line(&request_line).unwrap_or("/v1/messages");
+    let upstream_url = format!(
+        "{}{}",
+        upstream_base_url.trim_end_matches('/'),
+        upstream_path
+    );
+    let response = http
+        .post(upstream_url)
+        .bearer_auth(api_key.as_str())
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .body(body.to_vec())
+        .send()
+        .await
+        .context("Anthropic passthrough bridge upstream request failed")?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let response_body = response
+        .bytes()
+        .await
+        .context("failed to read Anthropic passthrough bridge response")?;
+    write_raw_http_response(
+        &mut stream,
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("OK"),
+        &content_type,
+        response_body.as_ref(),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn send_ambient_chat_request_with_retry(
     http: &reqwest::Client,
     api_key: &str,
@@ -2605,6 +3143,12 @@ async fn sleep_ambient_bridge_retry(delay: Duration) {
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn request_target_from_request_line(request_line: &str) -> Option<&str> {
+    let mut parts = request_line.split_whitespace();
+    let _method = parts.next()?;
+    parts.next()
 }
 
 fn ambient_chat_messages_from_claude_request(request: &Value) -> Result<Vec<Value>> {
@@ -2883,6 +3427,22 @@ async fn write_json_status_response(
     Ok(())
 }
 
+async fn write_raw_http_response(
+    stream: &mut tokio::net::TcpStream,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    body: &[u8],
+) -> Result<()> {
+    let header = format!(
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(body).await?;
+    Ok(())
+}
+
 async fn write_anthropic_stream_headers(stream: &mut tokio::net::TcpStream) -> Result<()> {
     let response = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n";
     stream.write_all(response.as_bytes()).await?;
@@ -3091,6 +3651,7 @@ pub(crate) struct ParsedClaudeOutput {
     pub(crate) error_summary: Option<String>,
     pub(crate) tool_names: Vec<String>,
     pub(crate) tool_events: Vec<ClaudePaneToolEvent>,
+    pub(crate) reasoning_events: Vec<ClaudePaneReasoningEvent>,
 }
 
 pub(crate) fn parse_claude_output(stdout: &str) -> Result<ParsedClaudeOutput> {
@@ -3108,8 +3669,10 @@ pub(crate) fn parse_claude_output(stdout: &str) -> Result<ParsedClaudeOutput> {
     let mut session_id = None;
     let mut usage_summary = None;
     let mut error_value = None;
+    let mut saw_result_event = false;
     let mut tool_names = Vec::new();
     let mut tool_events = Vec::new();
+    let mut reasoning_events = Vec::new();
     for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
         let value: Value = serde_json::from_str(line)
             .with_context(|| format!("Claude stream-json line was not valid JSON: {line}"))?;
@@ -3117,9 +3680,11 @@ pub(crate) fn parse_claude_output(stdout: &str) -> Result<ParsedClaudeOutput> {
             error_value = Some(value.clone());
         }
         collect_text_chunks(&value, &mut assistant_chunks);
+        collect_reasoning_events(&value, &mut reasoning_events);
         collect_tool_names(&value, &mut tool_names);
         collect_tool_events(&value, &mut tool_events);
         if let Some(result) = value.get("result").and_then(Value::as_str) {
+            saw_result_event = true;
             final_result = Some(result.to_string());
         }
         if session_id.is_none() {
@@ -3148,7 +3713,14 @@ pub(crate) fn parse_claude_output(stdout: &str) -> Result<ParsedClaudeOutput> {
             error_summary: Some(claude_error_summary(&error_value)),
             tool_names: dedupe_tool_names(tool_names),
             tool_events,
+            reasoning_events,
         });
+    }
+
+    if !saw_result_event {
+        return Err(anyhow!(
+            "Claude stream ended before a final result event; the turn is incomplete"
+        ));
     }
 
     let text = final_result
@@ -3166,6 +3738,7 @@ pub(crate) fn parse_claude_output(stdout: &str) -> Result<ParsedClaudeOutput> {
         error_summary: None,
         tool_names: dedupe_tool_names(tool_names),
         tool_events,
+        reasoning_events,
     })
 }
 
@@ -3173,6 +3746,8 @@ fn parsed_from_value(value: &Value) -> Result<ParsedClaudeOutput> {
     if value.get("is_error").and_then(Value::as_bool) == Some(true) {
         let mut tool_names = Vec::new();
         let mut tool_events = Vec::new();
+        let mut reasoning_events = Vec::new();
+        collect_reasoning_events(value, &mut reasoning_events);
         collect_tool_names(value, &mut tool_names);
         collect_tool_events(value, &mut tool_events);
         return Ok(ParsedClaudeOutput {
@@ -3190,12 +3765,15 @@ fn parsed_from_value(value: &Value) -> Result<ParsedClaudeOutput> {
             error_summary: Some(claude_error_summary(value)),
             tool_names: dedupe_tool_names(tool_names),
             tool_events,
+            reasoning_events,
         });
     }
     let mut assistant_chunks = Vec::new();
     collect_text_chunks(value, &mut assistant_chunks);
     let mut tool_names = Vec::new();
     let mut tool_events = Vec::new();
+    let mut reasoning_events = Vec::new();
+    collect_reasoning_events(value, &mut reasoning_events);
     collect_tool_names(value, &mut tool_names);
     collect_tool_events(value, &mut tool_events);
     let text = value
@@ -3219,6 +3797,7 @@ fn parsed_from_value(value: &Value) -> Result<ParsedClaudeOutput> {
         error_summary: None,
         tool_names: dedupe_tool_names(tool_names),
         tool_events,
+        reasoning_events,
     })
 }
 
@@ -3284,6 +3863,35 @@ fn collect_text_chunks(value: &Value, chunks: &mut Vec<String>) {
     }
 }
 
+fn collect_reasoning_events(value: &Value, events: &mut Vec<ClaudePaneReasoningEvent>) {
+    if value.get("type").and_then(Value::as_str) == Some("thinking")
+        && let Some(preview) = reasoning_preview_from_value(value)
+    {
+        events.push(ClaudePaneReasoningEvent { preview });
+    }
+    if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
+        for item in content {
+            if item.get("type").and_then(Value::as_str) == Some("thinking")
+                && let Some(preview) = reasoning_preview_from_value(item)
+            {
+                events.push(ClaudePaneReasoningEvent { preview });
+            }
+        }
+    }
+    if let Some(delta) = value.pointer("/delta/thinking").and_then(Value::as_str) {
+        let preview = summarize_reasoning_text(delta);
+        if !preview.is_empty() {
+            events.push(ClaudePaneReasoningEvent { preview });
+        }
+    }
+}
+
+fn reasoning_preview_from_value(value: &Value) -> Option<String> {
+    let text = string_field(value, &["thinking", "text", "content"])?;
+    let preview = summarize_reasoning_text(text);
+    (!preview.is_empty()).then_some(preview)
+}
+
 fn collect_tool_names(value: &Value, tool_names: &mut Vec<String>) {
     if let Some(name) = value.get("name").and_then(Value::as_str)
         && value.get("type").and_then(Value::as_str) == Some("tool_use")
@@ -3333,7 +3941,16 @@ fn collect_tool_events(value: &Value, tool_events: &mut Vec<ClaudePaneToolEvent>
 }
 
 const TOOL_PREVIEW_MAX_CHARS: usize = 120;
+const REASONING_PREVIEW_MAX_CHARS: usize = 240;
 const CLAUDE_TOOL_CALL_PREFIX: &str = "Claude tool call: ";
+const CLAUDE_REASONING_PREFIX: &str = "Claude reasoning: ";
+
+fn summarize_reasoning_text(text: &str) -> String {
+    truncate_for_display(
+        &collapse_whitespace(text.trim()),
+        REASONING_PREVIEW_MAX_CHARS,
+    )
+}
 
 fn summarize_tool_call_input(name: &str, input: &Value) -> String {
     if let Some(description) = string_field(input, &["description"]) {
@@ -3621,6 +4238,15 @@ fn compact_tool_path(path: &str) -> String {
         .unwrap_or_else(|| truncate_for_display(&path, 90))
 }
 
+fn compact_claude_pane_metadata(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = compact.chars().take(max_chars).collect::<String>();
+    if compact.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
 fn compact_shell_target(path: &str) -> String {
     let path = collapse_whitespace(path);
     Path::new(&path)
@@ -3642,6 +4268,16 @@ fn tool_events_from_stdout(stdout: &str) -> Vec<ClaudePaneToolEvent> {
         }
     }
     tool_events
+}
+
+fn reasoning_events_from_stdout(stdout: &str) -> Vec<ClaudePaneReasoningEvent> {
+    let mut reasoning_events = Vec::new();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            collect_reasoning_events(&value, &mut reasoning_events);
+        }
+    }
+    reasoning_events
 }
 
 fn dedupe_tool_names(tool_names: Vec<String>) -> Vec<String> {
@@ -3732,6 +4368,15 @@ fn tool_blurb_from_progress(progress: &ClaudePaneTurnProgress) -> String {
         .to_string()
 }
 
+fn reasoning_blurb_from_progress(progress: &ClaudePaneTurnProgress) -> String {
+    progress
+        .summary
+        .strip_prefix(CLAUDE_REASONING_PREFIX)
+        .unwrap_or(progress.summary.as_str())
+        .trim()
+        .to_string()
+}
+
 fn progress_status_text(progress: &ClaudePaneTurnProgress) -> String {
     match progress.phase.as_str() {
         "system" => "session initialized".to_string(),
@@ -3739,6 +4384,7 @@ fn progress_status_text(progress: &ClaudePaneTurnProgress) -> String {
         "waiting" => "waiting for Claude".to_string(),
         "error" => progress.summary.trim().to_string(),
         "tool-call" => tool_blurb_from_progress(progress),
+        "reasoning" => reasoning_blurb_from_progress(progress),
         _ => progress.summary.trim().to_string(),
     }
 }
@@ -3764,6 +4410,7 @@ fn emit_claude_progress(
                 pane_id: plan.pane_id.clone(),
                 phase: phase.to_string(),
                 summary: summary.to_string(),
+                assistant_text_delta: None,
                 hint,
                 elapsed_ms: elapsed_ms(started_at),
                 artifact_path: plan.artifact_path.clone(),
@@ -3773,15 +4420,55 @@ fn emit_claude_progress(
     }
 }
 
+#[cfg(test)]
 fn progress_from_claude_value(
     plan: &ClaudeCommandPlan,
     started_at: &Instant,
     value: &Value,
 ) -> Option<ClaudePaneTurnProgress> {
+    progresses_from_claude_value(plan, started_at, value)
+        .into_iter()
+        .next()
+}
+
+fn progresses_from_claude_value(
+    plan: &ClaudeCommandPlan,
+    started_at: &Instant,
+    value: &Value,
+) -> Vec<ClaudePaneTurnProgress> {
+    let mut progresses = Vec::new();
     let value_type = value.get("type").and_then(Value::as_str).unwrap_or("event");
+    let mut text_chunks = Vec::new();
+    collect_text_chunks(value, &mut text_chunks);
+    for chunk in text_chunks {
+        progresses.push(ClaudePaneTurnProgress {
+            pane_id: plan.pane_id.clone(),
+            phase: "assistant-text".to_string(),
+            summary: "Claude assistant text.".to_string(),
+            assistant_text_delta: Some(chunk),
+            hint: None,
+            elapsed_ms: elapsed_ms(started_at),
+            artifact_path: plan.artifact_path.clone(),
+            audit_path: plan.audit_path.clone(),
+        });
+    }
+    let mut reasoning_events = Vec::new();
+    collect_reasoning_events(value, &mut reasoning_events);
+    for event in reasoning_events {
+        progresses.push(ClaudePaneTurnProgress {
+            pane_id: plan.pane_id.clone(),
+            phase: "reasoning".to_string(),
+            summary: format!("{}{}", CLAUDE_REASONING_PREFIX, event.preview.trim()),
+            assistant_text_delta: None,
+            hint: None,
+            elapsed_ms: elapsed_ms(started_at),
+            artifact_path: plan.artifact_path.clone(),
+            audit_path: plan.audit_path.clone(),
+        });
+    }
     let mut tool_events = Vec::new();
     collect_tool_events(value, &mut tool_events);
-    if let Some(event) = tool_events.last() {
+    for event in tool_events {
         let summary = if event.preview.trim().is_empty() {
             format!("{}{}", CLAUDE_TOOL_CALL_PREFIX, event.name)
         } else {
@@ -3792,10 +4479,11 @@ fn progress_from_claude_value(
                 event.preview.trim()
             )
         };
-        return Some(ClaudePaneTurnProgress {
+        progresses.push(ClaudePaneTurnProgress {
             pane_id: plan.pane_id.clone(),
             phase: "tool-call".to_string(),
             summary,
+            assistant_text_delta: None,
             hint: None,
             elapsed_ms: elapsed_ms(started_at),
             artifact_path: plan.artifact_path.clone(),
@@ -3803,39 +4491,47 @@ fn progress_from_claude_value(
         });
     }
     if value.get("is_error").and_then(Value::as_bool) == Some(true) {
-        return Some(ClaudePaneTurnProgress {
+        progresses.push(ClaudePaneTurnProgress {
             pane_id: plan.pane_id.clone(),
             phase: "error".to_string(),
             summary: "Claude reported an error result.".to_string(),
+            assistant_text_delta: None,
             hint: Some(claude_error_summary(value)),
             elapsed_ms: elapsed_ms(started_at),
             artifact_path: plan.artifact_path.clone(),
             audit_path: plan.audit_path.clone(),
         });
+        return progresses;
     }
     if value.get("result").and_then(Value::as_str).is_some() {
-        return Some(ClaudePaneTurnProgress {
+        progresses.push(ClaudePaneTurnProgress {
             pane_id: plan.pane_id.clone(),
             phase: "assistant-result".to_string(),
             summary: "Claude returned a result.".to_string(),
+            assistant_text_delta: None,
             hint: None,
             elapsed_ms: elapsed_ms(started_at),
             artifact_path: plan.artifact_path.clone(),
             audit_path: plan.audit_path.clone(),
         });
+        return progresses;
     }
-    (value_type == "system").then(|| ClaudePaneTurnProgress {
-        pane_id: plan.pane_id.clone(),
-        phase: "system".to_string(),
-        summary: "Claude session initialized.".to_string(),
-        hint: value
-            .get("session_id")
-            .and_then(Value::as_str)
-            .map(|session_id| format!("session_id: {session_id}")),
-        elapsed_ms: elapsed_ms(started_at),
-        artifact_path: plan.artifact_path.clone(),
-        audit_path: plan.audit_path.clone(),
-    })
+    if value_type == "system" {
+        progresses.push(ClaudePaneTurnProgress {
+            pane_id: plan.pane_id.clone(),
+            phase: "system".to_string(),
+            summary: "Claude session initialized.".to_string(),
+            assistant_text_delta: None,
+            hint: value
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(|session_id| format!("session_id: {session_id}")),
+            elapsed_ms: elapsed_ms(started_at),
+            artifact_path: plan.artifact_path.clone(),
+            audit_path: plan.audit_path.clone(),
+        });
+    }
+    progresses
 }
 
 fn progress_key(progress: &ClaudePaneTurnProgress) -> String {
@@ -3852,7 +4548,24 @@ impl App {
         let mut items = Vec::new();
         items.push(section_item("User Panes"));
         items.extend(self.user_pane_items());
-        items.push(section_item("New Claude Pane"));
+        items.push(section_item("New Pane"));
+        items.extend(new_pane_items());
+        items.push(section_item("Agent Panes"));
+        items.extend(self.spawn_tree_items());
+
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            title: Some("Panes".to_string()),
+            subtitle: Some("Switch user panes or create Codex/Claude panes.".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            is_searchable: true,
+            search_placeholder: Some("Search panes".to_string()),
+            ..Default::default()
+        });
+    }
+
+    pub(super) fn open_claude_pane_profile_picker(&mut self) {
+        let mut items = Vec::new();
         for profile in ClaudeProviderProfileKind::creation_options() {
             let profile_config = profile.profile();
             let kind = *profile;
@@ -3870,52 +4583,158 @@ impl App {
                 ..Default::default()
             });
         }
-        items.push(section_item("Agent Panes"));
-        items.extend(self.spawn_tree_items());
 
         self.chat_widget.show_selection_view(SelectionViewParams {
-            title: Some("Panes".to_string()),
-            subtitle: Some("Switch user panes or create Claude Code headless panes.".to_string()),
+            title: Some("New Claude Pane".to_string()),
+            subtitle: Some("Choose the provider route for Claude Code headless.".to_string()),
             footer_hint: Some(standard_popup_hint_line()),
             items,
             is_searchable: true,
-            search_placeholder: Some("Search panes".to_string()),
+            search_placeholder: Some("Search Claude providers".to_string()),
             ..Default::default()
         });
     }
 
-    pub(super) fn select_user_pane(&mut self, pane_id: String) {
+    pub(super) fn open_codex_pane_model_picker(&mut self) {
+        let current_model = self.chat_widget.current_model().to_string();
+        let current_effort = self.chat_widget.current_reasoning_effort();
+        let mut items = Vec::new();
+        items.push(section_item("Current Model"));
+        items.push(codex_pane_model_item(
+            current_model.clone(),
+            ChatWidget::model_provider_for_selection(&current_model),
+            current_effort,
+            Some("Create a native Codex pane using the current model and reasoning.".to_string()),
+        ));
+
+        let presets = self
+            .chat_widget
+            .model_catalog()
+            .try_list_models()
+            .unwrap_or_default();
+        let mut added_other_section = false;
+        for preset in presets
+            .into_iter()
+            .filter(ChatWidget::show_in_pfterminal_model_picker)
+            .filter(|preset| preset.model != current_model)
+        {
+            if !added_other_section {
+                items.push(section_item("Other Models"));
+                added_other_section = true;
+            }
+            let description = (!preset.description.is_empty()).then_some(preset.description);
+            items.push(codex_pane_model_item(
+                preset.model.clone(),
+                ChatWidget::model_provider_for_selection(&preset.model),
+                Some(preset.default_reasoning_effort),
+                description,
+            ));
+        }
+
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            title: Some("New Codex Pane".to_string()),
+            subtitle: Some("Choose the model for the native Codex pane.".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            is_searchable: true,
+            search_placeholder: Some("Search models".to_string()),
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn save_active_claude_pane_transcript(&mut self) {
+        let Some(active_pane_id) = self
+            .claude_panes
+            .active_claude_pane_id()
+            .map(ToString::to_string)
+        else {
+            return;
+        };
+        self.claude_pane_transcript_cells
+            .insert(active_pane_id, self.transcript_cells.clone());
+    }
+
+    fn restore_claude_pane_transcript(&mut self, tui: &mut tui::Tui, pane_id: &str) -> Result<()> {
+        self.reset_for_thread_switch(tui)
+            .map_err(|err| anyhow!(err.to_string()))?;
+        self.transcript_cells = self
+            .claude_pane_transcript_cells
+            .get(pane_id)
+            .cloned()
+            .unwrap_or_default();
+        let width = self
+            .chat_widget
+            .history_wrap_width(tui.terminal.last_known_screen_size.width);
+        for cell in self.transcript_cells.clone() {
+            self.insert_history_cell_lines(tui, cell.as_ref(), width);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn append_inactive_claude_pane_transcript_cell(
+        &mut self,
+        pane_id: &str,
+        cell: Arc<dyn crate::history_cell::HistoryCell>,
+    ) {
+        self.claude_pane_transcript_cells
+            .entry(pane_id.to_string())
+            .or_default()
+            .push(cell);
+    }
+
+    pub(super) async fn select_user_pane(&mut self, tui: &mut tui::Tui, pane_id: String) {
+        self.save_active_claude_pane_transcript();
         match self.claude_panes.set_active_user_pane(&pane_id) {
             Ok(()) if pane_id == CODEX_MAIN_PANE_ID => {
+                self.sync_external_pane_turn_display(&pane_id);
                 self.sync_active_agent_label();
-                self.chat_widget.add_info_message(
-                    "Switched to Codex main pane.".to_string(),
-                    /*hint*/ None,
-                );
             }
             Ok(()) => {
+                self.detach_active_thread_for_external_pane().await;
+                if let Err(err) = self.restore_claude_pane_transcript(tui, &pane_id) {
+                    self.chat_widget
+                        .add_error_message(format!("Failed to switch Claude pane display: {err}"));
+                }
+                self.sync_external_pane_turn_display(&pane_id);
                 self.sync_active_agent_label();
-                let title = self
-                    .claude_panes
-                    .panes()
-                    .iter()
-                    .find(|pane| pane.id == pane_id)
-                    .map(|pane| pane.title.clone())
-                    .unwrap_or_else(|| pane_id.clone());
-                self.chat_widget
-                    .add_info_message(format!("Switched to {title}."), /*hint*/ None);
             }
             Err(err) => self.chat_widget.add_error_message(err.to_string()),
         }
     }
 
-    pub(super) fn create_claude_pane(&mut self, profile: ClaudeProviderProfileKind) {
+    pub(crate) fn sync_external_pane_turn_display(&mut self, pane_id: &str) {
+        if pane_id == CODEX_MAIN_PANE_ID || !self.claude_panes.claude_pane_is_running(pane_id) {
+            self.chat_widget.suspend_external_pane_turn_display();
+            return;
+        }
+        self.chat_widget.begin_external_pane_turn();
+        if let Some(status) = self.claude_panes.live_status_for_pane(pane_id) {
+            self.chat_widget
+                .update_external_pane_live_status(status.header, status.details);
+        }
+    }
+
+    pub(super) async fn create_claude_pane(
+        &mut self,
+        tui: &mut tui::Tui,
+        profile: ClaudeProviderProfileKind,
+    ) {
+        self.save_active_claude_pane_transcript();
         match self.claude_panes.create_pane(
             profile,
             self.config.cwd.to_path_buf(),
             self.config.codex_home.as_ref(),
         ) {
             Ok(id) => {
+                self.detach_active_thread_for_external_pane().await;
+                self.claude_pane_transcript_cells
+                    .entry(id.clone())
+                    .or_default();
+                if let Err(err) = self.restore_claude_pane_transcript(tui, &id) {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to initialize Claude pane display: {err}"
+                    ));
+                }
                 let title = profile.profile().title;
                 self.sync_active_agent_label();
                 self.chat_widget.add_info_message(
@@ -3923,6 +4742,64 @@ impl App {
                     Some("Type normally; turns will run through Claude Code headless.".to_string()),
                 );
                 tracing::info!(pane_id = %id, profile = ?profile, "created Claude headless pane");
+            }
+            Err(err) => self.chat_widget.add_error_message(err.to_string()),
+        }
+    }
+
+    pub(super) async fn create_spawn_claude_pane(
+        &mut self,
+        tui: &mut tui::Tui,
+        role: SpawnRole,
+        parent_node_id: Option<String>,
+        profile: ClaudeProviderProfileKind,
+    ) {
+        if role == SpawnRole::Nazgul {
+            self.chat_widget.add_error_message(
+                "Nazgul is a pane binding, not a spawned Claude worker.".to_string(),
+            );
+            return;
+        }
+        self.save_active_claude_pane_transcript();
+        let spawn_nickname = self.next_spawn_agent_nickname(role);
+        match self.claude_panes.create_pane_with_role(
+            profile,
+            self.config.cwd.to_path_buf(),
+            self.config.codex_home.as_ref(),
+            Some(role),
+            spawn_nickname.clone(),
+        ) {
+            Ok(id) => {
+                self.detach_active_thread_for_external_pane().await;
+                self.claude_pane_transcript_cells
+                    .entry(id.clone())
+                    .or_default();
+                if let Err(err) = self.restore_claude_pane_transcript(tui, &id) {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to initialize Claude spawn pane display: {err}"
+                    ));
+                }
+                let title = claude_pane_title(profile, Some(role), spawn_nickname.as_deref());
+                let logical_parent_node_id =
+                    self.logical_parent_node_for_spawn(role, parent_node_id.as_deref());
+                self.spawn_parent_by_node.insert(
+                    crate::spawn_orchestration::pane_node_id(&id),
+                    logical_parent_node_id,
+                );
+                self.sync_active_agent_label();
+                self.chat_widget.add_info_message(
+                    format!("Created and switched to {title}."),
+                    Some(format!(
+                        "Harness: Claude Code; role: {}; no task was started.",
+                        role.label()
+                    )),
+                );
+                tracing::info!(
+                    pane_id = %id,
+                    profile = ?profile,
+                    role = ?role,
+                    "created Claude spawn pane"
+                );
             }
             Err(err) => self.chat_widget.add_error_message(err.to_string()),
         }
@@ -3936,6 +4813,24 @@ impl App {
         else {
             return false;
         };
+        if matches!(op, AppCommand::Interrupt { .. }) {
+            if !self.claude_panes.claude_pane_is_running(&pane_id) {
+                self.chat_widget.complete_external_pane_turn(
+                    /*last_agent_message*/ None, /*duration_ms*/ None,
+                );
+                return true;
+            }
+            match self.claude_panes.interrupt_turn(&pane_id) {
+                Ok(()) => {
+                    self.chat_widget.update_external_pane_live_status(
+                        "Claude interrupting".to_string(),
+                        Some("Waiting for the Claude process to stop.".to_string()),
+                    );
+                }
+                Err(err) => self.chat_widget.add_error_message(err.to_string()),
+            }
+            return true;
+        }
         let prompt = match prompt_from_user_turn(op) {
             Ok(Some(prompt)) => prompt,
             Ok(None) => return false,
@@ -3944,6 +4839,8 @@ impl App {
                 return true;
             }
         };
+        let prompt_context = self.claude_pane_prompt_context(&pane_id);
+        let prompt = compose_claude_pane_prompt(prompt, prompt_context.as_deref());
         let prepared =
             match self
                 .claude_panes
@@ -3966,7 +4863,76 @@ impl App {
         true
     }
 
+    pub(super) fn submit_claude_pane_task(&mut self, pane_id: String, task: String) {
+        let task = task.trim().to_string();
+        if task.is_empty() {
+            self.chat_widget
+                .add_error_message("Claude pane task cannot be empty.".to_string());
+            return;
+        }
+        let is_active = self.claude_panes.active_user_pane_id() == pane_id;
+        let user_cell =
+            crate::history_cell::new_user_prompt(task.clone(), Vec::new(), Vec::new(), Vec::new());
+        if is_active {
+            self.app_event_tx
+                .send(AppEvent::InsertHistoryCell(Box::new(user_cell)));
+        } else {
+            self.append_inactive_claude_pane_transcript_cell(&pane_id, Arc::new(user_cell));
+        }
+        self.claude_panes
+            .set_latest_task_message(&pane_id, Some(task.clone()));
+        let prompt_context = self.claude_pane_prompt_context(&pane_id);
+        let prompt = compose_claude_pane_prompt(task, prompt_context.as_deref());
+        let prepared =
+            match self
+                .claude_panes
+                .prepare_turn(&pane_id, prompt, self.config.codex_home.as_ref())
+            {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    self.chat_widget.add_error_message(err.to_string());
+                    return;
+                }
+            };
+
+        if self.claude_panes.active_user_pane_id() == pane_id {
+            self.chat_widget.begin_external_pane_turn();
+        }
+        let tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let pane_id = prepared.pane_id.clone();
+            let result = run_prepared_claude_turn(prepared, Some(tx.clone())).await;
+            tx.send(AppEvent::ClaudePaneTurnFinished { pane_id, result });
+        });
+    }
+
+    fn claude_pane_prompt_context(&self, pane_id: &str) -> Option<String> {
+        let mut contexts = Vec::new();
+        if let Some(role_context) = self
+            .claude_panes
+            .claude_pane_spawn_role(pane_id)
+            .and_then(SpawnRole::claude_pane_context)
+        {
+            contexts.push(role_context.to_string());
+        }
+        if let Some(spawn_context) = self.spawn_context_for_user_pane(pane_id) {
+            contexts.push(spawn_context);
+        }
+        (!contexts.is_empty()).then(|| contexts.join("\n\n"))
+    }
+
     pub(super) fn on_claude_pane_turn_progress(&mut self, progress: ClaudePaneTurnProgress) {
+        if let Some(delta) = progress.assistant_text_delta.as_deref() {
+            let dispatches = self
+                .claude_panes
+                .collect_spawn_dispatches_from_assistant_delta(&progress.pane_id, delta);
+            if !dispatches.is_empty() {
+                self.dispatch_spawn_task_blocks(&progress.pane_id, dispatches);
+            }
+            if progress.phase == "assistant-text" {
+                return;
+            }
+        }
         if self.claude_panes.active_user_pane_id() != progress.pane_id {
             return;
         }
@@ -3981,29 +4947,85 @@ impl App {
         pane_id: String,
         result: Result<ClaudePaneTurnOutput, String>,
     ) {
-        self.claude_panes.finish_turn(&pane_id, &result);
         match result {
-            Ok(output) => {
+            Ok(mut output) => {
+                let is_active = self.claude_panes.active_user_pane_id() == pane_id;
+                let (visible_text, dispatches) =
+                    crate::spawn_orchestration::extract_spawn_task_dispatches(&output.text);
+                output.text = visible_text;
+                let dispatches = self
+                    .claude_panes
+                    .filter_new_spawn_dispatches(&pane_id, dispatches);
+                self.claude_panes.finish_turn(&pane_id, &Ok(output.clone()));
+                if !dispatches.is_empty() {
+                    self.dispatch_spawn_task_blocks(&pane_id, dispatches);
+                }
                 if !output.text.trim().is_empty() {
-                    self.chat_widget
-                        .append_external_pane_response(output.text.clone());
+                    if is_active {
+                        self.chat_widget
+                            .append_external_pane_response(output.text.clone());
+                    } else {
+                        self.append_inactive_claude_pane_transcript_cell(
+                            &pane_id,
+                            Arc::new(crate::history_cell::AgentMarkdownCell::new(
+                                output.text.clone(),
+                                self.config.cwd.as_path(),
+                            )),
+                        );
+                    }
                 }
                 let hint = output.audit_hint();
                 if output.status.is_success() {
-                    self.chat_widget
-                        .complete_external_pane_turn(Some(output.text), Some(output.duration_ms));
-                    self.chat_widget
-                        .add_info_message("Claude pane turn complete.".to_string(), Some(hint));
-                } else {
+                    if is_active {
+                        self.chat_widget.complete_external_pane_turn(
+                            Some(output.text),
+                            Some(output.duration_ms),
+                        );
+                        self.chat_widget
+                            .add_info_message("Claude pane turn complete.".to_string(), Some(hint));
+                    } else {
+                        self.append_inactive_claude_pane_transcript_cell(
+                            &pane_id,
+                            Arc::new(crate::history_cell::new_info_event(
+                                "Claude pane turn complete.".to_string(),
+                                Some(hint),
+                            )),
+                        );
+                    }
+                } else if is_active {
                     self.chat_widget
                         .fail_external_pane_turn(output.failure_message());
                     self.chat_widget.add_info_message(
                         "Claude pane turn audit recorded.".to_string(),
                         Some(hint),
                     );
+                } else {
+                    self.append_inactive_claude_pane_transcript_cell(
+                        &pane_id,
+                        Arc::new(crate::history_cell::new_error_event(
+                            output.failure_message(),
+                        )),
+                    );
+                    self.append_inactive_claude_pane_transcript_cell(
+                        &pane_id,
+                        Arc::new(crate::history_cell::new_info_event(
+                            "Claude pane turn audit recorded.".to_string(),
+                            Some(hint),
+                        )),
+                    );
                 }
             }
-            Err(error) => self.chat_widget.fail_external_pane_turn(error),
+            Err(error) => {
+                self.claude_panes.finish_turn(&pane_id, &Err(error.clone()));
+                if self.claude_panes.active_user_pane_id() == pane_id {
+                    self.chat_widget.fail_external_pane_turn(error);
+                } else {
+                    self.append_inactive_claude_pane_transcript_cell(
+                        &pane_id,
+                        Arc::new(crate::history_cell::new_error_event(error)),
+                    );
+                }
+            }
         }
     }
 
@@ -4022,6 +5044,7 @@ impl App {
             dismiss_on_select: true,
             ..Default::default()
         });
+        items.extend(self.codex_user_pane_items());
         for pane in self.claude_panes.panes() {
             let pane_id = pane.id.clone();
             let mut description = match pane.status {
@@ -4044,6 +5067,12 @@ impl App {
             if let Some(path) = pane.latest_audit_path.as_ref() {
                 description.push_str(&format!("; audit: {}", path.display()));
             }
+            if let Some(task) = pane.latest_task_message.as_deref() {
+                description.push_str(&format!("; task: {task}"));
+            }
+            if let Some(result) = pane.latest_result_message.as_deref() {
+                description.push_str(&format!("; result: {result}"));
+            }
             items.push(SelectionItem {
                 name: pane.title.clone(),
                 description: Some(description),
@@ -4060,6 +5089,134 @@ impl App {
         }
         items
     }
+
+    fn codex_user_pane_items(&self) -> Vec<SelectionItem> {
+        self.agent_navigation
+            .ordered_threads()
+            .into_iter()
+            .filter(|(thread_id, _)| Some(*thread_id) != self.primary_thread_id)
+            .filter(|(thread_id, _)| !self.is_spawn_orchestration_thread(*thread_id))
+            .filter(|(_, entry)| {
+                entry
+                    .agent_role
+                    .as_deref()
+                    .map(|role| role == "default")
+                    .unwrap_or(true)
+            })
+            .map(|(thread_id, entry)| {
+                let name = entry
+                    .agent_nickname
+                    .as_deref()
+                    .filter(|nickname| !nickname.trim().is_empty())
+                    .map(|nickname| format!("Codex - {nickname}"))
+                    .unwrap_or_else(|| format!("Codex - {}", short_thread_id(thread_id)));
+                let mut description = if entry.is_closed {
+                    "done".to_string()
+                } else if entry.is_running {
+                    "running".to_string()
+                } else {
+                    "idle".to_string()
+                };
+                if let Some(task) = entry.last_task_message.as_deref() {
+                    description.push_str(&format!(
+                        "; latest task: {}",
+                        truncate_for_display(task, 80)
+                    ));
+                }
+                if let Some(result) = entry.last_result_message.as_deref() {
+                    description.push_str(&format!(
+                        "; latest result: {}",
+                        truncate_for_display(result, 80)
+                    ));
+                }
+                SelectionItem {
+                    name: name.clone(),
+                    name_prefix_spans: crate::multi_agents::agent_picker_status_dot_spans(
+                        entry.is_closed,
+                    ),
+                    description: Some(description),
+                    is_current: self.claude_panes.active_user_pane_id() == CODEX_MAIN_PANE_ID
+                        && self.active_thread_id == Some(thread_id),
+                    actions: vec![Box::new(move |tx| {
+                        tx.send(AppEvent::SelectAgentThread(thread_id));
+                    })],
+                    dismiss_on_select: true,
+                    search_value: Some(format!("{name} {thread_id}")),
+                    ..Default::default()
+                }
+            })
+            .collect()
+    }
+
+    pub(super) fn next_codex_pane_nickname(&self) -> String {
+        let count = self
+            .agent_navigation
+            .ordered_threads()
+            .into_iter()
+            .filter(|(thread_id, _)| Some(*thread_id) != self.primary_thread_id)
+            .filter(|(thread_id, _)| !self.is_spawn_orchestration_thread(*thread_id))
+            .filter(|(_, entry)| {
+                entry
+                    .agent_role
+                    .as_deref()
+                    .map(|role| role == "default")
+                    .unwrap_or(true)
+            })
+            .count();
+        format!("Codex {}", count + 1)
+    }
+}
+
+fn codex_pane_model_item(
+    model: String,
+    provider: Option<String>,
+    effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+    description: Option<String>,
+) -> SelectionItem {
+    SelectionItem {
+        name: model.clone(),
+        description,
+        actions: vec![Box::new(move |tx| {
+            tx.send(AppEvent::CreateCodexPane {
+                model: model.clone(),
+                provider: provider.clone(),
+                effort: effort.clone(),
+            });
+        })],
+        dismiss_on_select: true,
+        ..Default::default()
+    }
+}
+
+fn new_pane_items() -> Vec<SelectionItem> {
+    vec![
+        SelectionItem {
+            name: "+ Codex Pane".to_string(),
+            description: Some(
+                "Create a persistent native Codex pane; choose model next.".to_string(),
+            ),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::OpenCodexPaneModelPicker);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        },
+        SelectionItem {
+            name: "+ Claude Pane".to_string(),
+            description: Some(
+                "Create a Claude Code headless pane; choose provider next.".to_string(),
+            ),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::OpenClaudePaneProfilePicker);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        },
+    ]
+}
+
+fn short_thread_id(thread_id: codex_protocol::ThreadId) -> String {
+    thread_id.to_string().chars().take(8).collect()
 }
 
 fn section_item(name: &str) -> SelectionItem {
@@ -4088,6 +5245,8 @@ mod tests {
                 id: format!("claude-{id}"),
                 title: profile.profile().title.to_string(),
                 profile,
+                spawn_role: None,
+                spawn_nickname: None,
                 cwd: std::env::current_dir().expect("cwd"),
                 claude_session_id: None,
                 status: ClaudePaneStatus::Idle,
@@ -4095,8 +5254,11 @@ mod tests {
                 latest_usage_status: None,
                 latest_turn_status: None,
                 latest_audit_path: None,
+                latest_task_message: None,
+                latest_result_message: None,
                 artifact_dir,
                 live_turn: None,
+                cancel_token: None,
                 lock: Arc::new(Mutex::new(())),
                 next_turn_index: 1,
             },
@@ -4199,6 +5361,89 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_progress_uses_thinking_blocks() {
+        let (dir, pane) = pane(ClaudeProviderProfileKind::ClaudePlan);
+        let plan =
+            build_claude_command_plan(&pane, "review".to_string(), dir.path()).expect("plan");
+        let started_at = Instant::now();
+        let value = json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "thinking",
+                    "thinking": "I need to inspect the Troll and Orc hierarchy before assigning work."
+                }]
+            }
+        });
+
+        let progress =
+            progress_from_claude_value(&plan, &started_at, &value).expect("reasoning progress");
+        assert_eq!(progress.phase, "reasoning");
+        assert_eq!(
+            progress.summary,
+            "Claude reasoning: I need to inspect the Troll and Orc hierarchy before assigning work."
+        );
+        assert_eq!(progress.hint, None);
+    }
+
+    #[test]
+    fn assistant_text_progress_carries_streaming_delta() {
+        let (dir, pane) = pane(ClaudeProviderProfileKind::ClaudePlan);
+        let plan =
+            build_claude_command_plan(&pane, "dispatch".to_string(), dir.path()).expect("plan");
+        let started_at = Instant::now();
+        let value = json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "```pfterminal-send-task\ntarget: Snaga\ntask:\nbuild site\n```"
+                }]
+            }
+        });
+
+        let progress = progresses_from_claude_value(&plan, &started_at, &value)
+            .into_iter()
+            .find(|progress| progress.phase == "assistant-text")
+            .expect("assistant text progress");
+        assert_eq!(
+            progress.assistant_text_delta.as_deref(),
+            Some("```pfterminal-send-task\ntarget: Snaga\ntask:\nbuild site\n```")
+        );
+    }
+
+    #[test]
+    fn streaming_assistant_dispatch_blocks_are_collected_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut registry = ClaudePaneRegistry::new();
+        let pane_id = registry
+            .create_pane(
+                ClaudeProviderProfileKind::ClaudePlan,
+                std::env::current_dir().expect("cwd"),
+                dir.path(),
+            )
+            .expect("pane");
+
+        let first = registry.collect_spawn_dispatches_from_assistant_delta(
+            &pane_id,
+            "Before ```pfterminal-send-task\ntarget: Snaga\ntask:\nbuild",
+        );
+        assert!(first.is_empty());
+
+        let second =
+            registry.collect_spawn_dispatches_from_assistant_delta(&pane_id, " site\n``` after");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].target, "Snaga");
+        assert_eq!(second[0].task, "build site");
+
+        let duplicate = registry.collect_spawn_dispatches_from_assistant_delta(
+            &pane_id,
+            "```pfterminal-send-task\ntarget: Snaga\ntask:\nbuild site\n```",
+        );
+        assert!(duplicate.is_empty());
+    }
+
+    #[test]
     fn live_status_panel_tracks_tools_without_artifact_log_spam() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut registry = ClaudePaneRegistry::new();
@@ -4218,6 +5463,7 @@ mod tests {
             summary:
                 "Claude tool call: Bash: Create directory for the mock donkey riding course website"
                     .to_string(),
+            assistant_text_delta: None,
             hint: None,
             elapsed_ms: 30_000,
             artifact_path: artifact_path.clone(),
@@ -4243,6 +5489,7 @@ mod tests {
             pane_id: pane_id.clone(),
             phase: "waiting".to_string(),
             summary: "Claude running.".to_string(),
+            assistant_text_delta: None,
             hint: None,
             elapsed_ms: 90_000,
             artifact_path: artifact_path.clone(),
@@ -4264,6 +5511,7 @@ mod tests {
             summary:
                 "Claude tool call: Bash: Write the donkey riding course mock website HTML file"
                     .to_string(),
+            assistant_text_delta: None,
             hint: None,
             elapsed_ms: 150_000,
             artifact_path: artifact_path.clone(),
@@ -4284,6 +5532,7 @@ mod tests {
             pane_id,
             phase: "assistant-result".to_string(),
             summary: "Claude returned a result.".to_string(),
+            assistant_text_delta: None,
             hint: None,
             elapsed_ms: 180_000,
             artifact_path,
@@ -4294,6 +5543,167 @@ mod tests {
         assert!(details.contains("Current: finalizing result"));
         assert!(
             details.contains("done    Bash: Write the donkey riding course mock website HTML file")
+        );
+    }
+
+    #[test]
+    fn live_status_panel_tracks_reasoning_without_artifact_log_spam() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut registry = ClaudePaneRegistry::new();
+        let pane_id = registry
+            .create_pane(
+                ClaudeProviderProfileKind::ClaudePlan,
+                std::env::current_dir().expect("cwd"),
+                dir.path(),
+            )
+            .expect("pane");
+        let artifact_path = dir.path().join("turn-0001.jsonl");
+        let audit_path = dir.path().join("turn-0001.audit.json");
+
+        let reasoning = ClaudePaneTurnProgress {
+            pane_id,
+            phase: "reasoning".to_string(),
+            summary: "Claude reasoning: Inspect the hierarchy before asking Orcs to execute."
+                .to_string(),
+            assistant_text_delta: None,
+            hint: None,
+            elapsed_ms: 12_000,
+            artifact_path,
+            audit_path,
+        };
+        let status = registry.update_live_progress(&reasoning).expect("status");
+        assert_eq!(status.header, "Claude running · 12s");
+        let details = status.details.expect("details");
+        assert!(
+            details.contains(
+                "Current: reasoning: Inspect the hierarchy before asking Orcs to execute."
+            )
+        );
+        assert!(details.contains("Reasoning:"));
+        assert!(details.contains("Inspect the hierarchy before asking Orcs to execute."));
+        assert!(!details.contains("artifact:"));
+        assert!(!details.contains("audit:"));
+    }
+
+    #[test]
+    fn vercel_profiles_are_creation_options() {
+        assert!(
+            ClaudeProviderProfileKind::creation_options()
+                .contains(&ClaudeProviderProfileKind::VercelGlm52)
+        );
+        assert!(
+            ClaudeProviderProfileKind::creation_options()
+                .contains(&ClaudeProviderProfileKind::VercelGlm52Fast)
+        );
+    }
+
+    #[test]
+    fn top_level_new_pane_items_are_collapsed() {
+        let items = new_pane_items();
+        let names = items
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["+ Codex Pane", "+ Claude Pane"]);
+        assert!(
+            names
+                .iter()
+                .all(|name| !name.contains("GLM") && !name.contains("Vercel")),
+            "top-level /panes must not list provider-specific Claude rows"
+        );
+    }
+
+    #[test]
+    fn vercel_profile_settings_use_ai_gateway_anthropic_endpoint() {
+        let profile = ClaudeProviderProfileKind::VercelGlm52.profile();
+        let settings = settings_json_with_base_url(profile, Some("pfterminal"), None);
+
+        assert_eq!(
+            settings.pointer("/env/ANTHROPIC_BASE_URL"),
+            Some(&json!("https://ai-gateway.vercel.sh"))
+        );
+        assert_eq!(
+            settings.pointer("/env/ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some(&json!("zai/glm-5.2"))
+        );
+        assert_eq!(
+            settings.pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            Some(&json!("zai/glm-5.2-fast"))
+        );
+        assert_eq!(
+            settings.pointer("/apiKeyHelper"),
+            Some(&json!(
+                "pfterminal vault auth-helper provider/ai_gateway_api_key"
+            ))
+        );
+    }
+
+    #[test]
+    fn vercel_fast_profile_uses_fast_model_for_all_claude_aliases() {
+        let profile = ClaudeProviderProfileKind::VercelGlm52Fast.profile();
+        let settings = settings_json_with_base_url(profile, Some("pfterminal"), None);
+
+        assert_eq!(
+            settings.pointer("/env/ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some(&json!("zai/glm-5.2-fast"))
+        );
+        assert_eq!(
+            settings.pointer("/env/ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            Some(&json!("zai/glm-5.2-fast"))
+        );
+        assert_eq!(
+            settings.pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            Some(&json!("zai/glm-5.2-fast"))
+        );
+    }
+
+    #[test]
+    fn vercel_fast_command_plan_uses_count_tokens_passthrough_bridge() {
+        let (dir, pane) = pane(ClaudeProviderProfileKind::VercelGlm52Fast);
+        codex_vault::Vault::new(dir.path().to_path_buf())
+            .add(codex_vault::AddCredential {
+                label: "provider/ai_gateway_api_key".to_string(),
+                credential_type: codex_vault::CredentialType::ApiKey,
+                provider: Some("vercel".to_string()),
+                notes: None,
+                revocation_notes: None,
+                secret: "vercel-test-key".to_string(),
+            })
+            .expect("store test Vercel key");
+
+        let plan = build_claude_command_plan(&pane, "hello".to_string(), dir.path()).expect("plan");
+        let settings = std::fs::read_to_string(pane.artifact_dir.join("settings.json"))
+            .expect("settings should be written");
+        let settings: Value = serde_json::from_str(&settings).expect("settings json");
+        let bridge = plan.bridge.as_ref().expect("Vercel should use bridge");
+
+        assert_eq!(bridge.kind, ClaudeBridgeKind::AnthropicPassthrough);
+        assert_eq!(bridge.upstream_base_url, "https://ai-gateway.vercel.sh");
+        assert_eq!(bridge.upstream_api_key, "vercel-test-key");
+        assert_eq!(
+            plan.env.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str),
+            Some("pfterminal-local-bridge")
+        );
+        assert!(
+            settings
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str)
+                .is_some_and(|base_url| base_url.starts_with("http://127.0.0.1:"))
+        );
+        assert!(!plan.args.iter().any(|arg| arg.contains("vercel-test-key")));
+        assert!(!settings.to_string().contains("vercel-test-key"));
+    }
+
+    #[test]
+    fn smoke_provider_profile_accepts_vercel_aliases() {
+        assert_eq!(
+            smoke_provider_profile("vercel"),
+            Some(ClaudeProviderProfileKind::VercelGlm52)
+        );
+        assert_eq!(
+            smoke_provider_profile("vercel-glm-52-fast"),
+            Some(ClaudeProviderProfileKind::VercelGlm52Fast)
         );
     }
 
@@ -4344,6 +5754,22 @@ mod tests {
         assert_eq!(
             parsed.usage_summary.as_deref(),
             Some(r#"{"input_tokens":1}"#)
+        );
+    }
+
+    #[test]
+    fn parse_stream_json_without_final_result_is_incomplete() {
+        let error = parse_claude_output(
+            r#"{"type":"system","subtype":"init","session_id":"22222222-2222-4222-8222-222222222222"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Now let me restart the dev server and run the full test:"}]},"session_id":"22222222-2222-4222-8222-222222222222"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call_restart","name":"Bash","input":{"command":"pkill -f vite","description":"Kill old vite processes"}}]},"session_id":"22222222-2222-4222-8222-222222222222"}"#,
+        )
+        .expect_err("dangling tool call without final result should not be success");
+
+        assert!(
+            error
+                .to_string()
+                .contains("ended before a final result event")
         );
     }
 
@@ -4420,6 +5846,129 @@ mod tests {
     }
 
     #[test]
+    fn interrupt_turn_cancels_prepared_claude_token_and_finishes_cleanly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut registry = ClaudePaneRegistry::new();
+        let pane_id = registry
+            .create_pane(
+                ClaudeProviderProfileKind::ClaudePlan,
+                std::env::current_dir().expect("cwd"),
+                dir.path(),
+            )
+            .expect("pane");
+
+        let prepared = registry
+            .prepare_turn(&pane_id, "long running task".to_string(), dir.path())
+            .expect("prepared");
+        let cancel_token = prepared.cancel_token.clone();
+        assert!(!cancel_token.is_cancelled());
+        assert!(registry.interrupt_turn(&pane_id).is_ok());
+        assert!(cancel_token.is_cancelled());
+        assert!(
+            registry
+                .prepare_turn(&pane_id, "overlap".to_string(), dir.path())
+                .is_err(),
+            "interrupted turns remain running until the child process exits"
+        );
+        drop(prepared);
+
+        let result = Ok(ClaudePaneTurnOutput {
+            text: String::new(),
+            status: ClaudePaneTurnStatus::Interrupted,
+            session_id: None,
+            usage_summary: None,
+            usage_status: ClaudePaneUsageStatus::Missing,
+            artifact_path: dir.path().join("turn-0001.jsonl"),
+            audit_path: dir.path().join("turn-0001.audit.json"),
+            duration_ms: 1,
+            terminal_reason: Some("interrupted".to_string()),
+            error_summary: Some("Claude pane turn interrupted by user.".to_string()),
+            tool_names: Vec::new(),
+            tool_events: Vec::new(),
+            reasoning_events: Vec::new(),
+            command_mode: ClaudeCommandMode::NewSession,
+        });
+        registry.finish_turn(&pane_id, &result);
+
+        let pane = registry
+            .panes()
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .expect("pane exists");
+        assert_eq!(pane.status, ClaudePaneStatus::Idle);
+        assert!(pane.cancel_token.is_none());
+        assert_eq!(
+            pane.latest_turn_status,
+            Some(ClaudePaneTurnStatus::Interrupted)
+        );
+
+        let next = registry
+            .prepare_turn(&pane_id, "next task".to_string(), dir.path())
+            .expect("next turn");
+        assert!(!next.cancel_token.is_cancelled());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_claude_child_reaps_running_process() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 60"]);
+        command.kill_on_drop(true);
+        command.process_group(0);
+        let mut child = command.spawn().expect("spawn sleep");
+
+        stop_claude_child(&mut child)
+            .await
+            .expect("child should be killed and reaped");
+
+        assert!(child.try_wait().expect("query child status").is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_running_command_returns_interrupted_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact_path = dir.path().join("turn-0001.jsonl");
+        let audit_path = dir.path().join("turn-0001.audit.json");
+        let plan = ClaudeCommandPlan {
+            executable: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"55555555-5555-4555-8555-555555555555\"}'; sleep 60".to_string(),
+            ],
+            env: BTreeMap::new(),
+            cwd: dir.path().to_path_buf(),
+            pane_id: "claude-test".to_string(),
+            pane_title: "Claude Test".to_string(),
+            profile_title: "Claude Test".to_string(),
+            provider_model: "test-model".to_string(),
+            turn_index: 1,
+            command_mode: ClaudeCommandMode::NewSession,
+            max_turns: None,
+            artifact_path: artifact_path.clone(),
+            audit_path: audit_path.clone(),
+            timeout_ms: None,
+            bridge: None,
+        };
+        let cancel_token = CancellationToken::new();
+        let cancel_handle = cancel_token.clone();
+        let runner = tokio::spawn(run_claude_command_plan(plan, cancel_token, None));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel_handle.cancel();
+        let output = tokio::time::timeout(Duration::from_secs(5), runner)
+            .await
+            .expect("runner should stop promptly after cancellation")
+            .expect("runner join")
+            .expect("turn output");
+
+        assert_eq!(output.status, ClaudePaneTurnStatus::Interrupted);
+        assert_eq!(output.terminal_reason.as_deref(), Some("interrupted"));
+        assert!(artifact_path.exists());
+        assert!(audit_path.exists());
+    }
+
+    #[test]
     fn prompt_from_user_turn_rejects_images() {
         let op = AppCommand::UserTurn {
             items: vec![UserInput::Image {
@@ -4443,14 +5992,89 @@ mod tests {
     }
 
     #[test]
+    fn compose_claude_pane_prompt_prepends_spawn_context() {
+        let prompt = compose_claude_pane_prompt(
+            "who are your trolls and orcs".to_string(),
+            Some(
+                "<pfterminal_spawn_context>\nTrolls: none spawned yet.\n</pfterminal_spawn_context>",
+            ),
+        );
+
+        assert!(prompt.starts_with("<pfterminal_spawn_context>"));
+        assert!(prompt.contains("Trolls: none spawned yet."));
+        assert!(prompt.ends_with("User message:\nwho are your trolls and orcs"));
+        assert_eq!(
+            compose_claude_pane_prompt("hello".to_string(), Some("   ")),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn claude_spawn_pane_title_includes_role() {
+        assert_eq!(
+            claude_pane_title(
+                ClaudeProviderProfileKind::VercelGlm52Fast,
+                Some(SpawnRole::Troll),
+                Some("Burzum")
+            ),
+            "Claude Code Burzum [troll] - GLM 5.2 Fast Vercel"
+        );
+        assert_eq!(
+            claude_pane_title(
+                ClaudeProviderProfileKind::ZaiGlm52,
+                Some(SpawnRole::Orc),
+                None
+            ),
+            "Claude Code Orc - GLM 5.2 Z.AI"
+        );
+        assert_eq!(
+            claude_pane_title(ClaudeProviderProfileKind::ClaudePlan, None, None),
+            "Claude Code - Claude Plan"
+        );
+    }
+
+    #[test]
+    fn create_pane_with_role_sets_spawn_role_and_title() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut registry = ClaudePaneRegistry::new();
+        let pane_id = registry
+            .create_pane_with_role(
+                ClaudeProviderProfileKind::ClaudePlan,
+                dir.path().to_path_buf(),
+                dir.path(),
+                Some(SpawnRole::Troll),
+                Some("Burzum".to_string()),
+            )
+            .expect("create pane");
+        let pane = registry
+            .panes()
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .expect("pane");
+
+        assert_eq!(pane.spawn_role, Some(SpawnRole::Troll));
+        assert_eq!(pane.spawn_nickname.as_deref(), Some("Burzum"));
+        assert_eq!(pane.title, "Claude Code Burzum [troll] - Claude Plan");
+    }
+
+    #[test]
     fn command_plan_uses_session_id_then_resume_without_secret_in_args() {
         let (dir, mut pane) = pane(ClaudeProviderProfileKind::ClaudePlan);
         let first =
             build_claude_command_plan(&pane, "hello".to_string(), dir.path()).expect("first plan");
+        let first_session_id = first
+            .args
+            .windows(2)
+            .find_map(|w| (w[0] == "--session-id").then(|| w[1].clone()))
+            .expect("first plan should start a Claude session");
         assert!(
-            first.args.windows(2).any(|w| {
-                w[0] == "--session-id" && w[1] == pane.id.trim_start_matches("claude-")
-            })
+            Uuid::parse_str(&first_session_id).is_ok(),
+            "Claude session id should be a fresh UUID"
+        );
+        assert_ne!(
+            first_session_id,
+            pane.id.trim_start_matches("claude-"),
+            "fresh Claude session id must not reuse the pane id"
         );
         assert!(
             first
@@ -4519,6 +6143,7 @@ mod tests {
             error_summary: None,
             tool_names: Vec::new(),
             tool_events: Vec::new(),
+            reasoning_events: Vec::new(),
             command_mode: ClaudeCommandMode::NewSession,
         });
         registry.finish_turn(&pane_id, &result);
@@ -4533,6 +6158,69 @@ mod tests {
                 .windows(2)
                 .any(|w| { w[0] == "--resume" && w[1] == "11111111-2222-4333-8444-555555555555" })
         );
+    }
+
+    #[test]
+    fn provider_error_clears_resume_session_for_next_turn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut registry = ClaudePaneRegistry::new();
+        let pane_id = registry
+            .create_pane(
+                ClaudeProviderProfileKind::ClaudePlan,
+                std::env::current_dir().expect("cwd"),
+                dir.path(),
+            )
+            .expect("create pane");
+        {
+            let pane = registry
+                .panes
+                .iter_mut()
+                .find(|pane| pane.id == pane_id)
+                .expect("pane");
+            pane.claude_session_id = Some("11111111-2222-4333-8444-555555555555".to_string());
+        }
+
+        let result = Ok(ClaudePaneTurnOutput {
+            text: "API Error: The model request was rejected.".to_string(),
+            status: ClaudePaneTurnStatus::ProviderError,
+            session_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
+            usage_summary: None,
+            usage_status: ClaudePaneUsageStatus::Untrusted,
+            artifact_path: dir.path().join("turn-0001.jsonl"),
+            audit_path: dir.path().join("turn-0001.audit.json"),
+            duration_ms: 1,
+            terminal_reason: Some("completed".to_string()),
+            error_summary: Some("model request rejected".to_string()),
+            tool_names: Vec::new(),
+            tool_events: Vec::new(),
+            reasoning_events: Vec::new(),
+            command_mode: ClaudeCommandMode::Resume,
+        });
+        registry.finish_turn(&pane_id, &result);
+
+        let next = registry
+            .prepare_turn(&pane_id, "try again".to_string(), dir.path())
+            .expect("next turn");
+        let next_session_id = next
+            .plan
+            .args
+            .windows(2)
+            .find_map(|w| (w[0] == "--session-id").then(|| w[1].clone()))
+            .expect("provider-error should force a fresh Claude session");
+        assert!(
+            Uuid::parse_str(&next_session_id).is_ok(),
+            "fresh Claude session should be a UUID"
+        );
+        assert_ne!(
+            next_session_id,
+            pane_id.trim_start_matches("claude-"),
+            "fresh Claude session must not reuse pane id"
+        );
+        assert_ne!(
+            next_session_id, "11111111-2222-4333-8444-555555555555",
+            "fresh Claude session must not reuse failed provider session"
+        );
+        assert!(!next.plan.args.iter().any(|arg| arg == "--resume"));
     }
 
     #[test]
@@ -4554,6 +6242,7 @@ mod tests {
                 name: "Read".to_string(),
                 preview: r#"{"file_path":"README.md"}"#.to_string(),
             }],
+            reasoning_events: Vec::new(),
             command_mode: ClaudeCommandMode::NewSession,
         };
 
@@ -4620,6 +6309,7 @@ mod tests {
                     preview: "{}".to_string(),
                 },
             ],
+            reasoning_events: Vec::new(),
             command_mode: ClaudeCommandMode::NewSession,
         };
 
@@ -4630,11 +6320,49 @@ mod tests {
     }
 
     #[test]
+    fn turn_audit_serializes_reasoning_events() {
+        let (dir, pane) = pane(ClaudeProviderProfileKind::ClaudePlan);
+        let plan =
+            build_claude_command_plan(&pane, "review".to_string(), dir.path()).expect("plan");
+        let output = ClaudePaneTurnOutput {
+            text: "done".to_string(),
+            status: ClaudePaneTurnStatus::Success,
+            session_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
+            usage_summary: None,
+            usage_status: ClaudePaneUsageStatus::Missing,
+            artifact_path: plan.artifact_path.clone(),
+            audit_path: plan.audit_path.clone(),
+            duration_ms: 10,
+            terminal_reason: None,
+            error_summary: None,
+            tool_names: Vec::new(),
+            tool_events: Vec::new(),
+            reasoning_events: vec![ClaudePaneReasoningEvent {
+                preview: "Inspect Orc output before reporting to the Nazgul.".to_string(),
+            }],
+            command_mode: ClaudeCommandMode::NewSession,
+        };
+
+        write_turn_audit(&plan, &output, 1, 2, Some(1)).expect("write audit");
+        let audit = std::fs::read_to_string(&plan.audit_path).expect("read audit");
+        let audit: Value = serde_json::from_str(&audit).expect("audit json");
+        assert_eq!(
+            audit.get("reasoning_event_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            audit.pointer("/reasoning_events/0/preview"),
+            Some(&json!("Inspect Orc output before reporting to the Nazgul."))
+        );
+    }
+
+    #[test]
     fn allowed_auth_helper_labels_are_provider_scoped() {
         assert!(allowed_provider_vault_label("provider/zai_api_key"));
         assert!(allowed_provider_vault_label("provider/ambient_api_key"));
         assert!(allowed_provider_vault_label("provider/baseten_api_key"));
         assert!(allowed_provider_vault_label("provider/openrouter_api_key"));
+        assert!(allowed_provider_vault_label("provider/ai_gateway_api_key"));
         assert!(!allowed_provider_vault_label("random"));
     }
 
@@ -4651,6 +6379,54 @@ mod tests {
         });
         let parsed = parsed_from_value(&value).expect("parse");
         assert_eq!(parsed.text, "one");
+    }
+
+    #[test]
+    fn parse_stream_json_collects_thinking_blocks() {
+        let stdout = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"The Troll should inspect the Orc output before reporting up."}]},"session_id":"11111111-2222-4333-8444-555555555555"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Reviewed."}]}}
+{"type":"result","subtype":"success","result":"Reviewed.","session_id":"11111111-2222-4333-8444-555555555555","usage":{"input_tokens":10,"output_tokens":4}}"#;
+
+        let parsed = parse_claude_output(stdout).expect("parse stream");
+        assert_eq!(parsed.text, "Reviewed.");
+        assert_eq!(parsed.reasoning_events.len(), 1);
+        assert_eq!(
+            parsed.reasoning_events[0].preview,
+            "The Troll should inspect the Orc output before reporting up."
+        );
+    }
+
+    #[test]
+    fn progress_can_emit_reasoning_and_tool_for_one_message() {
+        let (dir, pane) = pane(ClaudeProviderProfileKind::ClaudePlan);
+        let plan =
+            build_claude_command_plan(&pane, "review".to_string(), dir.path()).expect("plan");
+        let started_at = Instant::now();
+        let value = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "Read the file before editing."
+                    },
+                    {
+                        "type": "tool_use",
+                        "name": "Read",
+                        "input": {"file_path": "README.md"}
+                    }
+                ]
+            }
+        });
+
+        let progresses = progresses_from_claude_value(&plan, &started_at, &value);
+        assert_eq!(progresses.len(), 2);
+        assert_eq!(progresses[0].phase, "reasoning");
+        assert_eq!(progresses[1].phase, "tool-call");
+        assert_eq!(
+            progresses[1].summary,
+            "Claude tool call: Read: reading README.md"
+        );
     }
 
     #[test]
@@ -4875,7 +6651,7 @@ mod tests {
             &codex_home,
         )
         .expect("first live plan");
-        let first = run_claude_command_plan(first_plan, None)
+        let first = run_claude_command_plan(first_plan, CancellationToken::new(), None)
             .await
             .expect("first live Claude turn");
         assert!(
@@ -4892,7 +6668,7 @@ mod tests {
             &codex_home,
         )
         .expect("second live plan");
-        let second = run_claude_command_plan(second_plan, None)
+        let second = run_claude_command_plan(second_plan, CancellationToken::new(), None)
             .await
             .expect("second live Claude turn");
         assert!(
@@ -4917,7 +6693,7 @@ mod tests {
             &codex_home,
         )
         .expect("tool-loop live plan");
-        let output = run_claude_command_plan(plan, None)
+        let output = run_claude_command_plan(plan, CancellationToken::new(), None)
             .await
             .expect("tool-loop live Claude turn");
         assert!(
@@ -4946,7 +6722,7 @@ mod tests {
             &codex_home,
         )
         .expect("review live plan");
-        let output = run_claude_command_plan(plan, None)
+        let output = run_claude_command_plan(plan, CancellationToken::new(), None)
             .await
             .expect("review live Claude turn");
         assert_eq!(output.status, ClaudePaneTurnStatus::Success);
@@ -4980,7 +6756,7 @@ mod tests {
             &codex_home,
         )
         .expect("edit live plan");
-        let output = run_claude_command_plan(plan, None)
+        let output = run_claude_command_plan(plan, CancellationToken::new(), None)
             .await
             .expect("edit live Claude turn");
         assert_eq!(output.status, ClaudePaneTurnStatus::Success);

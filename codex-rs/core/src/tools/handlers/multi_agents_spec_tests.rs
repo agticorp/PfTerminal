@@ -364,9 +364,25 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
         Some("Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000.")
     );
     assert_eq!(parameters.required.as_ref(), None);
+    let output_schema = output_schema.expect("wait output schema");
     assert_eq!(
-        output_schema.expect("wait output schema")["properties"]["message"]["description"],
+        output_schema["properties"]["message"]["description"],
         json!("Brief wait summary without the agent's final content.")
+    );
+    assert_eq!(
+        output_schema["required"],
+        json!(["message", "timed_out", "agents"])
+    );
+    assert_eq!(
+        output_schema["properties"]["agents"]["items"]["required"],
+        json!([
+            "agent_name",
+            "agent_nickname",
+            "agent_role",
+            "agent_status",
+            "last_task_message",
+            "last_result_message"
+        ])
     );
 }
 
@@ -397,7 +413,14 @@ fn list_agents_tool_includes_path_prefix_and_agent_fields() {
     );
     assert_eq!(
         output_schema.expect("list_agents output schema")["properties"]["agents"]["items"]["required"],
-        json!(["agent_name", "agent_status", "last_task_message"])
+        json!([
+            "agent_name",
+            "agent_nickname",
+            "agent_role",
+            "agent_status",
+            "last_task_message",
+            "last_result_message"
+        ])
     );
 }
 

@@ -1285,6 +1285,11 @@ mod tests {
                 name: "Baseten".to_string(),
                 env_var: "BASETEN_API_KEY".to_string(),
             },
+            ApiKeyProviderOption {
+                id: "vercel".to_string(),
+                name: "Vercel".to_string(),
+                env_var: "AI_GATEWAY_API_KEY".to_string(),
+            },
         ];
 
         assert_eq!(
@@ -1294,11 +1299,12 @@ mod tests {
                 SignInOption::ProviderApiKey(0),
                 SignInOption::ProviderApiKey(1),
                 SignInOption::ProviderApiKey(2),
-                SignInOption::ProviderApiKey(3)
+                SignInOption::ProviderApiKey(3),
+                SignInOption::ProviderApiKey(4)
             ]
         );
 
-        let area = Rect::new(0, 0, 80, 16);
+        let area = Rect::new(0, 0, 80, 20);
         let mut buf = Buffer::empty(area);
         widget.render_pick_mode(area, &mut buf);
         let rendered = buffer_text(&buf, area);
@@ -1321,6 +1327,10 @@ mod tests {
         );
         assert!(
             rendered.contains("Provider: Baseten API Key"),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Provider: Vercel API Key"),
             "rendered:\n{rendered}"
         );
         assert!(!rendered.contains("ChatGPT"), "rendered:\n{rendered}");

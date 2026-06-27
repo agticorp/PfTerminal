@@ -435,6 +435,14 @@ fn list_agents_output_schema() -> Value {
                             "type": "string",
                             "description": "Canonical task name for the agent when available, otherwise the agent id."
                         },
+                        "agent_nickname": {
+                            "type": ["string", "null"],
+                            "description": "User-facing nickname for the agent when available."
+                        },
+                        "agent_role": {
+                            "type": ["string", "null"],
+                            "description": "Role name for the agent when available, for example troll or orc."
+                        },
                         "agent_status": {
                             "description": "Last known status of the agent.",
                             "allOf": [agent_status_output_schema()]
@@ -442,9 +450,13 @@ fn list_agents_output_schema() -> Value {
                         "last_task_message": {
                             "type": ["string", "null"],
                             "description": "Most recent user or inter-agent instruction received by the agent, when available."
+                        },
+                        "last_result_message": {
+                            "type": ["string", "null"],
+                            "description": "Bounded preview of the agent's most recent final result or terminal error, when available."
                         }
                     },
-                    "required": ["agent_name", "agent_status", "last_task_message"],
+                    "required": ["agent_name", "agent_nickname", "agent_role", "agent_status", "last_task_message", "last_result_message"],
                     "additionalProperties": false
                 },
                 "description": "Live agents visible in the current root thread tree."
@@ -496,9 +508,44 @@ fn wait_output_schema_v2() -> Value {
             "timed_out": {
                 "type": "boolean",
                 "description": "Whether the wait call returned because no mailbox update arrived before the timeout."
+            },
+            "agents": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "agent_name": {
+                            "type": "string",
+                            "description": "Canonical task name for the agent when available, otherwise the agent id."
+                        },
+                        "agent_nickname": {
+                            "type": ["string", "null"],
+                            "description": "User-facing nickname for the agent when available."
+                        },
+                        "agent_role": {
+                            "type": ["string", "null"],
+                            "description": "Role name for the agent when available, for example troll or orc."
+                        },
+                        "agent_status": {
+                            "description": "Last known status of the agent.",
+                            "allOf": [agent_status_output_schema()]
+                        },
+                        "last_task_message": {
+                            "type": ["string", "null"],
+                            "description": "Most recent user or inter-agent instruction received by the agent, when available."
+                        },
+                        "last_result_message": {
+                            "type": ["string", "null"],
+                            "description": "Bounded preview of the agent's most recent final result or terminal error, when available."
+                        }
+                    },
+                    "required": ["agent_name", "agent_nickname", "agent_role", "agent_status", "last_task_message", "last_result_message"],
+                    "additionalProperties": false
+                },
+                "description": "Live agents visible in the current root thread tree after the wait."
             }
         },
-        "required": ["message", "timed_out"],
+        "required": ["message", "timed_out", "agents"],
         "additionalProperties": false
     })
 }

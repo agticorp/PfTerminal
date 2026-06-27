@@ -38,6 +38,10 @@ pub(crate) struct AgentPickerThreadEntry {
     pub(crate) agent_role: Option<String>,
     /// Canonical v2 agent path, when the thread was observed through v2 activity.
     pub(crate) agent_path: Option<String>,
+    /// Latest task sent to this agent, if one was observed locally.
+    pub(crate) last_task_message: Option<String>,
+    /// Latest final result or terminal error preview, if one was observed locally.
+    pub(crate) last_result_message: Option<String>,
     /// Whether the latest liveness refresh says the agent thread is actively working.
     pub(crate) is_running: bool,
     /// Whether the thread has emitted a close event and should render dimmed.
@@ -48,6 +52,7 @@ pub(crate) struct AgentPickerThreadEntry {
 pub(crate) struct SubAgentActivityDisplay {
     pub(crate) thread_id: ThreadId,
     pub(crate) agent_path: String,
+    pub(crate) task_preview: Option<String>,
     pub(crate) is_running_hint: bool,
 }
 
@@ -283,6 +288,7 @@ pub(crate) fn sub_agent_activity_display(item: &ThreadItem) -> Option<SubAgentAc
         kind,
         agent_thread_id,
         agent_path,
+        task_preview,
         ..
     } = item
     else {
@@ -291,6 +297,7 @@ pub(crate) fn sub_agent_activity_display(item: &ThreadItem) -> Option<SubAgentAc
     Some(SubAgentActivityDisplay {
         thread_id: parse_thread_id(agent_thread_id)?,
         agent_path: agent_path.clone(),
+        task_preview: task_preview.clone(),
         is_running_hint: !matches!(kind, SubAgentActivityKind::Interrupted),
     })
 }

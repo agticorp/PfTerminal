@@ -174,6 +174,15 @@ fn set_config_provider_for_test_model(config: &mut Config, model: &str) {
         ))
     } else if matches!(
         trimmed,
+        codex_model_provider_info::VERCEL_DEFAULT_MODEL
+            | codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL
+    ) {
+        Some((
+            codex_model_provider_info::VERCEL_PROVIDER_ID.to_string(),
+            codex_model_provider_info::ModelProviderInfo::create_vercel_provider(),
+        ))
+    } else if matches!(
+        trimmed,
         codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID
             | codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID
     ) {
@@ -1280,6 +1289,14 @@ pub(super) fn render_bottom_first_row(chat: &ChatWidget, width: u16) -> String {
 
 pub(crate) fn render_bottom_popup(chat: &ChatWidget, width: u16) -> String {
     let height = chat.desired_height(width);
+    render_bottom_popup_with_height(chat, width, height)
+}
+
+pub(crate) fn render_bottom_popup_with_height(
+    chat: &ChatWidget,
+    width: u16,
+    height: u16,
+) -> String {
     let area = Rect::new(0, 0, width, height);
     let mut buf = Buffer::empty(area);
     chat.render(area, &mut buf);

@@ -14,6 +14,9 @@ use codex_model_provider_info::BASETEN_PROVIDER_ID;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
 use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_DEFAULT_MODEL;
+use codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL;
+use codex_model_provider_info::VERCEL_PROVIDER_ID;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
 #[cfg(test)]
@@ -179,7 +182,7 @@ impl ChatWidget {
         model.starts_with("codex-auto-")
     }
 
-    fn model_provider_for_selection(model: &str) -> Option<String> {
+    pub(crate) fn model_provider_for_selection(model: &str) -> Option<String> {
         let trimmed = model.trim();
         if trimmed == BASETEN_DEFAULT_MODEL {
             return Some(BASETEN_PROVIDER_ID.to_string());
@@ -195,6 +198,9 @@ impl ChatWidget {
         }
         if Self::is_openrouter_model(trimmed) {
             return Some(OPENROUTER_PROVIDER_ID.to_string());
+        }
+        if Self::is_vercel_model(trimmed) {
+            return Some(VERCEL_PROVIDER_ID.to_string());
         }
         if matches!(
             trimmed,
@@ -216,6 +222,10 @@ impl ChatWidget {
                 | OPENROUTER_OWL_ALPHA_MODEL
                 | OPENROUTER_GEMINI_3_5_FLASH_MODEL
         )
+    }
+
+    fn is_vercel_model(model: &str) -> bool {
+        matches!(model, VERCEL_DEFAULT_MODEL | VERCEL_GLM_5_2_FAST_MODEL)
     }
 
     fn auto_model_order(model: &str) -> usize {
@@ -249,7 +259,7 @@ impl ChatWidget {
             match provider.as_deref() {
                 Some(AMBIENT_PROVIDER_ID | ZAI_PROVIDER_ID) => coding_plan_items.push(item),
                 Some(OPENAI_PROVIDER_ID) => coding_plan_items.push(item),
-                Some(BASETEN_PROVIDER_ID | OPENROUTER_PROVIDER_ID) => {
+                Some(BASETEN_PROVIDER_ID | OPENROUTER_PROVIDER_ID | VERCEL_PROVIDER_ID) => {
                     pay_per_api_call_items.push(item)
                 }
                 _ => {}
@@ -267,7 +277,7 @@ impl ChatWidget {
         if !pay_per_api_call_items.is_empty() {
             items.push(Self::model_picker_section_header(
                 "Pay Per API Call",
-                "OpenRouter and Baseten metered models",
+                "OpenRouter, Baseten, and Vercel metered models",
             ));
             items.append(&mut pay_per_api_call_items);
         }
@@ -318,7 +328,7 @@ impl ChatWidget {
         }
     }
 
-    fn show_in_pfterminal_model_picker(preset: &ModelPreset) -> bool {
+    pub(crate) fn show_in_pfterminal_model_picker(preset: &ModelPreset) -> bool {
         if !preset.show_in_picker {
             return false;
         }
@@ -330,7 +340,8 @@ impl ChatWidget {
                 AMBIENT_PROVIDER_ID
                 | ZAI_PROVIDER_ID
                 | BASETEN_PROVIDER_ID
-                | OPENROUTER_PROVIDER_ID,
+                | OPENROUTER_PROVIDER_ID
+                | VERCEL_PROVIDER_ID,
             ) => true,
             _ => false,
         }
@@ -667,7 +678,13 @@ impl ChatWidget {
     }
 
     fn uses_glm_reasoning_modes(model: &str) -> bool {
-        model == AMBIENT_DEFAULT_MODEL || model == ZAI_DEFAULT_MODEL
+        matches!(
+            model,
+            AMBIENT_DEFAULT_MODEL
+                | ZAI_DEFAULT_MODEL
+                | VERCEL_DEFAULT_MODEL
+                | VERCEL_GLM_5_2_FAST_MODEL
+        )
     }
 
     pub(super) fn reasoning_effort_label(effort: &ReasoningEffortConfig) -> String {
@@ -733,6 +750,14 @@ mod tests {
         assert_eq!(
             ChatWidget::model_provider_for_selection(OPENROUTER_DEFAULT_MODEL).as_deref(),
             Some(OPENROUTER_PROVIDER_ID)
+        );
+        assert_eq!(
+            ChatWidget::model_provider_for_selection(VERCEL_DEFAULT_MODEL).as_deref(),
+            Some(VERCEL_PROVIDER_ID)
+        );
+        assert_eq!(
+            ChatWidget::model_provider_for_selection(VERCEL_GLM_5_2_FAST_MODEL).as_deref(),
+            Some(VERCEL_PROVIDER_ID)
         );
         assert_eq!(
             ChatWidget::model_provider_for_selection("minimax/minimax-m3").as_deref(),

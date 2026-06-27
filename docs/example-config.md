@@ -72,6 +72,25 @@ Temporary shell fallback:
 export BASETEN_API_KEY="..."
 ```
 
+## Vercel AI Gateway GLM
+
+```toml
+model_provider = "vercel"
+model = "zai/glm-5.2"
+```
+
+Fast variant:
+
+```toml
+model = "zai/glm-5.2-fast"
+```
+
+Temporary shell fallback:
+
+```bash
+export AI_GATEWAY_API_KEY="..."
+```
+
 ## Sandbox And Logging Example
 
 ```toml

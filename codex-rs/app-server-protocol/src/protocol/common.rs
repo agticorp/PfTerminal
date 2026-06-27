@@ -479,6 +479,13 @@ client_request_definitions! {
         serialization: None,
         response: v2::ThreadStartResponse,
     },
+    #[experimental("thread/spawnAgent")]
+    ThreadSpawnAgent => "thread/spawnAgent" {
+        params: v2::ThreadSpawnAgentParams,
+        inspect_params: true,
+        serialization: thread_id(params.parent_thread_id),
+        response: v2::ThreadSpawnAgentResponse,
+    },
     ThreadResume => "thread/resume" {
         params: v2::ThreadResumeParams,
         inspect_params: true,

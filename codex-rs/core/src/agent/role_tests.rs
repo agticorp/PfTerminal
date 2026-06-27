@@ -565,10 +565,10 @@ fn built_in_config_file_contents_resolves_known_roles() {
     );
     assert!(
         built_in::config_file_contents(Path::new("troll.toml"))
-            .is_some_and(|contents| contents.contains("You are a Troll"))
+            .is_some_and(|contents| contents.contains("You are the Troll"))
     );
     assert!(
         built_in::config_file_contents(Path::new("orc.toml"))
-            .is_some_and(|contents| contents.contains("You are an Orc"))
+            .is_some_and(|contents| contents.contains("You are the Orc"))
     );
 }

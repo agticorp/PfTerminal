@@ -142,6 +142,7 @@ impl App {
         }
 
         self.cache_collab_receiver_threads_for_notification(&notification);
+        self.update_spawn_status_for_thread_notification(&notification);
 
         match server_notification_thread_target(&notification) {
             ServerNotificationThreadTarget::Thread(thread_id) => {

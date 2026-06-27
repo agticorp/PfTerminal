@@ -420,7 +420,8 @@ fn reject_spawn_agent_model_switch_for_third_party_provider(
     if !(provider_info.is_ambient()
         || provider_info.is_zai()
         || provider_info.is_openrouter()
-        || provider_info.is_baseten())
+        || provider_info.is_baseten()
+        || provider_info.is_vercel())
     {
         return Ok(());
     }

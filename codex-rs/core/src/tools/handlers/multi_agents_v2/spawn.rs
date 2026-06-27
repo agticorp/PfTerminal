@@ -167,6 +167,7 @@ async fn handle_spawn_agent(
                 occurred_at_ms: now_unix_timestamp_ms(),
                 agent_thread_id: new_thread_id,
                 agent_path: new_agent_path.clone(),
+                task_preview: None,
                 kind: SubAgentActivityKind::Started,
             }
             .into(),

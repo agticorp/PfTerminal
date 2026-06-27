@@ -70,7 +70,7 @@ All claims below were read from `PfTerminal/codex-rs`.
 | V2 spawn spec | Built as a plain `ToolSpec::Function` named `spawn_agent` (no namespace wrapper). | `codex-rs/core/src/tools/handlers/multi_agents_spec.rs:96` (`create_spawn_agent_tool_v2`) |
 | Visibility filter | Namespace specs are dropped unless `namespace_tools` capability is true. | `codex-rs/core/src/tools/spec_plan.rs:269` |
 | Capability gate | `namespace_tools_enabled()` reads `provider.capabilities().namespace_tools`. | `codex-rs/core/src/tools/spec_plan.rs:351` |
-| Provider caps | `namespace_tools: false` for Ambient, ZAI, OpenRouter, and Baseten; `true` only by default (OpenAI path). | `codex-rs/model-provider/src/provider.rs:228` (`capabilities()`) |
+| Provider caps | `namespace_tools: false` for Ambient, ZAI, OpenRouter, Baseten, and Vercel; `true` only by default (OpenAI path). | `codex-rs/model-provider/src/provider.rs:228` (`capabilities()`) |
 | V1 exposure | `Deferred` only when both `search_tool_enabled` and `namespace_tools_enabled`; otherwise `Direct`. | `codex-rs/core/src/tools/spec_plan.rs:856` (`add_collaboration_tools`) |
 | Depth enforcement | `max_depth` is enforced at spawn time: `next_thread_spawn_depth` is compared with `exceeds_thread_spawn_depth_limit`, which gates `collab_tools_enabled`. | `codex-rs/core/src/tools/spec_plan.rs:362` and `codex-rs/core/src/agent/registry.rs:71` |
 | Thread cap | `DEFAULT_AGENT_MAX_THREADS = 6`; enforced in `reserve_spawn_slot`. | `codex-rs/core/src/config/mod.rs:204`, `codex-rs/core/src/agent/registry.rs` |
@@ -85,7 +85,7 @@ This corrects the earlier `tool_search` hypothesis. The real failure path is:
 2. `add_collaboration_tools` registers `SpawnAgentHandler` and friends. Exposure is `Deferred` when the provider supports both the search tool and namespace tools, otherwise `Direct`.
 3. The V1 `spawn_agent` spec is built as `ToolSpec::Namespace` (`multi_agent_v1`).
 4. At plan finalization, `merge_into_namespaces(...)` keeps or drops each spec: a `ToolSpec::Namespace` survives only if `namespace_tools_enabled(turn_context)` is true (`spec_plan.rs:269`).
-5. Ambient, ZAI, OpenRouter, and Baseten all advertise `namespace_tools: false` (`provider.rs:228`).
+5. Ambient, ZAI, OpenRouter, Baseten, and Vercel all advertise `namespace_tools: false` (`provider.rs:228`).
 6. Therefore the entire `multi_agent_v1` namespace is filtered out of the model-visible spec set on those providers — regardless of exposure, and regardless of `tool_search`.
 
 So the product bug is **not** "deferred tools need `tool_search` and the

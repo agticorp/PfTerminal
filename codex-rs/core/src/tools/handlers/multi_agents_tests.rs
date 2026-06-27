@@ -6,6 +6,7 @@ use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
 use crate::session::tests::make_session_and_context;
 use crate::session_prefix::format_inter_agent_completion_message;
+use crate::thread_manager::StartThreadOptions;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
@@ -15,6 +16,7 @@ use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHa
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_login::AuthManager;
@@ -51,6 +53,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
@@ -92,8 +95,47 @@ fn function_payload(args: serde_json::Value) -> ToolPayload {
     }
 }
 
+fn assert_wait_v2_result(
+    result: &crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult,
+    message: &str,
+    timed_out: bool,
+) {
+    assert_eq!(result.message, message);
+    assert_eq!(result.timed_out, timed_out);
+}
+
+fn assert_wait_v2_agents_include_task(
+    result: &crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult,
+    task_name: &str,
+) {
+    assert!(
+        result
+            .agents
+            .iter()
+            .any(|agent| agent.agent_name.ends_with(task_name)
+                || agent
+                    .last_task_message
+                    .as_deref()
+                    .is_some_and(|message| message.contains(task_name))),
+        "wait_agent result should include task {task_name:?}"
+    );
+}
+
 fn parse_agent_id(id: &str) -> ThreadId {
     ThreadId::from_string(id).expect("agent id should be valid")
+}
+
+fn assert_nickname_from_role_pool(
+    config: &crate::config::Config,
+    nickname: Option<&str>,
+    role_name: &str,
+) {
+    let nickname = nickname.expect("spawned agent should have a nickname");
+    let candidates = crate::agent::role::agent_nickname_candidates(config, Some(role_name));
+    assert!(
+        candidates.iter().any(|candidate| candidate == nickname),
+        "nickname {nickname:?} should come from the {role_name:?} candidate pool {candidates:?}"
+    );
 }
 
 fn thread_manager() -> ThreadManager {
@@ -176,8 +218,21 @@ struct ListAgentsResult {
 #[derive(Debug, Deserialize)]
 struct ListedAgentResult {
     agent_name: String,
+    agent_nickname: Option<String>,
+    agent_role: Option<String>,
     agent_status: serde_json::Value,
     last_task_message: Option<String>,
+    last_result_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageToolResult {
+    target_thread_id: String,
+    agent_path: String,
+    agent_nickname: Option<String>,
+    agent_role: Option<String>,
+    delivery: String,
+    triggered_turn: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1253,7 +1308,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
             )
     }));
 
-    SendMessageHandlerV2
+    let send_output = SendMessageHandlerV2
         .handle(invocation(
             session.clone(),
             turn.clone(),
@@ -1265,6 +1320,14 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         ))
         .await
         .expect("send_message should accept v2 path");
+    let (content, success) = expect_text_output(send_output);
+    assert_eq!(success, Some(true));
+    let send_result: MessageToolResult =
+        serde_json::from_str(&content).expect("send_message result should parse");
+    assert_eq!(send_result.target_thread_id, child_thread_id.to_string());
+    assert_eq!(send_result.agent_path, "/root/test_process");
+    assert_eq!(send_result.delivery, "queued");
+    assert!(!send_result.triggered_turn);
 
     assert!(manager.captured_ops().iter().any(|(id, op)| {
         *id == child_thread_id
@@ -1624,8 +1687,8 @@ async fn multi_agent_v2_list_agents_returns_completed_status_without_encrypted_s
 
     let output = ListAgentsHandlerV2
         .handle(invocation(
-            session,
-            turn,
+            session.clone(),
+            turn.clone(),
             "list_agents",
             function_payload(json!({})),
         ))
@@ -1653,7 +1716,15 @@ async fn multi_agent_v2_list_agents_returns_completed_status_without_encrypted_s
         .find(|agent| agent.agent_name == "/root/worker")
         .expect("worker agent should be listed");
     assert_eq!(worker.agent_status, json!({"completed": "done"}));
+    assert!(
+        worker
+            .agent_nickname
+            .as_ref()
+            .is_some_and(|nickname| !nickname.is_empty())
+    );
+    assert_eq!(worker.agent_role, None);
     assert_eq!(worker.last_task_message, None);
+    assert_eq!(worker.last_result_message.as_deref(), Some("done"));
     assert_eq!(success, Some(true));
 }
 
@@ -1789,8 +1860,8 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
 
     let output = ListAgentsHandlerV2
         .handle(invocation(
-            session,
-            turn,
+            session.clone(),
+            turn.clone(),
             "list_agents",
             function_payload(json!({})),
         ))
@@ -1864,8 +1935,8 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
 
     let output = ListAgentsHandlerV2
         .handle(invocation(
-            session,
-            turn,
+            session.clone(),
+            turn.clone(),
             "list_agents",
             function_payload(json!({})),
         ))
@@ -2171,6 +2242,365 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
     .expect("parent should receive one completion notification per child turn");
 
     assert_eq!(notifications.len(), 2);
+}
+
+#[tokio::test]
+async fn direct_spawn_troll_can_followup_task_two_named_orc_children() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let troll_path = AgentPath::root()
+        .join("troll_burzum")
+        .expect("test troll path should be valid");
+    let first_orc_path = troll_path
+        .join("orc_snaga")
+        .expect("test first orc path should be valid");
+    let second_orc_path = troll_path
+        .join("orc_ghash")
+        .expect("test second orc path should be valid");
+
+    let troll = manager
+        .start_thread_with_options(StartThreadOptions {
+            config: (*turn.config).clone(),
+            initial_history: InitialHistory::New,
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: Some(troll_path.clone()),
+                agent_nickname: Some("Burzum".to_string()),
+                agent_role: Some("troll".to_string()),
+            })),
+            thread_source: Some(ThreadSource::Subagent),
+            dynamic_tools: Vec::new(),
+            metrics_service_name: None,
+            multi_agent_mode: None,
+            parent_trace: None,
+            environments: Vec::new(),
+            thread_extension_init: ExtensionDataInit::default(),
+            supports_openai_form_elicitation: false,
+        })
+        .await
+        .expect("direct troll pane should start");
+
+    let first_orc = manager
+        .start_thread_with_options(StartThreadOptions {
+            config: (*turn.config).clone(),
+            initial_history: InitialHistory::New,
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: troll.thread_id,
+                depth: 2,
+                agent_path: Some(first_orc_path.clone()),
+                agent_nickname: Some("Snaga".to_string()),
+                agent_role: Some("orc".to_string()),
+            })),
+            thread_source: Some(ThreadSource::Subagent),
+            dynamic_tools: Vec::new(),
+            metrics_service_name: None,
+            multi_agent_mode: None,
+            parent_trace: None,
+            environments: Vec::new(),
+            thread_extension_init: ExtensionDataInit::default(),
+            supports_openai_form_elicitation: false,
+        })
+        .await
+        .expect("direct first orc pane should start");
+
+    let second_orc = manager
+        .start_thread_with_options(StartThreadOptions {
+            config: (*turn.config).clone(),
+            initial_history: InitialHistory::New,
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: troll.thread_id,
+                depth: 2,
+                agent_path: Some(second_orc_path.clone()),
+                agent_nickname: Some("Ghash".to_string()),
+                agent_role: Some("orc".to_string()),
+            })),
+            thread_source: Some(ThreadSource::Subagent),
+            dynamic_tools: Vec::new(),
+            metrics_service_name: None,
+            multi_agent_mode: None,
+            parent_trace: None,
+            environments: Vec::new(),
+            thread_extension_init: ExtensionDataInit::default(),
+            supports_openai_form_elicitation: false,
+        })
+        .await
+        .expect("direct second orc pane should start");
+
+    let troll_thread = manager
+        .get_thread(troll.thread_id)
+        .await
+        .expect("troll thread should exist");
+    let troll_snapshot = troll_thread.config_snapshot().await;
+    session.services.agent_control = troll_thread.codex.session.services.agent_control.clone();
+    session.thread_id = troll.thread_id;
+    turn.session_source = troll_snapshot.session_source;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let first_delegated_message = "Build the animation shell for the crypto formula demo.";
+    let second_delegated_message = "Write the cryptographic formula copy and adversarial checks.";
+
+    let first_output = FollowupTaskHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "followup_task",
+            function_payload(json!({
+                "target": "orc_snaga",
+                "message": first_delegated_message
+            })),
+        ))
+        .await
+        .expect("direct-spawn Troll should be able to target first named Orc child");
+    let (content, success) = expect_text_output(first_output);
+    assert_eq!(success, Some(true));
+    let first_delivery: MessageToolResult =
+        serde_json::from_str(&content).expect("first followup_task result should parse");
+    assert_eq!(
+        first_delivery.target_thread_id,
+        first_orc.thread_id.to_string()
+    );
+    assert_eq!(first_delivery.agent_path, first_orc_path.as_str());
+    assert_eq!(first_delivery.agent_nickname.as_deref(), Some("Snaga"));
+    assert_eq!(first_delivery.agent_role.as_deref(), Some("orc"));
+    assert_eq!(first_delivery.delivery, "followup_task_sent");
+    assert!(first_delivery.triggered_turn);
+
+    let second_output = FollowupTaskHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "followup_task",
+            function_payload(json!({
+                "target": "orc_ghash",
+                "message": second_delegated_message
+            })),
+        ))
+        .await
+        .expect("direct-spawn Troll should be able to target second named Orc child");
+    let (content, success) = expect_text_output(second_output);
+    assert_eq!(success, Some(true));
+    let second_delivery: MessageToolResult =
+        serde_json::from_str(&content).expect("second followup_task result should parse");
+    assert_eq!(
+        second_delivery.target_thread_id,
+        second_orc.thread_id.to_string()
+    );
+    assert_eq!(second_delivery.agent_path, second_orc_path.as_str());
+    assert_eq!(second_delivery.agent_nickname.as_deref(), Some("Ghash"));
+    assert_eq!(second_delivery.agent_role.as_deref(), Some("orc"));
+    assert_eq!(second_delivery.delivery, "followup_task_sent");
+    assert!(second_delivery.triggered_turn);
+
+    assert!(manager.captured_ops().iter().any(|(id, op)| {
+        *id == first_orc.thread_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication { communication }
+                    if communication.author == troll_path
+                        && communication.recipient == first_orc_path
+                        && communication.other_recipients.is_empty()
+                        && communication.content.is_empty()
+                        && communication.encrypted_content.as_deref() == Some(first_delegated_message)
+                        && communication
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.source_call_id.as_deref())
+                            == Some("call-1")
+                        && communication.trigger_turn
+            )
+    }));
+    assert!(manager.captured_ops().iter().any(|(id, op)| {
+        *id == second_orc.thread_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication { communication }
+                    if communication.author == troll_path
+                        && communication.recipient == second_orc_path
+                        && communication.other_recipients.is_empty()
+                        && communication.content.is_empty()
+                        && communication.encrypted_content.as_deref() == Some(second_delegated_message)
+                        && communication
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.source_call_id.as_deref())
+                            == Some("call-1")
+                        && communication.trigger_turn
+            )
+    }));
+
+    session.services.agent_control.record_agent_result_status(
+        first_orc.thread_id,
+        &AgentStatus::Completed(Some("animation shell complete".to_string())),
+    );
+    session.services.agent_control.record_agent_result_status(
+        second_orc.thread_id,
+        &AgentStatus::Completed(Some("formula checks complete".to_string())),
+    );
+
+    let output = ListAgentsHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("Troll should be able to list managed Orc status");
+    let (content, success) = expect_text_output(output);
+    assert_eq!(success, Some(true));
+    let result: ListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should parse");
+    assert!(result.agents.iter().any(|agent| {
+        agent.agent_name == first_orc_path.as_str()
+            && agent.agent_nickname.as_deref() == Some("Snaga")
+            && agent.agent_role.as_deref() == Some("orc")
+            && agent.last_task_message.as_deref() == Some(first_delegated_message)
+            && agent.last_result_message.as_deref() == Some("animation shell complete")
+    }));
+    assert!(result.agents.iter().any(|agent| {
+        agent.agent_name == second_orc_path.as_str()
+            && agent.agent_nickname.as_deref() == Some("Ghash")
+            && agent.agent_role.as_deref() == Some("orc")
+            && agent.last_task_message.as_deref() == Some(second_delegated_message)
+            && agent.last_result_message.as_deref() == Some("formula checks complete")
+    }));
+    let context = session
+        .services
+        .agent_control
+        .format_environment_context_subagents(troll.thread_id)
+        .await;
+    assert!(
+        context.contains("orc_snaga: Snaga"),
+        "Troll context should name the first Orc, got {context:?}"
+    );
+    assert!(
+        context.contains(first_delegated_message),
+        "Troll context should expose the first Orc task, got {context:?}"
+    );
+    assert!(
+        context.contains("animation shell complete"),
+        "Troll context should expose the first Orc result, got {context:?}"
+    );
+    assert!(
+        context.contains("orc_ghash: Ghash"),
+        "Troll context should name the second Orc, got {context:?}"
+    );
+    assert!(
+        context.contains(second_delegated_message),
+        "Troll context should expose the second Orc task, got {context:?}"
+    );
+    assert!(
+        context.contains("formula checks complete"),
+        "Troll context should expose the second Orc result, got {context:?}"
+    );
+
+    let first_improvement_message =
+        "Improve the animation shell with concrete file paths and reduced-motion handling.";
+    let second_improvement_message =
+        "Improve the formula review with adversarial edge cases and verification evidence.";
+    FollowupTaskHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "followup_task",
+            function_payload(json!({
+                "target": "Snaga [orc]",
+                "message": first_improvement_message
+            })),
+        ))
+        .await
+        .expect("Troll should be able to force rework from first named Orc");
+    FollowupTaskHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "followup_task",
+            function_payload(json!({
+                "target": second_orc.thread_id.to_string(),
+                "message": second_improvement_message
+            })),
+        ))
+        .await
+        .expect("Troll should be able to force rework from second named Orc");
+
+    assert!(manager.captured_ops().iter().any(|(id, op)| {
+        *id == first_orc.thread_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication { communication }
+                    if communication.author == troll_path
+                        && communication.recipient == first_orc_path
+                        && communication.encrypted_content.as_deref() == Some(first_improvement_message)
+                        && communication.trigger_turn
+            )
+    }));
+    assert!(manager.captured_ops().iter().any(|(id, op)| {
+        *id == second_orc.thread_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication { communication }
+                    if communication.author == troll_path
+                        && communication.recipient == second_orc_path
+                        && communication.encrypted_content.as_deref() == Some(second_improvement_message)
+                        && communication.trigger_turn
+            )
+    }));
+
+    let output = ListAgentsHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("Troll should be able to inspect post-review Orc state");
+    let (content, success) = expect_text_output(output);
+    assert_eq!(success, Some(true));
+    let result: ListAgentsResult =
+        serde_json::from_str(&content).expect("post-review list_agents result should parse");
+    assert!(result.agents.iter().any(|agent| {
+        agent.agent_name == first_orc_path.as_str()
+            && agent.agent_nickname.as_deref() == Some("Snaga")
+            && agent.last_task_message.as_deref() == Some(first_improvement_message)
+            && agent.last_result_message.is_none()
+    }));
+    assert!(result.agents.iter().any(|agent| {
+        agent.agent_name == second_orc_path.as_str()
+            && agent.agent_nickname.as_deref() == Some("Ghash")
+            && agent.last_task_message.as_deref() == Some(second_improvement_message)
+            && agent.last_result_message.is_none()
+    }));
+    let context = session
+        .services
+        .agent_control
+        .format_environment_context_subagents(troll.thread_id)
+        .await;
+    assert!(
+        context.contains(first_improvement_message),
+        "Troll context should expose first Orc rework request, got {context:?}"
+    );
+    assert!(
+        context.contains(second_improvement_message),
+        "Troll context should expose second Orc rework request, got {context:?}"
+    );
+    assert!(
+        !context.contains("animation shell complete")
+            && !context.contains("formula checks complete"),
+        "Troll context should clear stale result previews after rework requests, got {context:?}"
+    );
 }
 
 #[tokio::test]
@@ -2554,9 +2984,11 @@ async fn spawn_agent_allows_root_to_spawn_troll() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
+        nickname: Option<String>,
     }
 
     let (mut session, turn) = make_session_and_context().await;
+    let config = (*turn.config).clone();
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
 
@@ -2576,6 +3008,7 @@ async fn spawn_agent_allows_root_to_spawn_troll() {
     let (content, success) = expect_text_output(output);
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
+    assert_nickname_from_role_pool(&config, result.nickname.as_deref(), "troll");
     let agent_id = parse_agent_id(&result.agent_id);
     let snapshot = manager
         .get_thread(agent_id)
@@ -2587,6 +3020,7 @@ async fn spawn_agent_allows_root_to_spawn_troll() {
         snapshot.session_source.get_agent_role().as_deref(),
         Some("troll")
     );
+    assert_eq!(snapshot.session_source.get_nickname(), result.nickname);
     assert_eq!(success, Some(true));
 }
 
@@ -2604,9 +3038,11 @@ fn spawn_agent_allows_troll_to_spawn_orc() {
                 #[derive(Debug, Deserialize)]
                 struct SpawnAgentResult {
                     agent_id: String,
+                    nickname: Option<String>,
                 }
 
                 let (mut session, turn) = make_session_and_context().await;
+                let config = (*turn.config).clone();
                 let manager = thread_manager();
                 session.services.agent_control = manager.agent_control();
 
@@ -2625,6 +3061,7 @@ fn spawn_agent_allows_troll_to_spawn_orc() {
                 let (content, _) = expect_text_output(troll_output);
                 let troll_result: SpawnAgentResult =
                     serde_json::from_str(&content).expect("spawn_agent result should be json");
+                assert_nickname_from_role_pool(&config, troll_result.nickname.as_deref(), "troll");
                 let troll_id = parse_agent_id(&troll_result.agent_id);
                 let troll_snapshot = manager
                     .get_thread(troll_id)
@@ -2637,12 +3074,16 @@ fn spawn_agent_allows_troll_to_spawn_orc() {
                     troll_snapshot.session_source.get_agent_role().as_deref(),
                     Some("troll")
                 );
+                assert_eq!(
+                    troll_snapshot.session_source.get_nickname(),
+                    troll_result.nickname
+                );
                 let troll_thread = manager
                     .get_thread(troll_id)
                     .await
                     .expect("spawned troll should exist");
                 let troll_turn = troll_thread.codex.session.new_default_turn().await;
-                let orc_output = SpawnAgentHandler::default()
+                let first_orc_output = SpawnAgentHandler::default()
                     .handle(invocation(
                         Arc::clone(&troll_thread.codex.session),
                         troll_turn,
@@ -2653,19 +3094,65 @@ fn spawn_agent_allows_troll_to_spawn_orc() {
                         })),
                     ))
                     .await
-                    .expect("troll should spawn orc");
-                let (content, success) = expect_text_output(orc_output);
-                let orc_result: SpawnAgentResult =
+                    .expect("troll should spawn first orc");
+                let (content, success) = expect_text_output(first_orc_output);
+                let first_orc_result: SpawnAgentResult =
                     serde_json::from_str(&content).expect("spawn_agent result should be json");
-                let orc_id = parse_agent_id(&orc_result.agent_id);
-                let orc_snapshot = manager
-                    .get_thread(orc_id)
+                assert_nickname_from_role_pool(
+                    &config,
+                    first_orc_result.nickname.as_deref(),
+                    "orc",
+                );
+                let first_orc_id = parse_agent_id(&first_orc_result.agent_id);
+                let first_orc_snapshot = manager
+                    .get_thread(first_orc_id)
                     .await
                     .expect("spawned orc should exist")
                     .config_snapshot()
                     .await;
                 assert_eq!(
-                    orc_snapshot.session_source.get_agent_role().as_deref(),
+                    first_orc_snapshot
+                        .session_source
+                        .get_agent_role()
+                        .as_deref(),
+                    Some("orc")
+                );
+                assert_eq!(success, Some(true));
+
+                let troll_turn = troll_thread.codex.session.new_default_turn().await;
+                let second_orc_output = SpawnAgentHandler::default()
+                    .handle(invocation(
+                        Arc::clone(&troll_thread.codex.session),
+                        troll_turn,
+                        "spawn_agent",
+                        function_payload(json!({
+                            "message": "implement the second assigned fix and report evidence",
+                            "agent_type": "orc"
+                        })),
+                    ))
+                    .await
+                    .expect("troll should spawn second orc");
+                let (content, success) = expect_text_output(second_orc_output);
+                let second_orc_result: SpawnAgentResult =
+                    serde_json::from_str(&content).expect("spawn_agent result should be json");
+                assert_nickname_from_role_pool(
+                    &config,
+                    second_orc_result.nickname.as_deref(),
+                    "orc",
+                );
+                assert_ne!(first_orc_result.nickname, second_orc_result.nickname);
+                let second_orc_id = parse_agent_id(&second_orc_result.agent_id);
+                let second_orc_snapshot = manager
+                    .get_thread(second_orc_id)
+                    .await
+                    .expect("second spawned orc should exist")
+                    .config_snapshot()
+                    .await;
+                assert_eq!(
+                    second_orc_snapshot
+                        .session_source
+                        .get_agent_role()
+                        .as_deref(),
                     Some("orc")
                 );
                 assert_eq!(success, Some(true));
@@ -3329,13 +3816,8 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
-            timed_out: false,
-        }
-    );
+    assert_wait_v2_result(&result, "Wait completed.", /*timed_out*/ false);
+    assert_wait_v2_agents_include_task(&result, "worker");
     assert_eq!(success, None);
 }
 
@@ -3394,13 +3876,7 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_min() 
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
-        }
-    );
+    assert_wait_v2_result(&result, "Wait timed out.", /*timed_out*/ true);
     assert_eq!(success, None);
 }
 
@@ -3449,13 +3925,7 @@ async fn multi_agent_v2_wait_agent_uses_configured_default_timeout() {
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
-        }
-    );
+    assert_wait_v2_result(&result, "Wait timed out.", /*timed_out*/ true);
     assert_eq!(success, None);
 }
 
@@ -3489,13 +3959,7 @@ async fn multi_agent_v2_wait_agent_allows_zero_configured_timeout() {
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
-        }
-    );
+    assert_wait_v2_result(&result, "Wait timed out.", /*timed_out*/ true);
     assert_eq!(success, None);
 }
 
@@ -3554,13 +4018,7 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_max() 
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
-        }
-    );
+    assert_wait_v2_result(&result, "Wait timed out.", /*timed_out*/ true);
     assert_eq!(success, None);
 }
 
@@ -3813,13 +4271,8 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
     let (content, success) = expect_text_output(wait_output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
-            timed_out: false,
-        }
-    );
+    assert_wait_v2_result(&result, "Wait completed.", /*timed_out*/ false);
+    assert_wait_v2_agents_include_task(&result, "test_process");
     assert_eq!(success, None);
 }
 
@@ -3894,105 +4347,109 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
-            timed_out: false,
-        }
-    );
+    assert_wait_v2_result(&result, "Wait completed.", /*timed_out*/ false);
+    assert_wait_v2_agents_include_task(&result, "worker");
     assert_eq!(success, None);
 }
 
-#[tokio::test]
-async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.thread_id = root.thread_id;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    set_turn_config(&mut turn, config);
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
+#[test]
+fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
+    std::thread::Builder::new()
+        .name("multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification".to_string())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(async {
+                let (mut session, mut turn) = make_session_and_context().await;
+                let manager = thread_manager();
+                let root = manager
+                    .start_thread((*turn.config).clone())
+                    .await
+                    .expect("root thread should start");
+                session.services.agent_control = manager.agent_control();
+                session.thread_id = root.thread_id;
+                let mut config = (*turn.config).clone();
+                config
+                    .features
+                    .enable(Feature::MultiAgentV2)
+                    .expect("test config should allow feature update");
+                set_turn_config(&mut turn, config);
+                let session = Arc::new(session);
+                let turn = Arc::new(turn);
 
-    for task_name in ["worker_a", "worker_b"] {
-        SpawnAgentHandlerV2::default()
-            .handle(invocation(
-                session.clone(),
-                turn.clone(),
-                "spawn_agent",
-                function_payload(json!({
-                    "message": format!("boot {task_name}"),
-                    "task_name": task_name
-                })),
-            ))
-            .await
-            .expect("spawn worker");
-    }
-    let worker_b_id = session
-        .services
-        .agent_control
-        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker_b")
-        .await
-        .expect("worker_b should resolve");
-    let worker_b_path = session
-        .services
-        .agent_control
-        .get_agent_metadata(worker_b_id)
-        .expect("worker_b metadata")
-        .agent_path
-        .expect("worker_b path");
+                for task_name in ["worker_a", "worker_b"] {
+                    SpawnAgentHandlerV2::default()
+                        .handle(invocation(
+                            session.clone(),
+                            turn.clone(),
+                            "spawn_agent",
+                            function_payload(json!({
+                                "message": format!("boot {task_name}"),
+                                "task_name": task_name
+                            })),
+                        ))
+                        .await
+                        .expect("spawn worker");
+                }
+                let worker_b_id = session
+                    .services
+                    .agent_control
+                    .resolve_agent_reference(session.thread_id, &turn.session_source, "worker_b")
+                    .await
+                    .expect("worker_b should resolve");
+                let worker_b_path = session
+                    .services
+                    .agent_control
+                    .get_agent_metadata(worker_b_id)
+                    .expect("worker_b metadata")
+                    .agent_path
+                    .expect("worker_b path");
 
-    let wait_task = tokio::spawn({
-        let session = session.clone();
-        let turn = turn.clone();
-        async move {
-            WaitAgentHandlerV2::default()
-                .handle(invocation(
-                    session,
-                    turn,
-                    "wait_agent",
-                    function_payload(json!({"timeout_ms": 10_000})),
-                ))
-                .await
-        }
-    });
-    tokio::task::yield_now().await;
+                let wait_task = tokio::spawn({
+                    let session = session.clone();
+                    let turn = turn.clone();
+                    async move {
+                        WaitAgentHandlerV2::default()
+                            .handle(invocation(
+                                session,
+                                turn,
+                                "wait_agent",
+                                function_payload(json!({"timeout_ms": 10_000})),
+                            ))
+                            .await
+                    }
+                });
+                tokio::task::yield_now().await;
 
-    session
-        .input_queue
-        .enqueue_mailbox_communication(InterAgentCommunication::new(
-            worker_b_path,
-            AgentPath::root(),
-            Vec::new(),
-            "from worker b".to_string(),
-            /*trigger_turn*/ false,
-        ))
-        .await;
+                session
+                    .input_queue
+                    .enqueue_mailbox_communication(InterAgentCommunication::new(
+                        worker_b_path,
+                        AgentPath::root(),
+                        Vec::new(),
+                        "from worker b".to_string(),
+                        /*trigger_turn*/ false,
+                    ))
+                    .await;
 
-    let output = wait_task
-        .await
-        .expect("wait task should join")
-        .expect("wait_agent should succeed");
-    let (content, success) = expect_text_output(output);
-    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
-        serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
-            timed_out: false,
-        }
-    );
-    assert_eq!(success, None);
+                let output = wait_task
+                    .await
+                    .expect("wait task should join")
+                    .expect("wait_agent should succeed");
+                let (content, success) = expect_text_output(output);
+                let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+                    serde_json::from_str(&content).expect("wait_agent result should be json");
+                assert_wait_v2_result(&result, "Wait completed.", /*timed_out*/ false);
+                assert_wait_v2_agents_include_task(&result, "worker_b");
+                assert_eq!(success, None);
+            });
+        })
+        .expect("test thread should spawn")
+        .join()
+        .expect("test thread should complete");
 }
 
 #[tokio::test]
@@ -4073,13 +4530,8 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
-            timed_out: false,
-        }
-    );
+    assert_wait_v2_result(&result, "Wait completed.", /*timed_out*/ false);
+    assert_wait_v2_agents_include_task(&result, "worker");
     assert!(!content.contains("sensitive child output"));
     assert_eq!(success, None);
 }

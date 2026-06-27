@@ -631,12 +631,14 @@ impl ThreadManager {
         options: StartThreadOptions,
         forked_from_thread_id: Option<ThreadId>,
     ) -> CodexResult<NewThread> {
-        let agent_control = self.agent_control_for_config(&options.config);
         let (resumed_session_source, resumed_thread_source) = options
             .initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
         let session_source = options.session_source.unwrap_or(resumed_session_source);
+        let agent_control = self
+            .agent_control_for_session_source(&options.config, &session_source)
+            .await;
         let thread_source = options.thread_source.or(resumed_thread_source);
         Box::pin(self.state.spawn_thread_with_source(
             options.config,
@@ -1025,6 +1027,23 @@ impl ThreadManager {
 
     fn agent_control_for_config(&self, config: &Config) -> AgentControl {
         AgentControl::new(Arc::downgrade(&self.state), config.rollout_budget)
+    }
+
+    async fn agent_control_for_session_source(
+        &self,
+        config: &Config,
+        session_source: &SessionSource,
+    ) -> AgentControl {
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id, ..
+        }) = session_source
+        else {
+            return self.agent_control_for_config(config);
+        };
+        match self.get_thread(*parent_thread_id).await {
+            Ok(parent_thread) => parent_thread.codex.session.services.agent_control.clone(),
+            Err(_) => self.agent_control_for_config(config),
+        }
     }
 
     #[cfg(test)]
@@ -1484,7 +1503,7 @@ impl ThreadManagerState {
             forked_from_thread_id,
             parent_thread_id,
             thread_source,
-            agent_control,
+            agent_control: agent_control.clone(),
             dynamic_tools,
             metrics_service_name,
             inherited_environments,
@@ -1506,6 +1525,10 @@ impl ThreadManagerState {
         let new_thread = self
             .finalize_thread_spawn(codex, thread_id, tracked_session_source)
             .await?;
+        agent_control.register_thread_spawn_metadata(
+            new_thread.thread_id,
+            &new_thread.thread.session_source,
+        );
         if is_resumed_thread {
             new_thread.thread.emit_thread_resume_lifecycle().await;
         }

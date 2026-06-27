@@ -3,14 +3,14 @@
 Status: Ambient parity workflow suite passed on June 25, 2026 for wrapped
 Claude Code panes after the hidden local tool-call ceiling was removed. A later
 streaming protocol patch also passed the full four-workflow Ambient rerun. Z.AI,
-Baseten, OpenRouter, and Claude Plan remain experimental until they pass the
+Baseten, OpenRouter, Vercel, and Claude Plan remain experimental until they pass the
 same workflow suite.
 
 The Ambient path runs real `claude -p` headless turns against a local
 PFTerminal Anthropic Messages bridge. The bridge translates Claude Code
 Messages requests to Ambient Chat Completions with the vault-held Ambient key,
 then returns Claude-compatible JSON/SSE back to the Claude process. Direct
-Z.AI, Baseten, OpenRouter, and Claude Plan profiles are also live-smoke-tested
+Z.AI, Baseten, OpenRouter, Vercel, and Claude Plan profiles are also live-smoke-tested
 through the same pane backend.
 
 The local runner uses a hardened headless invocation and surfaces structured
@@ -100,6 +100,8 @@ User Panes
   Claude Code - GLM 5.2 Ambient
   Claude Code - GLM 5.2 Z.AI
   Claude Code - GLM 5.2 Baseten
+  Claude Code - GLM 5.2 Vercel
+  Claude Code - GLM 5.2 Fast Vercel
   Claude Code - OpenRouter
   Claude Code - Claude Plan
   + New Pane
@@ -278,6 +280,8 @@ provider profile, but raw secret reads should remain host-owned.
 | Z.AI GLM 5.2 | `https://api.z.ai/api/anthropic` | `provider/zai_api_key` | Passed live pane smoke with tool use and resume. |
 | Baseten GLM 5.2 | `https://inference.baseten.co` | `provider/baseten_api_key` | Passed live pane smoke with tool use and resume. |
 | OpenRouter | `https://openrouter.ai/api` | `provider/openrouter_api_key` | Passed live pane smoke with tool use and resume. |
+| Vercel GLM 5.2 | `https://ai-gateway.vercel.sh` | `provider/ai_gateway_api_key` | Anthropic-compatible Vercel AI Gateway route; pending live pane smoke. |
+| Vercel GLM 5.2 Fast | `https://ai-gateway.vercel.sh` | `provider/ai_gateway_api_key` | Fast Vercel AI Gateway route; pending live pane smoke. |
 
 ## Current Live Provider Evidence
 
@@ -302,6 +306,7 @@ the hidden local tool-call ceiling.
 | Live code-review command | `PFTERMINAL_LIVE_CODEX_HOME=/home/postfiat/.pfterminal cargo test -p codex-tui claude_panes::tests::live_ambient_bridge_runs_substantive_code_review -- --ignored --nocapture` | Claude inspected the pane implementation and returned review findings through the wrapped pane path. |
 | Live disposable edit command | `PFTERMINAL_LIVE_CODEX_HOME=/home/postfiat/.pfterminal cargo test -p codex-tui claude_panes::tests::live_ambient_bridge_runs_disposable_edit_task -- --ignored --nocapture` | Claude edited a fixture file through the pane path and the test asserted the file content. |
 | Full provider smoke | `pfterminal claude-pane-smoke --providers ambient,zai,baseten,openrouter,claude-plan --cwd /home/postfiat/repos/PfTerminal` | 5 passed, 5 checked; report `/home/postfiat/.pfterminal/panes/smoke-reports/claude-pane-smoke-1782391716.json`. |
+| Vercel provider smoke command | `pfterminal claude-pane-smoke --providers vercel,vercel-fast --cwd /home/postfiat/repos/PfTerminal` | Pending live run with `provider/ai_gateway_api_key`. |
 | Ambient first smoke turn | success; tools `Bash`, `Read`; duration 87.1s | Ambient bridge supports substantive review-style work. |
 | Z.AI first smoke turn | success; tools `Bash`, `Read`; duration 83.0s | Direct Z.AI Anthropic route works through the pane backend. |
 | Baseten first smoke turn | success; tools `Read`, `Bash`; duration 15.5s | Direct Baseten profile works through the pane backend. |
@@ -432,7 +437,7 @@ raw secrets to Claude model context.
   `provider/ambient_api_key` without editing `~/.claude/settings.json`.
 - The active footer labels the selected Claude pane so users know new prompts
   are routed to Claude Code, not the main Codex model.
-- Direct Z.AI, Baseten, OpenRouter, and Claude Plan profiles pass the live
+- Direct Z.AI, Baseten, OpenRouter, Vercel, and Claude Plan profiles pass the live
   provider smoke or fail with structured provider/audit status.
 - A two-turn Claude pane remembers prior context through `--resume`.
 - The pane backend prevents concurrent sends to the same Claude session.

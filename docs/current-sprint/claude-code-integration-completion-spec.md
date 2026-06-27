@@ -309,6 +309,8 @@ experimental.
 | Claude Code - GLM 5.2 Z.AI | `provider/zai_api_key` | All four workflows pass or profile is marked experimental. |
 | Claude Code - GLM 5.2 Baseten | `provider/baseten_api_key` | All four workflows pass or profile is marked experimental. |
 | Claude Code - OpenRouter | `provider/openrouter_api_key` | All four workflows pass or profile is marked experimental. |
+| Claude Code - GLM 5.2 Vercel | `provider/ai_gateway_api_key` | All four workflows pass or profile is marked experimental. |
+| Claude Code - GLM 5.2 Fast Vercel | `provider/ai_gateway_api_key` | All four workflows pass or profile is marked experimental. |
 | Claude Code - Claude Plan | Claude native auth | All four workflows pass or profile is marked unavailable. |
 
 ## Required Commands
@@ -327,7 +329,7 @@ Live workflow runner required before release:
 
 ```bash
 pfterminal claude-pane-workflow-suite \
-  --providers ambient,zai,baseten,openrouter,claude-plan \
+  --providers ambient,zai,baseten,openrouter,vercel,vercel-fast,claude-plan \
   --workflows mock-website,numpy-pandas-benchmark,code-review,auditability \
   --cwd /home/postfiat/repos/PfTerminal
 ```

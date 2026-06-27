@@ -50,9 +50,48 @@ mod tests;
 pub(crate) fn format_subagent_context_line(
     agent_reference: &str,
     agent_nickname: Option<&str>,
+    agent_role: Option<&str>,
+    agent_status: Option<&AgentStatus>,
+    last_task_message: Option<&str>,
+    last_result_message: Option<&str>,
 ) -> String {
-    match agent_nickname.filter(|nickname| !nickname.is_empty()) {
+    let mut line = match agent_nickname.filter(|nickname| !nickname.is_empty()) {
         Some(agent_nickname) => format!("- {agent_reference}: {agent_nickname}"),
         None => format!("- {agent_reference}"),
+    };
+
+    let mut details = Vec::new();
+    if let Some(agent_role) = agent_role.filter(|role| !role.is_empty()) {
+        details.push(format!("role={agent_role}"));
+    }
+    if let Some(agent_status) = agent_status {
+        details.push(format!("status={}", subagent_status_label(agent_status)));
+    }
+    if let Some(last_task_message) = last_task_message.filter(|message| !message.trim().is_empty())
+    {
+        details.push(format!("task={last_task_message}"));
+    }
+    if let Some(last_result_message) =
+        last_result_message.filter(|message| !message.trim().is_empty())
+    {
+        details.push(format!("result={last_result_message}"));
+    }
+    if !details.is_empty() {
+        line.push_str(" (");
+        line.push_str(&details.join("; "));
+        line.push(')');
+    }
+    line
+}
+
+fn subagent_status_label(status: &AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::PendingInit => "pending",
+        AgentStatus::Running => "running",
+        AgentStatus::Interrupted => "interrupted",
+        AgentStatus::Completed(_) => "done",
+        AgentStatus::Errored(_) => "error",
+        AgentStatus::Shutdown => "closed",
+        AgentStatus::NotFound => "not found",
     }
 }

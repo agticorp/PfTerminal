@@ -1725,6 +1725,11 @@ impl ChatWidget {
         self.bottom_pane.is_task_running()
     }
 
+    #[cfg(test)]
+    pub(crate) fn status_indicator_visible_for_test(&self) -> bool {
+        self.bottom_pane.status_indicator_visible()
+    }
+
     pub(crate) fn toggle_vim_mode_and_notify(&mut self) {
         let enabled = self.bottom_pane.toggle_vim_enabled();
         let message = if enabled {

@@ -4178,6 +4178,7 @@ async fn turn_event_counts_completed_tool_items() {
             kind: SubAgentActivityKind::Interacted,
             agent_thread_id: "thread-child".to_string(),
             agent_path: "/root/child".to_string(),
+            task_preview: None,
         },
         ThreadItem::WebSearch {
             id: "web-1".to_string(),

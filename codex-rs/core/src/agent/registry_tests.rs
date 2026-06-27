@@ -181,6 +181,28 @@ fn failed_spawn_keeps_nickname_marked_used() {
 }
 
 #[test]
+fn preferred_nickname_collision_gets_ordinal_suffix() {
+    let registry = Arc::new(AgentRegistry::default());
+    let mut first = registry
+        .reserve_spawn_slot(/*max_threads*/ None)
+        .expect("reserve first slot");
+    let first_name = first
+        .reserve_agent_nickname_with_preference(&["alpha"], Some("Snaga"))
+        .expect("reserve preferred name");
+    let first_id = ThreadId::new();
+    first.commit(agent_metadata(first_id));
+    assert_eq!(first_name, "Snaga");
+
+    let mut second = registry
+        .reserve_spawn_slot(/*max_threads*/ None)
+        .expect("reserve second slot");
+    let second_name = second
+        .reserve_agent_nickname_with_preference(&["beta"], Some("Snaga"))
+        .expect("duplicate preferred name should be made unique");
+    assert_eq!(second_name, "Snaga the 2nd");
+}
+
+#[test]
 fn agent_nickname_resets_used_pool_when_exhausted() {
     let registry = Arc::new(AgentRegistry::default());
     let mut first = registry

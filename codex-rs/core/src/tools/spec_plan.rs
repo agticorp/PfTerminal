@@ -1096,7 +1096,8 @@ fn v1_plain_function_subagents_enabled(turn_context: &TurnContext) -> bool {
         && (provider_info.is_ambient()
             || provider_info.is_zai()
             || provider_info.is_openrouter()
-            || provider_info.is_baseten())
+            || provider_info.is_baseten()
+            || provider_info.is_vercel())
 }
 
 fn spawn_agent_available_models(turn_context: &TurnContext) -> Vec<ModelPreset> {
@@ -1112,6 +1113,7 @@ fn third_party_provider_without_spawn_model_switching(turn_context: &TurnContext
         || provider_info.is_zai()
         || provider_info.is_openrouter()
         || provider_info.is_baseten()
+        || provider_info.is_vercel()
 }
 
 fn multi_agent_v1_plain_function_handler(

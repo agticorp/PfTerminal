@@ -553,7 +553,7 @@ struct ClaudePaneSmokeCommand {
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
 
-    /// Comma-separated provider list: ambient,zai,baseten,openrouter,claude-plan.
+    /// Comma-separated provider list: ambient,zai,baseten,openrouter,vercel,vercel-fast,claude-plan.
     #[arg(
         long,
         value_delimiter = ',',
@@ -571,7 +571,7 @@ struct ClaudePaneWorkflowSuiteCommand {
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
 
-    /// Comma-separated provider list: ambient,zai,baseten,openrouter,claude-plan.
+    /// Comma-separated provider list: ambient,zai,baseten,openrouter,vercel,vercel-fast,claude-plan.
     #[arg(long, value_delimiter = ',', default_value = "ambient")]
     providers: Vec<String>,
 
@@ -2218,7 +2218,7 @@ async fn run_claude_pane_smoke_command(command: ClaudePaneSmokeCommand) -> anyho
     }
     if !report.passed {
         anyhow::bail!(
-            "Claude pane smoke did not pass the required Ambient-backed baseline; report: {}",
+            "Claude pane smoke did not pass the selected provider gate; report: {}",
             report.report_path.display()
         );
     }
@@ -2284,6 +2284,7 @@ fn provider_vault_label_allowed_for_auth_helper(label: &str) -> bool {
             | "provider/ambient_api_key"
             | "provider/baseten_api_key"
             | "provider/openrouter_api_key"
+            | "provider/ai_gateway_api_key"
     )
 }
 
@@ -3085,6 +3086,9 @@ mod tests {
         assert!(provider_vault_label_allowed_for_auth_helper(
             "provider/ambient_api_key"
         ));
+        assert!(provider_vault_label_allowed_for_auth_helper(
+            "provider/ai_gateway_api_key"
+        ));
     }
 
     #[test]
@@ -3093,7 +3097,7 @@ mod tests {
             "codex",
             "claude-pane-smoke",
             "--providers",
-            "ambient,zai",
+            "ambient,zai,vercel,vercel-fast",
             "--cwd",
             "/tmp",
         ])
@@ -3103,7 +3107,10 @@ mod tests {
             panic!("expected claude-pane-smoke subcommand");
         };
 
-        assert_eq!(command.providers, vec!["ambient", "zai"]);
+        assert_eq!(
+            command.providers,
+            vec!["ambient", "zai", "vercel", "vercel-fast"]
+        );
         assert_eq!(command.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
     }
 
@@ -3113,7 +3120,7 @@ mod tests {
             "codex",
             "claude-pane-workflow-suite",
             "--providers",
-            "ambient,zai",
+            "ambient,zai,vercel",
             "--workflows",
             "mock-website,code-review",
             "--cwd",
@@ -3125,7 +3132,7 @@ mod tests {
             panic!("expected claude-pane-workflow-suite subcommand");
         };
 
-        assert_eq!(command.providers, vec!["ambient", "zai"]);
+        assert_eq!(command.providers, vec!["ambient", "zai", "vercel"]);
         assert_eq!(command.workflows, vec!["mock-website", "code-review"]);
         assert_eq!(command.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
     }

@@ -34,6 +34,10 @@ const PROVIDER_CREDENTIAL_OPTIONS: &[ProviderCredentialOption] = &[
         provider_name: "Baseten",
         env_key: "BASETEN_API_KEY",
     },
+    ProviderCredentialOption::ProviderApiKey {
+        provider_name: "Vercel",
+        env_key: "AI_GATEWAY_API_KEY",
+    },
 ];
 
 impl ChatWidget {
@@ -201,6 +205,7 @@ fn provider_credential_display_name(provider_name: &str, env_key: &str) -> Strin
         "ZAI_API_KEY" => "API Key",
         "OPENROUTER_API_KEY" => "API Key",
         "BASETEN_API_KEY" => "API Key",
+        "AI_GATEWAY_API_KEY" => "API Key",
         _ => env_key,
     };
     format!("Provider: {provider_name} {key_name}")
@@ -361,6 +366,7 @@ mod tests {
                 "Provider: Z.AI API Key",
                 "Provider: OpenRouter API Key",
                 "Provider: Baseten API Key",
+                "Provider: Vercel API Key",
             ]
         );
         assert_eq!(

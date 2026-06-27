@@ -28,6 +28,29 @@ use toml::Value as TomlValue;
 /// The role name used when a caller omits `agent_type`.
 pub const DEFAULT_ROLE_NAME: &str = "default";
 const AGENT_TYPE_UNAVAILABLE_ERROR: &str = "agent type is currently not available";
+const AGENT_NAMES: &str = include_str!("agent_names.txt");
+
+fn default_agent_nickname_list() -> Vec<&'static str> {
+    AGENT_NAMES
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+pub(crate) fn agent_nickname_candidates(config: &Config, role_name: Option<&str>) -> Vec<String> {
+    let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
+    if let Some(candidates) =
+        resolve_role_config(config, role_name).and_then(|role| role.nickname_candidates.clone())
+    {
+        return candidates;
+    }
+
+    default_agent_nickname_list()
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
+}
 
 /// Applies a named role layer to `config` while preserving caller-owned provider settings.
 ///
@@ -349,19 +372,41 @@ Rules:
                 (
                     "troll".to_string(),
                     AgentRoleConfig {
-                        description: Some(r#"Use `troll` for supervisory review and coordination.
-Trolls report to a Nazgul parent, may spawn Orc executors, must wait for Orcs to finish before claiming completion, and must critically review Orc output before reporting final results."#.to_string()),
+                        description: Some(r#"Use `troll` for engineering-manager supervision, review, coordination, and enforcement.
+Trolls report to the Nazgul CTO, manage Orc IC executors, prefer delegation over implementation, must wait for Orcs to finish before claiming completion, and must critically review Orc output before reporting final results."#.to_string()),
                         config_file: Some("troll.toml".to_string().parse().unwrap_or_default()),
-                        nickname_candidates: None,
+                        nickname_candidates: Some(vec![
+                            "Burzum".to_string(),
+                            "Durbat".to_string(),
+                            "Lugburz".to_string(),
+                            "Ashdurb".to_string(),
+                            "Ghashlug".to_string(),
+                            "Krimpat".to_string(),
+                            "Durburz".to_string(),
+                            "Ugburz".to_string(),
+                            "Burzglob".to_string(),
+                            "Skailug".to_string(),
+                        ]),
                     }
                 ),
                 (
                     "orc".to_string(),
                     AgentRoleConfig {
-                        description: Some(r#"Use `orc` for direct execution work under a supervising Troll.
-Orcs produce concrete evidence such as changed files, tests, benchmark output, or findings, and must not spawn child agents."#.to_string()),
+                        description: Some(r#"Use `orc` for direct IC execution work under a supervising Troll.
+Orcs follow the Troll's assignment exactly, do not expand scope, produce concrete evidence such as changed files, tests, benchmark output, or findings, and must not spawn child agents."#.to_string()),
                         config_file: Some("orc.toml".to_string().parse().unwrap_or_default()),
-                        nickname_candidates: None,
+                        nickname_candidates: Some(vec![
+                            "Snaga".to_string(),
+                            "Ghash".to_string(),
+                            "Krimp".to_string(),
+                            "Lug".to_string(),
+                            "Ruk".to_string(),
+                            "Uzg".to_string(),
+                            "Mauh".to_string(),
+                            "Thrak".to_string(),
+                            "Narg".to_string(),
+                            "Glob".to_string(),
+                        ]),
                     }
                 ),
                 // Awaiter is temp removed

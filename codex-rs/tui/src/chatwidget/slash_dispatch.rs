@@ -724,32 +724,19 @@ impl ChatWidget {
             SlashCommand::Spawn => {
                 let mut parts = trimmed.splitn(2, ' ');
                 let action = parts.next().unwrap_or_default().to_ascii_lowercase();
-                let rest = parts.next().unwrap_or_default().trim().to_string();
+                let _rest = parts.next().unwrap_or_default().trim();
                 match action.as_str() {
                     "" => self.app_event_tx.send(AppEvent::OpenSpawnRolePicker),
                     "status" => self.app_event_tx.send(AppEvent::OpenSpawnStatus),
                     "nazgul" => self.app_event_tx.send(AppEvent::OpenSpawnNazgulPanePicker),
-                    "troll" if rest.is_empty() => {
-                        self.app_event_tx.send(AppEvent::OpenSpawnHarnessPicker {
-                            role: crate::spawn_orchestration::SpawnRole::Troll,
-                        });
-                    }
-                    "troll" => self.app_event_tx.send(AppEvent::SubmitSpawnTask {
+                    "troll" => self.app_event_tx.send(AppEvent::OpenSpawnParentPicker {
                         role: crate::spawn_orchestration::SpawnRole::Troll,
-                        task: rest,
                     }),
-                    "orc" if rest.is_empty() => {
-                        self.app_event_tx.send(AppEvent::OpenSpawnHarnessPicker {
-                            role: crate::spawn_orchestration::SpawnRole::Orc,
-                        });
-                    }
-                    "orc" => self.app_event_tx.send(AppEvent::SubmitSpawnTask {
+                    "orc" => self.app_event_tx.send(AppEvent::OpenSpawnParentPicker {
                         role: crate::spawn_orchestration::SpawnRole::Orc,
-                        task: rest,
                     }),
-                    _ => self.add_error_message(
-                        "Usage: /spawn [status|nazgul|troll <task>|orc <task>]".to_string(),
-                    ),
+                    _ => self
+                        .add_error_message("Usage: /spawn [status|nazgul|troll|orc]".to_string()),
                 }
             }
             SlashCommand::Keymap => match trimmed.to_ascii_lowercase().as_str() {

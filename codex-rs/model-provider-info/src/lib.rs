@@ -55,6 +55,12 @@ pub const BASETEN_PROVIDER_ID: &str = "baseten";
 pub const BASETEN_BASE_URL: &str = "https://inference.baseten.co/v1";
 pub const BASETEN_DEFAULT_MODEL: &str = "zai-org/GLM-5.2";
 pub const BASETEN_API_KEY_ENV_VAR: &str = "BASETEN_API_KEY";
+const VERCEL_PROVIDER_NAME: &str = "Vercel";
+pub const VERCEL_PROVIDER_ID: &str = "vercel";
+pub const VERCEL_BASE_URL: &str = "https://ai-gateway.vercel.sh/v1";
+pub const VERCEL_DEFAULT_MODEL: &str = "zai/glm-5.2";
+pub const VERCEL_GLM_5_2_FAST_MODEL: &str = "zai/glm-5.2-fast";
+pub const VERCEL_API_KEY_ENV_VAR: &str = "AI_GATEWAY_API_KEY";
 
 fn provider_api_key_vault_instructions() -> String {
     [
@@ -68,6 +74,7 @@ fn provider_api_key_vault_instructions() -> String {
         "  Provider: Z.AI API Key        Store ZAI_API_KEY in the vault",
         "  Provider: OpenRouter API Key  Store OPENROUTER_API_KEY in the vault",
         "  Provider: Baseten API Key     Store BASETEN_API_KEY in the vault",
+        "  Provider: Vercel API Key      Store AI_GATEWAY_API_KEY in the vault",
     ]
     .join("\n")
 }
@@ -82,6 +89,17 @@ const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER: &str = "x-amzn-mantle-client-ag
 const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_VALUE: &str = "codex";
 pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
+const OSS_PROVIDER_NAME: &str = "gpt-oss";
+pub const BUILT_IN_MODEL_PROVIDER_NAMES: [&str; 8] = [
+    OPENAI_PROVIDER_NAME,
+    AMBIENT_PROVIDER_NAME,
+    ZAI_PROVIDER_NAME,
+    OPENROUTER_PROVIDER_NAME,
+    BASETEN_PROVIDER_NAME,
+    VERCEL_PROVIDER_NAME,
+    AMAZON_BEDROCK_PROVIDER_NAME,
+    OSS_PROVIDER_NAME,
+];
 
 /// Wire protocol that the provider speaks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
@@ -488,6 +506,28 @@ impl ModelProviderInfo {
         }
     }
 
+    pub fn create_vercel_provider() -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: VERCEL_PROVIDER_NAME.into(),
+            base_url: Some(VERCEL_BASE_URL.into()),
+            env_key: Some(VERCEL_API_KEY_ENV_VAR.into()),
+            env_key_instructions: Some(provider_api_key_vault_instructions()),
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    }
+
     pub fn create_amazon_bedrock_provider(
         aws: Option<ModelProviderAwsAuthInfo>,
     ) -> ModelProviderInfo {
@@ -538,6 +578,10 @@ impl ModelProviderInfo {
         self.name == BASETEN_PROVIDER_NAME
     }
 
+    pub fn is_vercel(&self) -> bool {
+        self.name == VERCEL_PROVIDER_NAME
+    }
+
     pub fn is_amazon_bedrock(&self) -> bool {
         self.name == AMAZON_BEDROCK_PROVIDER_NAME
     }
@@ -567,6 +611,7 @@ pub fn built_in_model_providers(
     let zai_provider = P::create_zai_provider();
     let openrouter_provider = P::create_openrouter_provider();
     let baseten_provider = P::create_baseten_provider();
+    let vercel_provider = P::create_vercel_provider();
     let amazon_bedrock_provider = P::create_amazon_bedrock_provider(/*aws*/ None);
 
     // PFTerminal bundles the first-party OpenAI provider, the local OSS
@@ -577,6 +622,7 @@ pub fn built_in_model_providers(
         (ZAI_PROVIDER_ID, zai_provider),
         (OPENROUTER_PROVIDER_ID, openrouter_provider),
         (BASETEN_PROVIDER_ID, baseten_provider),
+        (VERCEL_PROVIDER_ID, vercel_provider),
         (OPENAI_PROVIDER_ID, openai_provider),
         (AMAZON_BEDROCK_PROVIDER_ID, amazon_bedrock_provider),
         (
@@ -652,7 +698,7 @@ pub fn create_oss_provider(default_provider_port: u16, wire_api: WireApi) -> Mod
 
 pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> ModelProviderInfo {
     ModelProviderInfo {
-        name: "gpt-oss".into(),
+        name: OSS_PROVIDER_NAME.into(),
         base_url: Some(base_url.into()),
         env_key: None,
         env_key_instructions: None,

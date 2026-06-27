@@ -54,6 +54,8 @@ nav:
       - Tool Call Runaway Remedy: current-sprint/tool-call-runaway-remedy.md
       - PFTerminal Subagents: current-sprint/subagents.md
       - Spawn Orchestration: current-sprint/spawn-orchestration.md
+      - Spawn Orchestration Acceptance: current-sprint/spawn-orchestration-acceptance.md
+      - Agent Vault Access: current-sprint/agent-vault-access.md
       - Codex Account Login: current-sprint/codex-account-login.md
       - Claude Headless Panes: current-sprint/claude-headless-panes.md
       - Claude Code Completion Spec: current-sprint/claude-code-integration-completion-spec.md
@@ -63,6 +65,7 @@ nav:
       - Z.AI GLM 5.2: integrations/zai-glm-52.md
       - OpenRouter: integrations/openrouter.md
       - Baseten: integrations/baseten.md
+      - Vercel: integrations/vercel.md
       - Codex Fork: integrations/codex-fork.md
   - Runtime:
       - Exec: exec.md

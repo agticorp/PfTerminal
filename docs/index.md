@@ -16,6 +16,7 @@ has been integrated.
 | Z.AI GLM 5.2  | Built-in Z.AI coding-plan provider, direct `glm-5.2` model selection, and vault-backed provider keys.                   | [Z.AI GLM 5.2](integrations/zai-glm-52.md)    |
 | OpenRouter    | Built-in metered provider for GLM 5.2, MiniMax M3, Owl Alpha, and Gemini 3.5 Flash.                                     | [OpenRouter](integrations/openrouter.md)      |
 | Baseten       | Built-in metered provider for GLM 5.2 through Baseten.                                                                  | [Baseten](integrations/baseten.md)            |
+| Vercel        | Built-in metered provider for GLM 5.2 and GLM 5.2 Fast through Vercel AI Gateway.                                       | [Vercel](integrations/vercel.md)              |
 | Vault         | Encrypted credential store for provider keys and manually-added secrets.                                                | [Authentication And Vault](authentication.md) |
 | Codex fork    | Product command aliases, npm packages, installer names, TUI branding, and model picker behavior.                        | [Codex Fork](integrations/codex-fork.md)      |
 | Runtime       | Codex-derived local coding agent with tools, approvals, sandboxing, MCP, exec, and review modes.                        | [Runtime](exec.md)                            |
@@ -28,8 +29,9 @@ has been integrated.
 2. Read [Ambient](integrations/ambient.md) and
    [Z.AI GLM 5.2](integrations/zai-glm-52.md) for the coding-plan provider
    integrations.
-3. Read [OpenRouter](integrations/openrouter.md) and
-   [Baseten](integrations/baseten.md) for metered provider integrations.
+3. Read [OpenRouter](integrations/openrouter.md),
+   [Baseten](integrations/baseten.md), and [Vercel](integrations/vercel.md)
+   for metered provider integrations.
 4. Read [Codex Fork](integrations/codex-fork.md) for product-specific changes
    from upstream Codex.
 5. Read [Configuration](config.md), [Authentication](authentication.md), and
@@ -40,7 +42,7 @@ has been integrated.
 ## Core Claim
 
 PFTerminal is currently a Codex-derived terminal agent with Ambient, Z.AI,
-OpenRouter, Baseten, and encrypted vault storage made first-class. The
+OpenRouter, Baseten, Vercel, and encrypted vault storage made first-class. The
 implementation changes are code-level provider, model, request-shaping,
 onboarding, credential-storage, packaging, and branding changes, not just prompt
 text.

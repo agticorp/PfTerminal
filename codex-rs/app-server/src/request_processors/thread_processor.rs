@@ -2,12 +2,21 @@ use super::*;
 use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
 use codex_extension_api::ExtensionDataInit;
+use codex_protocol::AgentPath;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+use codex_protocol::protocol::SessionSource as CoreSessionSource;
+use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
+
+#[derive(Debug, Clone)]
+enum ThreadStartResponseKind {
+    ThreadStart,
+    ThreadSpawnAgent { agent_nickname: Option<String> },
+}
 
 struct ThreadListFilters {
     model_providers: Option<Vec<String>>,
@@ -428,6 +437,38 @@ impl ThreadRequestProcessor {
             app_server_client_version,
             supports_openai_form_elicitation,
             request_context,
+            ThreadStartResponseKind::ThreadStart,
+        )
+        .await
+        .map(|()| None)
+    }
+
+    pub(crate) async fn thread_spawn_agent(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadSpawnAgentParams,
+        app_server_client_name: Option<String>,
+        app_server_client_version: Option<String>,
+        supports_openai_form_elicitation: bool,
+        request_context: RequestContext,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let ThreadSpawnAgentParams {
+            parent_thread_id,
+            agent_role,
+            agent_nickname,
+            mut thread,
+        } = params;
+        thread.spawn_agent_parent_thread_id = Some(parent_thread_id);
+        thread.spawn_agent_role = Some(agent_role);
+        thread.thread_source = Some(codex_app_server_protocol::ThreadSource::Subagent);
+        self.thread_start_inner(
+            request_id,
+            thread,
+            app_server_client_name,
+            app_server_client_version,
+            supports_openai_form_elicitation,
+            request_context,
+            ThreadStartResponseKind::ThreadSpawnAgent { agent_nickname },
         )
         .await
         .map(|()| None)
@@ -883,6 +924,7 @@ impl ThreadRequestProcessor {
         app_server_client_version: Option<String>,
         supports_openai_form_elicitation: bool,
         request_context: RequestContext,
+        response_kind: ThreadStartResponseKind,
     ) -> Result<(), JSONRPCErrorError> {
         let ThreadStartParams {
             model,
@@ -907,6 +949,8 @@ impl ThreadRequestProcessor {
             ephemeral,
             session_start_source,
             thread_source,
+            spawn_agent_parent_thread_id,
+            spawn_agent_role,
             environments,
         } = params;
         if sandbox.is_some() && permissions.is_some() {
@@ -962,10 +1006,13 @@ impl ThreadRequestProcessor {
                 selected_capability_roots.unwrap_or_default(),
                 session_start_source,
                 thread_source.map(Into::into),
+                spawn_agent_parent_thread_id,
+                spawn_agent_role,
                 environment_selections,
                 service_name,
                 experimental_raw_events,
                 request_trace,
+                response_kind,
             )
             .await
             {
@@ -1037,10 +1084,13 @@ impl ThreadRequestProcessor {
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
         session_start_source: Option<codex_app_server_protocol::ThreadStartSource>,
         thread_source: Option<codex_protocol::protocol::ThreadSource>,
+        spawn_agent_parent_thread_id: Option<String>,
+        spawn_agent_role: Option<String>,
         environments: Option<Vec<TurnEnvironmentSelection>>,
         service_name: Option<String>,
         experimental_raw_events: bool,
         request_trace: Option<W3cTraceContext>,
+        response_kind: ThreadStartResponseKind,
     ) -> Result<(), JSONRPCErrorError> {
         let thread_start_started_at = std::time::Instant::now();
         let requested_cwd = typesafe_overrides.cwd.clone();
@@ -1119,7 +1169,62 @@ impl ThreadRequestProcessor {
                 .thread_manager
                 .default_environment_selections(&config.cwd)
         });
+        let spawn_session_source = match spawn_agent_parent_thread_id {
+            Some(parent_thread_id) => {
+                let parent_thread_id = ThreadId::from_string(&parent_thread_id)
+                    .map_err(|err| invalid_request(format!("invalid parent_thread_id: {err}")))?;
+                let agent_role = spawn_agent_role
+                    .map(|role| role.trim().to_string())
+                    .filter(|role| !role.is_empty());
+                let agent_nickname = match &response_kind {
+                    ThreadStartResponseKind::ThreadSpawnAgent { agent_nickname } => agent_nickname
+                        .as_ref()
+                        .map(|nickname| nickname.trim().to_string())
+                        .filter(|nickname| !nickname.is_empty()),
+                    ThreadStartResponseKind::ThreadStart => None,
+                };
+                let parent_thread = listener_task_context
+                    .thread_manager
+                    .get_thread(parent_thread_id)
+                    .await
+                    .map_err(|err| invalid_request(format!("parent thread unavailable: {err}")))?;
+                let parent_snapshot = parent_thread.config_snapshot().await;
+                let parent_depth = match parent_snapshot.session_source {
+                    CoreSessionSource::SubAgent(CoreSubAgentSource::ThreadSpawn {
+                        depth, ..
+                    }) => depth,
+                    _ => 0,
+                };
+                let parent_agent_path = parent_snapshot
+                    .session_source
+                    .get_agent_path()
+                    .unwrap_or_else(AgentPath::root);
+                let agent_path = direct_spawn_agent_path(
+                    &parent_agent_path,
+                    agent_role.as_deref(),
+                    agent_nickname.as_deref(),
+                );
+                let depth = parent_depth + 1;
+                if depth > config.agent_max_depth {
+                    return Err(invalid_request(format!(
+                        "spawn depth {depth} exceeds configured agents.max_depth {}",
+                        config.agent_max_depth
+                    )));
+                }
+                Some(CoreSessionSource::SubAgent(
+                    CoreSubAgentSource::ThreadSpawn {
+                        parent_thread_id,
+                        depth,
+                        agent_path,
+                        agent_nickname,
+                        agent_role,
+                    },
+                ))
+            }
+            None => None,
+        };
         let dynamic_tools = dynamic_tools.unwrap_or_default();
+        let is_spawn_agent_thread = spawn_session_source.is_some();
         if !dynamic_tools.is_empty() {
             validate_dynamic_tools(&dynamic_tools).map_err(invalid_request)?;
         }
@@ -1152,8 +1257,12 @@ impl ThreadRequestProcessor {
                     codex_app_server_protocol::ThreadStartSource::Startup => InitialHistory::New,
                     codex_app_server_protocol::ThreadStartSource::Clear => InitialHistory::Cleared,
                 },
-                session_source: None,
-                thread_source,
+                session_source: spawn_session_source,
+                thread_source: if is_spawn_agent_thread {
+                    Some(codex_protocol::protocol::ThreadSource::Subagent)
+                } else {
+                    thread_source
+                },
                 dynamic_tools,
                 metrics_service_name: service_name,
                 multi_agent_mode,
@@ -1265,14 +1374,28 @@ impl ThreadRequestProcessor {
             multi_agent_mode: config_snapshot.multi_agent_mode,
         };
         let notif = thread_started_notification(thread);
-        listener_task_context
-            .outgoing
-            .send_response(request_id, response)
-            .instrument(tracing::info_span!(
-                "app_server.thread_start.send_response",
-                otel.name = "app_server.thread_start.send_response",
-            ))
-            .await;
+        match response_kind {
+            ThreadStartResponseKind::ThreadStart => {
+                listener_task_context
+                    .outgoing
+                    .send_response(request_id, response)
+                    .instrument(tracing::info_span!(
+                        "app_server.thread_start.send_response",
+                        otel.name = "app_server.thread_start.send_response",
+                    ))
+                    .await;
+            }
+            ThreadStartResponseKind::ThreadSpawnAgent { .. } => {
+                listener_task_context
+                    .outgoing
+                    .send_response(request_id, ThreadSpawnAgentResponse::from(response))
+                    .instrument(tracing::info_span!(
+                        "app_server.thread_start.send_spawn_agent_response",
+                        otel.name = "app_server.thread_start.send_spawn_agent_response",
+                    ))
+                    .await;
+            }
+        }
 
         listener_task_context
             .outgoing
@@ -4111,6 +4234,55 @@ pub(super) fn core_thread_write_error(operation: &str, err: CodexErr) -> JSONRPC
         CodexErr::InvalidRequest(message) => invalid_request(message),
         CodexErr::UnsupportedOperation(message) => method_not_found(message),
         err => internal_error(format!("failed to {operation}: {err}")),
+    }
+}
+
+fn direct_spawn_agent_path(
+    parent_agent_path: &AgentPath,
+    agent_role: Option<&str>,
+    agent_nickname: Option<&str>,
+) -> Option<AgentPath> {
+    let role = sanitize_agent_path_segment(agent_role.unwrap_or("agent"));
+    let label = sanitize_agent_path_segment(agent_nickname.unwrap_or(role.as_str()));
+    let segment = if label == role {
+        role
+    } else {
+        format!("{role}_{label}")
+    };
+    parent_agent_path.join(segment.as_str()).ok()
+}
+
+fn sanitize_agent_path_segment(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_underscore = false;
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        let mapped = if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            Some(ch)
+        } else if ch == '_' || ch == '-' || ch.is_whitespace() {
+            Some('_')
+        } else {
+            None
+        };
+        let Some(ch) = mapped else {
+            continue;
+        };
+        if ch == '_' {
+            if out.is_empty() || previous_underscore {
+                continue;
+            }
+            previous_underscore = true;
+        } else {
+            previous_underscore = false;
+        }
+        out.push(ch);
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() || matches!(out.as_str(), "root" | "." | "..") {
+        "agent".to_string()
+    } else {
+        out
     }
 }
 

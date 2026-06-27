@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::control::ListedAgent;
 use crate::session::InputQueueActivity;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v2;
@@ -91,7 +92,13 @@ impl Handler {
 
         let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
         let outcome = wait_for_activity(&mut activity_rx, pending_activity, deadline).await;
-        let result = WaitAgentResult::from_outcome(outcome);
+        let agents = session
+            .services
+            .agent_control
+            .list_agents(&turn.session_source, /*path_prefix*/ None)
+            .await
+            .unwrap_or_default();
+        let result = WaitAgentResult::from_outcome(outcome, agents);
 
         session
             .send_event(
@@ -127,10 +134,11 @@ struct WaitArgs {
 pub(crate) struct WaitAgentResult {
     pub(crate) message: String,
     pub(crate) timed_out: bool,
+    pub(crate) agents: Vec<ListedAgent>,
 }
 
 impl WaitAgentResult {
-    fn from_outcome(outcome: WaitOutcome) -> Self {
+    fn from_outcome(outcome: WaitOutcome, agents: Vec<ListedAgent>) -> Self {
         let message = match outcome {
             WaitOutcome::MailboxActivity => "Wait completed.",
             WaitOutcome::Steered => "Wait interrupted by new input.",
@@ -139,6 +147,7 @@ impl WaitAgentResult {
         Self {
             message: message.to_string(),
             timed_out: outcome == WaitOutcome::TimedOut,
+            agents,
         }
     }
 }

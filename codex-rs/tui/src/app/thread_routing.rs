@@ -8,6 +8,22 @@ use super::*;
 use crate::session_resume::read_session_model;
 
 impl App {
+    pub(super) fn note_thread_interrupt_failure(
+        &mut self,
+        thread_id: ThreadId,
+        error: TypedRequestError,
+    ) {
+        let label = self.thread_label(thread_id);
+        tracing::warn!(
+            %thread_id,
+            %error,
+            "thread interrupt failed in TUI; keeping the app alive"
+        );
+        self.chat_widget.add_error_message(format!(
+            "Failed to interrupt {label}: {error}. The pane remains open."
+        ));
+    }
+
     pub(super) async fn shutdown_current_thread(&mut self, app_server: &mut AppServerSession) {
         if let Some(thread_id) = self.chat_widget.thread_id() {
             // Clear any in-flight rollback guard when switching threads.
@@ -35,7 +51,7 @@ impl App {
         }
     }
 
-    pub(super) fn ensure_thread_channel(&mut self, thread_id: ThreadId) -> &mut ThreadEventChannel {
+    pub(crate) fn ensure_thread_channel(&mut self, thread_id: ThreadId) -> &mut ThreadEventChannel {
         self.thread_event_channels
             .entry(thread_id)
             .or_insert_with(|| ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY))
@@ -63,7 +79,7 @@ impl App {
         self.refresh_pending_thread_approvals().await;
     }
 
-    pub(super) async fn store_active_thread_receiver(&mut self) {
+    pub(crate) async fn store_active_thread_receiver(&mut self) {
         let Some(active_id) = self.active_thread_id else {
             return;
         };
@@ -77,6 +93,13 @@ impl App {
                 channel.receiver = Some(receiver);
             }
         }
+    }
+
+    pub(crate) async fn detach_active_thread_for_external_pane(&mut self) {
+        self.store_active_thread_receiver().await;
+        self.active_thread_id = None;
+        self.active_thread_rx = None;
+        self.refresh_pending_thread_approvals().await;
     }
 
     pub(super) async fn activate_thread_for_replay(
@@ -123,7 +146,7 @@ impl App {
         store.active_turn_id().map(ToOwned::to_owned)
     }
 
-    pub(super) fn thread_label(&self, thread_id: ThreadId) -> String {
+    pub(crate) fn thread_label(&self, thread_id: ThreadId) -> String {
         let is_primary = self.primary_thread_id == Some(thread_id);
         let fallback_label = if is_primary {
             "Main [default]".to_string()
@@ -533,10 +556,12 @@ impl App {
                             Err(error) if !retried_after_turn_mismatch => {
                                 let Some(actual_turn_id) = active_turn_interrupt_race(&error)
                                 else {
-                                    return Err(error).wrap_err("turn/interrupt failed in TUI");
+                                    self.note_thread_interrupt_failure(thread_id, error);
+                                    return Ok(true);
                                 };
                                 if actual_turn_id == interrupt_turn_id {
-                                    return Err(error).wrap_err("turn/interrupt failed in TUI");
+                                    self.note_thread_interrupt_failure(thread_id, error);
+                                    return Ok(true);
                                 }
                                 // Review flows can swap the active turn before the TUI processes
                                 // the corresponding notification. Retry once with the
@@ -546,16 +571,17 @@ impl App {
                                 interrupt_turn_id = actual_turn_id;
                             }
                             Err(error) => {
-                                return Err(error).wrap_err("turn/interrupt failed in TUI");
+                                self.note_thread_interrupt_failure(thread_id, error);
+                                return Ok(true);
                             }
                         }
                     }
                     unreachable!("interrupt retry loop should return");
                 } else {
-                    app_server
-                        .startup_interrupt(thread_id)
-                        .await
-                        .wrap_err("turn/interrupt failed in TUI")?;
+                    if let Err(error) = app_server.startup_interrupt(thread_id).await {
+                        self.note_thread_interrupt_failure(thread_id, error);
+                        return Ok(true);
+                    }
                 }
                 Ok(true)
             }
@@ -884,6 +910,8 @@ impl App {
             self.apply_thread_settings_to_cached_session(thread_id, &notification.thread_settings)
                 .await;
         }
+        self.cache_collab_receiver_threads_for_notification(&notification);
+        self.update_spawn_status_for_thread_notification(&notification);
         let inferred_session = self
             .infer_session_for_thread_notification(thread_id, &notification)
             .await;
@@ -967,6 +995,10 @@ impl App {
             if let Some(sender_thread_id) = sender_thread_id {
                 self.spawn_parent_by_thread
                     .insert(thread_id, sender_thread_id);
+                self.spawn_parent_by_node.insert(
+                    crate::spawn_orchestration::thread_node_id(thread_id),
+                    crate::spawn_orchestration::thread_node_id(sender_thread_id),
+                );
             }
 
             if let Some(status) = collab_receiver_status(notification, receiver_thread_id) {
@@ -980,6 +1012,8 @@ impl App {
                             | codex_app_server_protocol::CollabAgentStatus::Running
                     ),
                 );
+                self.agent_navigation
+                    .set_last_result_message(thread_id, status.message.clone());
             }
 
             if self.agent_navigation.get(&thread_id).is_some() {
@@ -1458,6 +1492,7 @@ impl App {
         match event {
             ThreadBufferedEvent::Notification(notification) => {
                 self.cache_collab_receiver_threads_for_notification(&notification);
+                self.update_spawn_status_for_thread_notification(&notification);
                 self.chat_widget
                     .handle_server_notification(notification, /*replay_kind*/ None);
             }
@@ -1479,6 +1514,67 @@ impl App {
         }
         if needs_refresh {
             self.refresh_status_line();
+        }
+    }
+
+    pub(super) fn update_spawn_status_for_thread_notification(
+        &mut self,
+        notification: &ServerNotification,
+    ) {
+        let (thread_id, status, message) = match notification {
+            ServerNotification::TurnStarted(notification) => {
+                let Ok(thread_id) = ThreadId::from_string(&notification.thread_id) else {
+                    return;
+                };
+                (
+                    thread_id,
+                    codex_app_server_protocol::CollabAgentStatus::Running,
+                    None,
+                )
+            }
+            ServerNotification::TurnCompleted(notification) => {
+                let Ok(thread_id) = ThreadId::from_string(&notification.thread_id) else {
+                    return;
+                };
+                let status = match notification.turn.status {
+                    TurnStatus::Completed => {
+                        codex_app_server_protocol::CollabAgentStatus::Completed
+                    }
+                    TurnStatus::Interrupted => {
+                        codex_app_server_protocol::CollabAgentStatus::Interrupted
+                    }
+                    TurnStatus::Failed => codex_app_server_protocol::CollabAgentStatus::Errored,
+                    TurnStatus::InProgress => codex_app_server_protocol::CollabAgentStatus::Running,
+                };
+                (
+                    thread_id,
+                    status,
+                    spawn_turn_result_preview(&notification.turn),
+                )
+            }
+            _ => return,
+        };
+
+        if !self.is_spawn_orchestration_thread(thread_id) {
+            return;
+        }
+
+        let is_running = matches!(
+            status,
+            codex_app_server_protocol::CollabAgentStatus::PendingInit
+                | codex_app_server_protocol::CollabAgentStatus::Running
+        );
+        self.spawn_status_by_thread.insert(
+            thread_id,
+            codex_app_server_protocol::CollabAgentState {
+                status,
+                message: message.clone(),
+            },
+        );
+        self.agent_navigation.set_running(thread_id, is_running);
+        if message.is_some() {
+            self.agent_navigation
+                .set_last_result_message(thread_id, message);
         }
     }
 
@@ -1566,6 +1662,28 @@ impl App {
         }
         Ok(())
     }
+}
+
+fn spawn_turn_result_preview(turn: &codex_app_server_protocol::Turn) -> Option<String> {
+    const MAX_CHARS: usize = 240;
+    let text = turn.items.iter().rev().find_map(|item| match item {
+        codex_app_server_protocol::ThreadItem::AgentMessage { text, .. } => {
+            let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            (!compact.is_empty()).then_some(compact)
+        }
+        _ => None,
+    })?;
+
+    if text.chars().count() <= MAX_CHARS {
+        return Some(text);
+    }
+
+    let mut truncated = text
+        .chars()
+        .take(MAX_CHARS.saturating_sub(3))
+        .collect::<String>();
+    truncated.push_str("...");
+    Some(truncated)
 }
 
 #[cfg(test)]

@@ -1422,6 +1422,20 @@ async fn ctrl_c_interrupt_pauses_active_goal_turn() {
 }
 
 #[tokio::test]
+async fn ctrl_c_interrupts_agent_turn_even_if_bottom_pane_running_state_is_stale() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    handle_turn_started(&mut chat, "turn-1");
+    chat.bottom_pane.set_task_running(/*running*/ false);
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    match op_rx.try_recv() {
+        Ok(Op::Interrupt { .. }) => {}
+        other => panic!("expected Op::Interrupt, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn esc_interrupt_pauses_active_goal_turn() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.show_welcome_banner = false;

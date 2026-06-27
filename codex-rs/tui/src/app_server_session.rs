@@ -92,6 +92,8 @@ use codex_app_server_protocol::ThreadSettingsUpdateResponse;
 use codex_app_server_protocol::ThreadShellCommandParams;
 use codex_app_server_protocol::ThreadShellCommandResponse;
 use codex_app_server_protocol::ThreadSource;
+use codex_app_server_protocol::ThreadSpawnAgentParams;
+use codex_app_server_protocol::ThreadSpawnAgentResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStartSource;
@@ -110,6 +112,7 @@ use codex_app_server_protocol::UserInput;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::GuardianAssessmentEvent;
+use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
@@ -452,6 +455,45 @@ impl AppServerSession {
                 bootstrap_request_error("thread/start failed during TUI bootstrap", err)
             })?;
         started_thread_from_start_response(response, config, self.thread_params_mode()).await
+    }
+
+    pub(crate) async fn spawn_agent_thread(
+        &mut self,
+        config: &Config,
+        parent_thread_id: ThreadId,
+        agent_role: String,
+        agent_nickname: Option<String>,
+        model: String,
+        model_provider: Option<String>,
+        reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+    ) -> Result<AppServerStartedThread> {
+        let request_id = self.next_request_id();
+        let mut session_config = self.session_config_with_effective_service_tier(config);
+        session_config.model = Some(model);
+        session_config.model_reasoning_effort = reasoning_effort;
+        let mut thread = thread_start_params_from_config(
+            &session_config,
+            self.thread_params_mode(),
+            self.remote_cwd_override.as_deref(),
+            /*session_start_source*/ None,
+        );
+        thread.model_provider = model_provider.or(thread.model_provider);
+        thread.thread_source = Some(ThreadSource::Subagent);
+        thread.multi_agent_mode = Some(MultiAgentMode::Proactive);
+        let response: ThreadSpawnAgentResponse = self
+            .client
+            .request_typed(ClientRequest::ThreadSpawnAgent {
+                request_id,
+                params: ThreadSpawnAgentParams {
+                    parent_thread_id: parent_thread_id.to_string(),
+                    agent_role,
+                    agent_nickname,
+                    thread,
+                },
+            })
+            .await
+            .wrap_err("thread/spawnAgent failed while creating native agent pane")?;
+        started_thread_from_spawn_agent_response(response, config, self.thread_params_mode()).await
     }
 
     pub(crate) async fn resume_thread(
@@ -1506,6 +1548,29 @@ async fn started_thread_from_start_response(
         session,
         turns: response.thread.turns,
     })
+}
+
+async fn started_thread_from_spawn_agent_response(
+    response: ThreadSpawnAgentResponse,
+    config: &Config,
+    thread_params_mode: ThreadParamsMode,
+) -> Result<AppServerStartedThread> {
+    let response = ThreadStartResponse {
+        thread: response.thread,
+        model: response.model,
+        model_provider: response.model_provider,
+        service_tier: response.service_tier,
+        cwd: response.cwd,
+        runtime_workspace_roots: response.runtime_workspace_roots,
+        instruction_sources: response.instruction_sources,
+        approval_policy: response.approval_policy,
+        approvals_reviewer: response.approvals_reviewer,
+        sandbox: response.sandbox,
+        active_permission_profile: response.active_permission_profile,
+        reasoning_effort: response.reasoning_effort,
+        multi_agent_mode: response.multi_agent_mode,
+    };
+    started_thread_from_start_response(response, config, thread_params_mode).await
 }
 
 async fn started_thread_from_resume_response(

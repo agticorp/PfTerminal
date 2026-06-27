@@ -39,6 +39,7 @@ pub(crate) struct AgentMetadata {
     pub(crate) agent_nickname: Option<String>,
     pub(crate) agent_role: Option<String>,
     pub(crate) last_task_message: Option<String>,
+    pub(crate) last_result_message: Option<String>,
 }
 
 fn format_agent_nickname(name: &str, nickname_reset_count: usize) -> String {
@@ -142,6 +143,24 @@ impl AgentRegistry {
             .and_then(|metadata| metadata.agent_id)
     }
 
+    pub(crate) fn agent_id_for_nickname(&self, agent_nickname: &str) -> Option<ThreadId> {
+        let agent_nickname = agent_nickname.trim();
+        if agent_nickname.is_empty() {
+            return None;
+        }
+        self.active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .agent_tree
+            .values()
+            .find(|metadata| {
+                metadata.agent_nickname.as_deref().is_some_and(|candidate| {
+                    candidate == agent_nickname || candidate.eq_ignore_ascii_case(agent_nickname)
+                })
+            })
+            .and_then(|metadata| metadata.agent_id)
+    }
+
     pub(crate) fn agent_metadata_for_thread(&self, thread_id: ThreadId) -> Option<AgentMetadata> {
         self.active_agents
             .lock()
@@ -194,7 +213,39 @@ impl AgentRegistry {
         }
     }
 
-    fn register_spawned_thread(&self, agent_metadata: AgentMetadata) {
+    pub(crate) fn update_last_result_message(
+        &self,
+        thread_id: ThreadId,
+        last_result_message: String,
+    ) {
+        let mut active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(metadata) = active_agents
+            .agent_tree
+            .values_mut()
+            .find(|metadata| metadata.agent_id == Some(thread_id))
+        {
+            metadata.last_result_message = Some(last_result_message);
+        }
+    }
+
+    pub(crate) fn clear_last_result_message(&self, thread_id: ThreadId) {
+        let mut active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(metadata) = active_agents
+            .agent_tree
+            .values_mut()
+            .find(|metadata| metadata.agent_id == Some(thread_id))
+        {
+            metadata.last_result_message = None;
+        }
+    }
+
+    pub(crate) fn register_spawned_thread(&self, agent_metadata: AgentMetadata) {
         let Some(thread_id) = agent_metadata.agent_id else {
             return;
         };
@@ -219,7 +270,18 @@ impl AgentRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let agent_nickname = if let Some(preferred) = preferred {
-            preferred.to_string()
+            if !active_agents.used_agent_nicknames.contains(preferred) {
+                preferred.to_string()
+            } else {
+                let mut reset_count = 1;
+                loop {
+                    let nickname = format_agent_nickname(preferred, reset_count);
+                    if !active_agents.used_agent_nicknames.contains(&nickname) {
+                        break nickname;
+                    }
+                    reset_count += 1;
+                }
+            }
         } else {
             if names.is_empty() {
                 return None;

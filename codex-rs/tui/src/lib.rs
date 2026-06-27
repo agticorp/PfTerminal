@@ -49,8 +49,14 @@ use codex_login::AuthConfig;
 use codex_login::default_client::originator;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::enforce_login_restrictions;
+use codex_model_provider_info::AMBIENT_API_KEY_ENV_VAR;
+use codex_model_provider_info::BASETEN_API_KEY_ENV_VAR;
+use codex_model_provider_info::OPENROUTER_API_KEY_ENV_VAR;
+use codex_model_provider_info::VERCEL_API_KEY_ENV_VAR;
+use codex_model_provider_info::ZAI_API_KEY_ENV_VAR;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::AltScreenMode;
+use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::SandboxMode;
 #[cfg(target_os = "windows")]
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -1993,11 +1999,60 @@ fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool 
         return false;
     }
 
-    login_status == LoginStatus::NotAuthenticated
+    if login_status != LoginStatus::NotAuthenticated {
+        return false;
+    }
+
+    if matches!(config.forced_login_method, Some(ForcedLoginMethod::Chatgpt)) {
+        return true;
+    }
+
+    !has_linked_provider_credentials(config)
 }
 
 fn provider_requires_login(config: &Config) -> bool {
     config.model_provider.requires_openai_auth || config.model_provider.env_key.is_some()
+}
+
+const KNOWN_PROVIDER_API_KEY_ENV_VARS: &[&str] = &[
+    AMBIENT_API_KEY_ENV_VAR,
+    ZAI_API_KEY_ENV_VAR,
+    OPENROUTER_API_KEY_ENV_VAR,
+    BASETEN_API_KEY_ENV_VAR,
+    VERCEL_API_KEY_ENV_VAR,
+];
+
+fn has_linked_provider_credentials(config: &Config) -> bool {
+    KNOWN_PROVIDER_API_KEY_ENV_VARS
+        .iter()
+        .copied()
+        .chain(
+            config
+                .model_providers
+                .values()
+                .filter_map(|provider| provider.env_key.as_deref()),
+        )
+        .any(|env_key| provider_credential_is_linked(config, env_key))
+}
+
+fn provider_credential_is_linked(config: &Config, env_key: &str) -> bool {
+    match codex_login::auth::provider_api_key_from_auth_storage(
+        &config.codex_home,
+        env_key,
+        config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
+    ) {
+        Ok(Some(key)) => !key.trim().is_empty(),
+        Ok(None) => false,
+        Err(err) => {
+            warn!(
+                provider_key_id = env_key,
+                error = %err,
+                "failed to check stored provider credential while deciding onboarding"
+            );
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2020,6 +2075,45 @@ mod tests {
             .codex_home(temp_dir.path().to_path_buf())
             .build()
             .await
+    }
+
+    #[tokio::test]
+    async fn stored_provider_key_suppresses_startup_login_screen() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = build_config(&temp_dir).await.unwrap();
+        assert!(provider_requires_login(&config));
+        assert!(should_show_login_screen(
+            LoginStatus::NotAuthenticated,
+            &config
+        ));
+
+        std::fs::write(
+            temp_dir.path().join("provider_auth.json"),
+            r#"{"api_keys":{"ZAI_API_KEY":"zai-test-key"}}"#,
+        )
+        .unwrap();
+
+        assert!(!should_show_login_screen(
+            LoginStatus::NotAuthenticated,
+            &config
+        ));
+    }
+
+    #[tokio::test]
+    async fn forced_chatgpt_login_still_shows_login_screen() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = build_config(&temp_dir).await.unwrap();
+        config.forced_login_method = Some(ForcedLoginMethod::Chatgpt);
+        std::fs::write(
+            temp_dir.path().join("provider_auth.json"),
+            r#"{"api_keys":{"ZAI_API_KEY":"zai-test-key"}}"#,
+        )
+        .unwrap();
+
+        assert!(should_show_login_screen(
+            LoginStatus::NotAuthenticated,
+            &config
+        ));
     }
 
     fn write_session_rollout(

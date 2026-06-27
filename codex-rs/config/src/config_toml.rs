@@ -29,12 +29,18 @@ use crate::types::UriBasedFileOpener;
 use crate::types::WindowsToml;
 use codex_features::FeaturesToml;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::AMBIENT_PROVIDER_ID;
+use codex_model_provider_info::BASETEN_PROVIDER_ID;
+use codex_model_provider_info::BUILT_IN_MODEL_PROVIDER_NAMES;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_PROVIDER_ID;
+use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::Personality;
@@ -58,11 +64,16 @@ use serde::Serialize;
 use serde::de::Error as SerdeError;
 use serde_json::Value as JsonValue;
 
-const RESERVED_MODEL_PROVIDER_IDS: [&str; 4] = [
+const RESERVED_MODEL_PROVIDER_IDS: [&str; 9] = [
+    AMBIENT_PROVIDER_ID,
     AMAZON_BEDROCK_PROVIDER_ID,
+    BASETEN_PROVIDER_ID,
     OPENAI_PROVIDER_ID,
+    OPENROUTER_PROVIDER_ID,
     OLLAMA_OSS_PROVIDER_ID,
     LMSTUDIO_OSS_PROVIDER_ID,
+    VERCEL_PROVIDER_ID,
+    ZAI_PROVIDER_ID,
 ];
 
 pub const DEFAULT_PROJECT_DOC_MAX_BYTES: usize = 32 * 1024;
@@ -915,10 +926,36 @@ Built-in providers cannot be overridden. Rename your custom provider (for exampl
     }
 }
 
+pub fn validate_reserved_model_provider_names(
+    model_providers: &HashMap<String, ModelProviderInfo>,
+) -> Result<(), String> {
+    let mut conflicts = model_providers
+        .iter()
+        .filter(|(key, provider)| {
+            key.as_str() != AMAZON_BEDROCK_PROVIDER_ID
+                && BUILT_IN_MODEL_PROVIDER_NAMES
+                    .iter()
+                    .any(|reserved_name| provider.name.trim().eq_ignore_ascii_case(reserved_name))
+        })
+        .map(|(key, provider)| format!("`{key}` (`{}`)", provider.name.trim()))
+        .collect::<Vec<_>>();
+    conflicts.sort_unstable();
+    if conflicts.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "model_providers contains reserved built-in provider names: {}. \
+Built-in provider names cannot be reused. Choose a unique provider name.",
+            conflicts.join(", ")
+        ))
+    }
+}
+
 pub fn validate_model_providers(
     model_providers: &HashMap<String, ModelProviderInfo>,
 ) -> Result<(), String> {
     validate_reserved_model_provider_ids(model_providers)?;
+    validate_reserved_model_provider_names(model_providers)?;
     for (key, provider) in model_providers {
         if key == AMAZON_BEDROCK_PROVIDER_ID {
             continue;
@@ -1017,5 +1054,41 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("TOML list of strings"));
         assert!(message.contains("comma-separated strings are not supported"));
+    }
+
+    #[test]
+    fn model_provider_validation_rejects_pfterminal_reserved_ids() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            VERCEL_PROVIDER_ID.to_string(),
+            ModelProviderInfo {
+                name: "Custom Vercel".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let err = validate_model_providers(&providers).expect_err("reserved id rejected");
+
+        assert!(err.contains("reserved built-in provider IDs"));
+        assert!(err.contains(VERCEL_PROVIDER_ID));
+    }
+
+    #[test]
+    fn model_provider_validation_rejects_reserved_builtin_names() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "myvercel".to_string(),
+            ModelProviderInfo {
+                name: " Vercel ".to_string(),
+                base_url: Some("https://attacker.example/v1".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let err = validate_model_providers(&providers).expect_err("reserved name rejected");
+
+        assert!(err.contains("reserved built-in provider names"));
+        assert!(err.contains("myvercel"));
+        assert!(err.contains("Vercel"));
     }
 }

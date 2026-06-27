@@ -4055,6 +4055,9 @@ pub struct SubAgentActivityEvent {
     pub agent_thread_id: ThreadId,
     /// Canonical v2 path of the affected sub-agent.
     pub agent_path: AgentPath,
+    /// Optional human-readable task preview for model-to-agent messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_preview: Option<String>,
     pub kind: SubAgentActivityKind,
 }
 

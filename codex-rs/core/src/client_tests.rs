@@ -22,6 +22,7 @@ use codex_model_provider::BearerAuthProvider;
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::VERCEL_DEFAULT_MODEL;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_otel::SessionTelemetry;
@@ -171,6 +172,37 @@ fn test_ambient_model_info() -> ModelInfo {
         "experimental_supported_tools": []
     }))
     .expect("deserialize Ambient test model info")
+}
+
+fn test_vercel_model_info() -> ModelInfo {
+    serde_json::from_value(json!({
+        "slug": VERCEL_DEFAULT_MODEL,
+        "display_name": "Vercel GLM 5.2",
+        "description": "Vercel GLM 5.2",
+        "default_reasoning_level": "medium",
+        "supported_reasoning_levels": [
+            {"effort": "medium", "description": "Standard"},
+            {"effort": "xhigh", "description": "Deep"}
+        ],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 3,
+        "upgrade": null,
+        "base_instructions": "base instructions",
+        "model_messages": null,
+        "supports_reasoning_summaries": false,
+        "support_verbosity": false,
+        "default_verbosity": null,
+        "apply_patch_tool_type": null,
+        "truncation_policy": {"mode": "tokens", "limit": 10000},
+        "supports_parallel_tool_calls": true,
+        "supports_image_detail_original": false,
+        "context_window": 1048576,
+        "auto_compact_token_limit": null,
+        "experimental_supported_tools": []
+    }))
+    .expect("deserialize Vercel test model info")
 }
 
 fn test_openrouter_gemini_model_info() -> ModelInfo {
@@ -821,6 +853,95 @@ fn baseten_chat_completions_strips_strict_without_zai_reasoning_fields() {
             .pointer("/function/strict")
             .and_then(serde_json::Value::as_bool),
         None
+    );
+}
+
+#[test]
+fn vercel_responses_request_uses_standard_responses_fields() {
+    let provider_info = ModelProviderInfo::create_vercel_provider();
+    let api_provider = provider_info
+        .to_api_provider(Some(AuthMode::ApiKey))
+        .expect("Vercel API provider");
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        provider_info,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*item_ids_enabled*/ false,
+        /*attestation_provider*/ None,
+    );
+    let prompt = super::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Run pwd.".to_string(),
+            }],
+            phase: None,
+            metadata: None,
+        }],
+        tools: vec![ToolSpec::Function(ResponsesApiTool {
+            name: "exec_command".to_string(),
+            description: "Run a command.".to_string(),
+            strict: true,
+            defer_loading: None,
+            parameters: JsonSchema::object(
+                BTreeMap::from([(
+                    "cmd".to_string(),
+                    JsonSchema::string(Some("Command to run.".to_string())),
+                )]),
+                Some(vec!["cmd".to_string()]),
+                Some(false.into()),
+            ),
+            output_schema: None,
+        })],
+        ..Default::default()
+    };
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        Some("turn-1"),
+        "window-1".to_string(),
+        None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+
+    let request = client
+        .build_responses_request(
+            &api_provider,
+            &prompt,
+            &test_vercel_model_info(),
+            None,
+            ReasoningSummaryConfig::None,
+            None,
+            &responses_metadata,
+        )
+        .expect("Vercel responses request");
+
+    assert_eq!(request.model, VERCEL_DEFAULT_MODEL);
+    let reasoning = request
+        .reasoning
+        .as_ref()
+        .expect("Vercel GLM should use standard Responses reasoning");
+    assert_eq!(
+        reasoning.effort.as_ref(),
+        Some(&ReasoningEffortConfig::Medium)
+    );
+    assert_eq!(reasoning.summary, None);
+    assert_eq!(request.enable_thinking, None);
+    assert_eq!(request.emit_usage, None);
+    assert_eq!(request.reasoning_effort, None);
+    assert!(request.prompt_cache_key.is_some());
+    assert!(request.client_metadata.is_some());
+    assert_eq!(request.tools.len(), 1);
+    assert_eq!(
+        request.tools[0]
+            .pointer("/name")
+            .and_then(serde_json::Value::as_str),
+        Some("exec_command")
     );
 }
 

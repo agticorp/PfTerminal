@@ -1223,21 +1223,21 @@ async fn slash_spawn_status_opens_status_picker() {
 }
 
 #[tokio::test]
-async fn slash_spawn_role_without_task_opens_harness_picker() {
+async fn slash_spawn_role_without_task_opens_parent_picker() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.dispatch_command_with_args(SlashCommand::Spawn, "troll".to_string(), Vec::new());
 
     assert_matches!(
         rx.try_recv(),
-        Ok(AppEvent::OpenSpawnHarnessPicker {
+        Ok(AppEvent::OpenSpawnParentPicker {
             role: crate::spawn_orchestration::SpawnRole::Troll
         })
     );
 }
 
 #[tokio::test]
-async fn slash_spawn_role_with_task_submits_spawn_task() {
+async fn slash_spawn_role_with_extra_text_still_opens_parent_picker() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.dispatch_command_with_args(
@@ -1248,10 +1248,9 @@ async fn slash_spawn_role_with_task_submits_spawn_task() {
 
     assert_matches!(
         rx.try_recv(),
-        Ok(AppEvent::SubmitSpawnTask {
-            role: crate::spawn_orchestration::SpawnRole::Orc,
-            task
-        }) if task == "run the benchmark"
+        Ok(AppEvent::OpenSpawnParentPicker {
+            role: crate::spawn_orchestration::SpawnRole::Orc
+        })
     );
 }
 

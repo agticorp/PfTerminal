@@ -87,17 +87,31 @@ impl AgentNavigationState {
         if !self.threads.contains_key(&thread_id) {
             self.order.push(thread_id);
         }
-        let (previous_agent_path, previous_is_running) = self
+        let (
+            previous_agent_path,
+            previous_last_task_message,
+            previous_last_result_message,
+            previous_is_running,
+        ) = self
             .threads
             .get(&thread_id)
-            .map(|entry| (entry.agent_path.clone(), entry.is_running))
-            .unwrap_or((None, false));
+            .map(|entry| {
+                (
+                    entry.agent_path.clone(),
+                    entry.last_task_message.clone(),
+                    entry.last_result_message.clone(),
+                    entry.is_running,
+                )
+            })
+            .unwrap_or((None, None, None, false));
         self.threads.insert(
             thread_id,
             AgentPickerThreadEntry {
                 agent_nickname,
                 agent_role,
                 agent_path: previous_agent_path,
+                last_task_message: previous_last_task_message,
+                last_result_message: previous_last_result_message,
                 is_running: previous_is_running && !is_closed,
                 is_closed,
             },
@@ -115,12 +129,37 @@ impl AgentNavigationState {
                     agent_nickname: None,
                     agent_role: None,
                     agent_path: None,
+                    last_task_message: None,
+                    last_result_message: None,
                     is_running: false,
                     is_closed: false,
                 });
         entry.agent_path = Some(activity.agent_path);
+        if let Some(task_preview) = activity.task_preview {
+            entry.last_task_message = Some(task_preview);
+        }
         entry.is_running = activity.is_running_hint;
         entry.is_closed = false;
+    }
+
+    pub(crate) fn set_last_task_message(
+        &mut self,
+        thread_id: ThreadId,
+        task_preview: Option<String>,
+    ) {
+        if let Some(entry) = self.threads.get_mut(&thread_id) {
+            entry.last_task_message = task_preview;
+        }
+    }
+
+    pub(crate) fn set_last_result_message(
+        &mut self,
+        thread_id: ThreadId,
+        result_preview: Option<String>,
+    ) {
+        if let Some(entry) = self.threads.get_mut(&thread_id) {
+            entry.last_result_message = result_preview;
+        }
     }
 
     pub(crate) fn set_running(&mut self, thread_id: ThreadId, is_running: bool) {
@@ -327,6 +366,30 @@ impl AgentNavigationState {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn sub_agent_activity_records_latest_task_preview() {
+        let mut state = AgentNavigationState::default();
+        let thread_id = ThreadId::new();
+
+        state.record_sub_agent_activity(SubAgentActivityDisplay {
+            thread_id,
+            agent_path: "/root/troll_burzum/orc_snaga".to_string(),
+            task_preview: Some("build the animated website shell".to_string()),
+            is_running_hint: true,
+        });
+
+        let entry = state.get(&thread_id).expect("agent should be cached");
+        assert_eq!(
+            entry.agent_path.as_deref(),
+            Some("/root/troll_burzum/orc_snaga")
+        );
+        assert_eq!(
+            entry.last_task_message.as_deref(),
+            Some("build the animated website shell")
+        );
+        assert!(entry.is_running);
+    }
 
     fn populated_state() -> (AgentNavigationState, ThreadId, ThreadId, ThreadId) {
         let mut state = AgentNavigationState::default();

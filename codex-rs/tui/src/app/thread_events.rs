@@ -287,7 +287,7 @@ fn file_change_item_changes(
 }
 
 #[derive(Debug)]
-pub(super) struct ThreadEventChannel {
+pub(crate) struct ThreadEventChannel {
     pub(super) sender: mpsc::Sender<ThreadBufferedEvent>,
     pub(super) receiver: Option<mpsc::Receiver<ThreadBufferedEvent>>,
     pub(super) store: Arc<Mutex<ThreadEventStore>>,
@@ -311,6 +311,11 @@ impl ThreadEventChannel {
 
     pub(super) fn attachment(&self) -> ThreadEventAttachment {
         self.attachment
+    }
+
+    pub(crate) async fn set_session(&mut self, session: ThreadSessionState, turns: Vec<Turn>) {
+        let mut store = self.store.lock().await;
+        store.set_session(session, turns);
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

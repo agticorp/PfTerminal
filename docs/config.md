@@ -28,6 +28,7 @@ These providers are compiled into PFTerminal:
 | `zai`        | Z.AI         | `https://api.z.ai/api/coding/paas/v4` | `ZAI_API_KEY`        | Chat Completions |
 | `openrouter` | OpenRouter   | `https://openrouter.ai/api/v1`        | `OPENROUTER_API_KEY` | Chat Completions |
 | `baseten`    | Baseten      | `https://inference.baseten.co/v1`     | `BASETEN_API_KEY`    | Chat Completions |
+| `vercel`     | Vercel       | `https://ai-gateway.vercel.sh/v1`     | `AI_GATEWAY_API_KEY` | Responses        |
 
 OpenAI uses Codex account login from `/providers` or `pfterminal login`.
 Provider API keys should normally be stored through onboarding, `/providers`,
@@ -80,6 +81,20 @@ model_provider = "baseten"
 model = "zai-org/GLM-5.2"
 ```
 
+Vercel GLM:
+
+```toml
+model_provider = "vercel"
+model = "zai/glm-5.2"
+```
+
+Vercel GLM Fast:
+
+```toml
+model_provider = "vercel"
+model = "zai/glm-5.2-fast"
+```
+
 You can also select a model per run:
 
 ```bash
@@ -87,6 +102,8 @@ pfterminal -m glm-5.2
 pfterminal -m gpt-5.5
 pfterminal -m z-ai/glm-5.2
 pfterminal -m zai-org/GLM-5.2
+pfterminal -m zai/glm-5.2
+pfterminal -m zai/glm-5.2-fast
 ```
 
 The model picker maps these model slugs to the correct built-in provider.
@@ -103,6 +120,7 @@ provider/ambient_api_key
 provider/zai_api_key
 provider/openrouter_api_key
 provider/baseten_api_key
+provider/ai_gateway_api_key
 ```
 
 Do not put long-lived provider keys in `experimental_bearer_token` unless you

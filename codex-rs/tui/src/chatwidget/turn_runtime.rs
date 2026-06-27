@@ -101,6 +101,15 @@ impl ChatWidget {
         );
     }
 
+    pub(crate) fn suspend_external_pane_turn_display(&mut self) {
+        self.status_state.pending_status_indicator_restore = false;
+        self.input_queue.user_turn_pending_start = false;
+        self.turn_lifecycle.finish();
+        self.update_task_running_state();
+        self.bottom_pane.hide_status_indicator();
+        self.request_redraw();
+    }
+
     pub(super) fn on_task_complete(
         &mut self,
         last_agent_message: Option<String>,

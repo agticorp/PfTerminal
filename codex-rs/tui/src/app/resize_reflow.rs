@@ -88,7 +88,7 @@ impl App {
         display
     }
 
-    pub(super) fn insert_history_cell_lines(
+    pub(crate) fn insert_history_cell_lines(
         &mut self,
         tui: &mut tui::Tui,
         cell: &dyn HistoryCell,

@@ -33,6 +33,7 @@ PFTerminal currently ships these provider paths:
 | Metered GLM via OpenRouter        | OpenRouter | `z-ai/glm-5.2`                                                          |
 | Metered alternative coding models | OpenRouter | `minimax/minimax-m3`, `openrouter/owl-alpha`, `google/gemini-3.5-flash` |
 | Metered GLM via Baseten           | Baseten    | `zai-org/GLM-5.2`                                                       |
+| Metered GLM via Vercel            | Vercel     | `zai/glm-5.2`, `zai/glm-5.2-fast`                                       |
 
 Open `/model` to switch models. You can also start with a specific model:
 
@@ -40,6 +41,7 @@ Open `/model` to switch models. You can also start with a specific model:
 pfterminal -m glm-5.2
 pfterminal -m z-ai/glm-5.2
 pfterminal -m minimax/minimax-m3
+pfterminal -m zai/glm-5.2-fast
 ```
 
 ## Vault Basics
@@ -60,7 +62,8 @@ Common checks:
 
 Provider API keys stored through onboarding use labels such as
 `provider/ambient_api_key`, `provider/zai_api_key`,
-`provider/openrouter_api_key`, and `provider/baseten_api_key`.
+`provider/openrouter_api_key`, `provider/baseten_api_key`, and
+`provider/ai_gateway_api_key`.
 
 ## Useful Slash Commands
 
@@ -82,4 +85,5 @@ After adding a key:
 
 If a provider reports a missing environment variable, add the key through the
 provider login/onboarding UI or export the relevant env var for that shell:
-`AMBIENT_API_KEY`, `ZAI_API_KEY`, `OPENROUTER_API_KEY`, or `BASETEN_API_KEY`.
+`AMBIENT_API_KEY`, `ZAI_API_KEY`, `OPENROUTER_API_KEY`, `BASETEN_API_KEY`, or
+`AI_GATEWAY_API_KEY`.

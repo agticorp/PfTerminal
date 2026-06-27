@@ -9,7 +9,9 @@ use crate::config::ConfigBuilder;
 use crate::context::ContextualUserFragment;
 use crate::context::SubagentNotification;
 use crate::init_state_db;
+use crate::thread_manager::StartThreadOptions;
 use assert_matches::assert_matches;
+use codex_extension_api::ExtensionDataInit;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
@@ -21,9 +23,11 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
@@ -2253,6 +2257,204 @@ async fn spawn_thread_subagent_uses_role_specific_nickname_candidates() {
 }
 
 #[tokio::test]
+async fn direct_thread_spawn_child_metadata_is_visible_and_addressable() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+
+    let child = harness
+        .manager
+        .start_thread_with_options(StartThreadOptions {
+            config: harness.config.clone(),
+            initial_history: InitialHistory::New,
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: Some("Snaga".to_string()),
+                agent_role: Some("orc".to_string()),
+            })),
+            thread_source: Some(ThreadSource::Subagent),
+            dynamic_tools: Vec::new(),
+            metrics_service_name: None,
+            multi_agent_mode: None,
+            parent_trace: None,
+            environments: Vec::new(),
+            thread_extension_init: ExtensionDataInit::default(),
+            supports_openai_form_elicitation: false,
+        })
+        .await
+        .expect("direct thread-spawn child should start");
+
+    let context = harness
+        .control
+        .format_environment_context_subagents(parent_thread_id)
+        .await;
+    assert!(
+        context.contains(&child.thread_id.to_string()),
+        "context should expose the direct child thread id, got {context:?}"
+    );
+    assert!(
+        context.contains("Snaga"),
+        "context should expose the direct child nickname, got {context:?}"
+    );
+
+    let submission_id = harness
+        .control
+        .send_input(child.thread_id, text_input("build the formula block"))
+        .await
+        .expect("direct child should accept delegated input by thread id");
+    assert!(!submission_id.is_empty());
+}
+
+#[tokio::test]
+async fn direct_thread_spawn_named_child_registers_path_for_v2_targeting() {
+    let harness = AgentControlHarness::new().await;
+    let (root_thread_id, _root_thread) = harness.start_thread().await;
+    let troll_path = AgentPath::root()
+        .join("troll_burzum")
+        .expect("test troll path should be valid");
+    let orc_path = troll_path
+        .join("orc_snaga")
+        .expect("test orc path should be valid");
+
+    let troll = harness
+        .manager
+        .start_thread_with_options(StartThreadOptions {
+            config: harness.config.clone(),
+            initial_history: InitialHistory::New,
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root_thread_id,
+                depth: 1,
+                agent_path: Some(troll_path.clone()),
+                agent_nickname: Some("Burzum".to_string()),
+                agent_role: Some("troll".to_string()),
+            })),
+            thread_source: Some(ThreadSource::Subagent),
+            dynamic_tools: Vec::new(),
+            metrics_service_name: None,
+            multi_agent_mode: None,
+            parent_trace: None,
+            environments: Vec::new(),
+            thread_extension_init: ExtensionDataInit::default(),
+            supports_openai_form_elicitation: false,
+        })
+        .await
+        .expect("direct troll pane should start");
+
+    let orc = harness
+        .manager
+        .start_thread_with_options(StartThreadOptions {
+            config: harness.config.clone(),
+            initial_history: InitialHistory::New,
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: troll.thread_id,
+                depth: 2,
+                agent_path: Some(orc_path.clone()),
+                agent_nickname: Some("Snaga".to_string()),
+                agent_role: Some("orc".to_string()),
+            })),
+            thread_source: Some(ThreadSource::Subagent),
+            dynamic_tools: Vec::new(),
+            metrics_service_name: None,
+            multi_agent_mode: None,
+            parent_trace: None,
+            environments: Vec::new(),
+            thread_extension_init: ExtensionDataInit::default(),
+            supports_openai_form_elicitation: false,
+        })
+        .await
+        .expect("direct orc pane should start");
+
+    let troll_thread = harness
+        .manager
+        .get_thread(troll.thread_id)
+        .await
+        .expect("troll thread should be registered");
+    let troll_control = troll_thread.codex.session.services.agent_control.clone();
+    let orc_metadata = troll_control
+        .ensure_agent_known(orc.thread_id)
+        .expect("direct named orc should be registered as a known agent");
+    assert_eq!(orc_metadata.agent_path.as_ref(), Some(&orc_path));
+    assert_eq!(orc_metadata.agent_nickname.as_deref(), Some("Snaga"));
+    assert_eq!(orc_metadata.agent_role.as_deref(), Some("orc"));
+
+    let troll_snapshot = troll_thread.config_snapshot().await;
+    let resolved_orc = troll_control
+        .resolve_agent_reference(troll.thread_id, &troll_snapshot.session_source, "orc_snaga")
+        .await
+        .expect("troll should resolve its named orc child by agent path");
+    assert_eq!(resolved_orc, orc.thread_id);
+
+    let context = troll_control
+        .format_environment_context_subagents(troll.thread_id)
+        .await;
+    assert!(
+        context.contains("orc_snaga"),
+        "troll context should expose the child path name, got {context:?}"
+    );
+    assert!(
+        context.contains("Snaga"),
+        "troll context should expose the child nickname, got {context:?}"
+    );
+
+    troll_control.record_agent_task_message(
+        orc.thread_id,
+        "build the animated website shell".to_string(),
+    );
+    troll_control.record_agent_result_status(
+        orc.thread_id,
+        &AgentStatus::Completed(Some(
+            "created index.html with cryptographic formula copy".to_string(),
+        )),
+    );
+    let context = troll_control
+        .format_environment_context_subagents(troll.thread_id)
+        .await;
+    assert!(
+        context.contains("role=orc"),
+        "troll context should expose the child role, got {context:?}"
+    );
+    assert!(
+        context.contains("status=pending"),
+        "troll context should expose the child status, got {context:?}"
+    );
+    assert!(
+        context.contains("task=build the animated website shell"),
+        "troll context should expose the child task preview, got {context:?}"
+    );
+    assert!(
+        context.contains("result=created index.html with cryptographic formula copy"),
+        "troll context should expose the child result preview, got {context:?}"
+    );
+
+    let troll_turn = troll_thread.codex.session.new_default_turn().await;
+    let initial_context = troll_thread
+        .codex
+        .session
+        .build_initial_context(troll_turn.as_ref())
+        .await;
+    assert!(
+        history_contains_text(&initial_context, "<subagents>"),
+        "Troll model input should include subagent context, got {initial_context:?}"
+    );
+    assert!(
+        history_contains_text(&initial_context, "orc_snaga: Snaga"),
+        "Troll model input should include the named Orc, got {initial_context:?}"
+    );
+    assert!(
+        history_contains_text(&initial_context, "task=build the animated website shell"),
+        "Troll model input should include the Orc task preview, got {initial_context:?}"
+    );
+    assert!(
+        history_contains_text(
+            &initial_context,
+            "result=created index.html with cryptographic formula copy"
+        ),
+        "Troll model input should include the Orc result preview, got {initial_context:?}"
+    );
+}
+
+#[tokio::test]
 async fn resume_thread_subagent_restores_stored_metadata_and_effective_multi_agent_mode() {
     let (home, mut config) = test_config().await;
     config
@@ -3352,4 +3554,14 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails() 
         .shutdown_agent_tree(parent_thread_id)
         .await
         .expect("tree shutdown after partial subtree resume should succeed");
+}
+#[test]
+fn nickname_from_picker_label_accepts_visible_agent_label() {
+    assert_eq!(nickname_from_picker_label("Snaga [orc]"), Some("Snaga"));
+    assert_eq!(
+        nickname_from_picker_label("  Ghash the 2nd [orc]  "),
+        Some("Ghash the 2nd")
+    );
+    assert_eq!(nickname_from_picker_label("Snaga"), None);
+    assert_eq!(nickname_from_picker_label("[orc]"), None);
 }

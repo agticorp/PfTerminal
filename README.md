@@ -6,7 +6,7 @@ PFTerminal is a crypto-native AI services terminal based on the open-source Code
 
 - Ambient API-key onboarding by default
 - Ambient GLM 5.2 as the default model
-- Z.AI, OpenRouter, and Baseten provider choices
+- Z.AI, OpenRouter, Baseten, and Vercel provider choices
 - encrypted `/vault` storage for provider API keys and user credentials
 - Codex-level coding workflows in a local terminal
 - Future crypto-native services such as authentication, Hyperliquid, GPU rentals, staking, borrowing, and related workflows
@@ -20,9 +20,9 @@ For a new machine, read the repo docs:
 - [Authentication And Vault](docs/authentication.md)
 - [Configuration](docs/config.md)
 
-Those pages cover provider keys for Ambient, Z.AI, OpenRouter, and Baseten,
-vault labels such as `provider/zai_api_key`, and model selection through
-`/model` or `pfterminal -m <model>`.
+Those pages cover provider keys for Ambient, Z.AI, OpenRouter, Baseten, and
+Vercel, vault labels such as `provider/zai_api_key`, and model selection
+through `/model` or `pfterminal -m <model>`.
 
 ## Running Locally From Source
 

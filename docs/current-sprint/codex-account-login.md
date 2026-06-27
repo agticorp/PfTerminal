@@ -5,8 +5,8 @@ Status: current sprint, implemented.
 ## Goal
 
 Reintegrate OpenAI Codex account login into PFTerminal as a first-class
-provider credential, next to Ambient, Z.AI, OpenRouter, and Baseten provider
-keys.
+provider credential, next to Ambient, Z.AI, OpenRouter, Baseten, and Vercel
+provider keys.
 
 The implemented user outcome is:
 
@@ -52,8 +52,8 @@ The PFTerminal-facing integration is now implemented in these surfaces:
 - Prefer device-code login for the `/providers` OpenAI Codex row.
 - Keep browser login available where it already exists, but do not make it the
   primary `/providers` path.
-- Keep Ambient, Z.AI, OpenRouter, and Baseten API-key storage in the encrypted
-  provider vault.
+- Keep Ambient, Z.AI, OpenRouter, Baseten, and Vercel API-key storage in the
+  encrypted provider vault.
 - Make default logout preserve provider API keys.
 - Add an explicit destructive logout option for users who want to remove all
   auth and provider credentials.
@@ -78,6 +78,7 @@ Providers
   Provider: Z.AI API Key          Store ZAI_API_KEY in the vault
   Provider: OpenRouter API Key    Store OPENROUTER_API_KEY in the vault
   Provider: Baseten API Key       Store BASETEN_API_KEY in the vault
+  Provider: Vercel API Key        Store AI_GATEWAY_API_KEY in the vault
 ```
 
 Implemented details:
@@ -90,7 +91,7 @@ Implemented details:
 - Handled those events in `codex-rs/tui/src/app/event_dispatch.rs`.
 - Reused the app-server account endpoint with provider-specific
   `LoginAccountParams::OpenaiProviderDeviceCode`, so the `/providers` OpenAI
-  row is not blocked by Ambient/Z.AI/OpenRouter/Baseten forced-API settings.
+  row is not blocked by Ambient/Z.AI/OpenRouter/Baseten/Vercel forced-API settings.
 - Showed the verification URL and user code in a bottom-pane view instead of
   inserting the device code into chat history.
 
@@ -114,7 +115,8 @@ Onboarding is aligned with `/providers`:
   exist;
 - it shows Codex account login as another provider credential choice;
 - it uses device-code login for the provider-picker Codex account row; and
-- it keeps existing API-key entry for Ambient, Z.AI, OpenRouter, and Baseten.
+- it keeps existing API-key entry for Ambient, Z.AI, OpenRouter, Baseten, and
+  Vercel.
 The provider-picker Codex account row also uses
 `LoginAccountParams::OpenaiProviderDeviceCode`.
 
@@ -202,7 +204,7 @@ Manual smoke test:
 5. Open /model.
 6. Select GPT-5.5 under Coding Plans.
 7. Send a small prompt and verify the OpenAI provider uses Codex account auth.
-8. Run pfterminal logout and verify Ambient/Z.AI/OpenRouter/Baseten keys remain.
+8. Run pfterminal logout and verify Ambient/Z.AI/OpenRouter/Baseten/Vercel keys remain.
 ```
 
 ## Docs
@@ -220,8 +222,8 @@ Update:
 
 - A user can log into their Codex/OpenAI account from `/providers` using device
   auth.
-- A user can still add or replace Ambient, Z.AI, OpenRouter, and Baseten API
-  keys from the same screen.
+- A user can still add or replace Ambient, Z.AI, OpenRouter, Baseten, and
+  Vercel API keys from the same screen.
 - `/model` exposes `gpt-5.5` for provider `openai` in Coding Plans.
 - No other OpenAI models are exposed in PFTerminal's picker.
 - Default logout removes Codex/OpenAI account auth without wiping provider API

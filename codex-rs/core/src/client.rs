@@ -783,15 +783,19 @@ impl ModelClient {
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
     ) -> Option<Reasoning> {
-        if model_info.supports_reasoning_summaries {
+        let supports_reasoning_effort = model_info.default_reasoning_level.is_some()
+            || !model_info.supported_reasoning_levels.is_empty();
+        if model_info.supports_reasoning_summaries || supports_reasoning_effort {
             Some(Reasoning {
                 enabled: None,
                 effort: effort.or_else(|| model_info.default_reasoning_level.clone()),
                 max_tokens: None,
-                summary: if summary == ReasoningSummaryConfig::None {
-                    None
-                } else {
+                summary: if model_info.supports_reasoning_summaries
+                    && summary != ReasoningSummaryConfig::None
+                {
                     Some(summary)
+                } else {
+                    None
                 },
                 exclude: None,
                 // When Responses Lite is disabled, omit context so Responses uses the default,

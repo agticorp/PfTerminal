@@ -463,6 +463,8 @@ async fn chatgpt_cache_does_not_evict_pfterminal_provider_models() {
     assert!(slugs.contains(&"glm-5.2"));
     assert!(slugs.contains(&"z-ai/glm-5.2"));
     assert!(slugs.contains(&"zai-org/GLM-5.2"));
+    assert!(slugs.contains(&"zai/glm-5.2"));
+    assert!(slugs.contains(&"zai/glm-5.2-fast"));
 }
 
 #[tokio::test]
@@ -1081,6 +1083,8 @@ fn bundled_models_json_contains_openrouter_models() {
         "openrouter/owl-alpha",
         "google/gemini-3.5-flash",
         "zai-org/GLM-5.2",
+        "zai/glm-5.2",
+        "zai/glm-5.2-fast",
     ] {
         assert!(
             response.models.iter().any(|model| model.slug == slug),
@@ -1105,6 +1109,64 @@ fn bundled_models_json_contains_openrouter_models() {
             .as_deref()
             .unwrap_or_default()
             .contains("$1.50/M input, $0.30/M cached input, $4.50/M output")
+    );
+
+    let vercel_glm = response
+        .models
+        .iter()
+        .find(|model| model.slug == "zai/glm-5.2")
+        .expect("bundled models.json should include Vercel GLM 5.2");
+
+    assert_eq!(vercel_glm.display_name, "Vercel GLM 5.2");
+    assert_eq!(vercel_glm.context_window, Some(1_048_576));
+    assert_eq!(
+        vercel_glm.default_reasoning_level,
+        Some(ReasoningEffort::Medium)
+    );
+    assert_eq!(
+        vercel_glm
+            .supported_reasoning_levels
+            .iter()
+            .map(|level| level.effort.clone())
+            .collect::<Vec<_>>(),
+        vec![ReasoningEffort::Medium, ReasoningEffort::XHigh]
+    );
+    assert_eq!(vercel_glm.visibility, ModelVisibility::List);
+    assert!(
+        vercel_glm
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("$1.40/M input, $0.26/M cached input, $4.40/M output")
+    );
+
+    let vercel_fast = response
+        .models
+        .iter()
+        .find(|model| model.slug == "zai/glm-5.2-fast")
+        .expect("bundled models.json should include Vercel GLM 5.2 Fast");
+
+    assert_eq!(vercel_fast.display_name, "Vercel GLM 5.2 Fast");
+    assert_eq!(vercel_fast.context_window, Some(1_048_576));
+    assert_eq!(
+        vercel_fast.default_reasoning_level,
+        Some(ReasoningEffort::Medium)
+    );
+    assert_eq!(
+        vercel_fast
+            .supported_reasoning_levels
+            .iter()
+            .map(|level| level.effort.clone())
+            .collect::<Vec<_>>(),
+        vec![ReasoningEffort::Medium, ReasoningEffort::XHigh]
+    );
+    assert_eq!(vercel_fast.visibility, ModelVisibility::List);
+    assert!(
+        vercel_fast
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("$3.00/M input, $0.50/M cached input, $10.25/M output")
     );
 
     let openrouter_gemini = response

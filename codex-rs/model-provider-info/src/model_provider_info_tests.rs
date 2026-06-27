@@ -417,6 +417,22 @@ fn test_built_in_model_providers_include_baseten() {
 }
 
 #[test]
+fn test_built_in_model_providers_include_vercel() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    let vercel = providers
+        .get(VERCEL_PROVIDER_ID)
+        .expect("Vercel provider should be built in");
+    assert!(vercel.is_vercel());
+    assert_eq!(vercel.base_url.as_deref(), Some(VERCEL_BASE_URL));
+    assert_eq!(vercel.env_key.as_deref(), Some(VERCEL_API_KEY_ENV_VAR));
+    assert_eq!(vercel.wire_api, WireApi::Responses);
+    assert!(!vercel.requires_openai_auth);
+    assert_eq!(VERCEL_DEFAULT_MODEL, "zai/glm-5.2");
+    assert_eq!(VERCEL_GLM_5_2_FAST_MODEL, "zai/glm-5.2-fast");
+}
+
+#[test]
 fn test_merge_configured_model_providers_adds_custom_provider() {
     let custom_provider = ModelProviderInfo {
         name: "Custom".to_string(),

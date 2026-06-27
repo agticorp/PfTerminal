@@ -161,7 +161,7 @@ impl App {
     ///
     /// These two writes stay paired so the picker rows and contextual footer continue to describe
     /// the same displayed thread after nickname or role updates.
-    pub(super) fn upsert_agent_picker_thread(
+    pub(crate) fn upsert_agent_picker_thread(
         &mut self,
         thread_id: ThreadId,
         agent_nickname: Option<String>,
@@ -228,6 +228,8 @@ impl App {
                 if Self::is_terminal_thread_read_error(&err) && !has_replay_channel {
                     self.agent_navigation.remove(thread_id);
                     self.spawn_parent_by_thread.remove(&thread_id);
+                    self.spawn_parent_by_node
+                        .remove(&crate::spawn_orchestration::thread_node_id(thread_id));
                     return false;
                 }
                 let is_closed = Self::closed_state_for_thread_read_error(
@@ -352,6 +354,10 @@ impl App {
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
     ) -> Result<()> {
+        self.save_active_claude_pane_transcript();
+        let _ = self
+            .claude_panes
+            .set_active_user_pane(crate::claude_panes::CODEX_MAIN_PANE_ID);
         if self.active_thread_id == Some(thread_id) {
             return Ok(());
         }
@@ -451,7 +457,7 @@ impl App {
                 .is_none_or(|entry| !entry.is_closed)
     }
 
-    pub(super) fn reset_for_thread_switch(&mut self, tui: &mut tui::Tui) -> Result<()> {
+    pub(crate) fn reset_for_thread_switch(&mut self, tui: &mut tui::Tui) -> Result<()> {
         self.reset_transcript_state_after_clear();
         tui.clear_pending_history_lines();
         Self::clear_terminal_for_thread_switch(&mut tui.terminal)?;
@@ -478,6 +484,7 @@ impl App {
         self.thread_event_channels.clear();
         self.agent_navigation.clear();
         self.spawn_parent_by_thread.clear();
+        self.spawn_parent_by_node.clear();
         self.spawn_status_by_thread.clear();
         self.side_threads.clear();
         self.active_thread_id = None;

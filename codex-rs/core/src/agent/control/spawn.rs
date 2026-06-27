@@ -2,34 +2,10 @@ use super::residency::is_v2_resident_session_source;
 use super::*;
 use codex_protocol::config_types::MultiAgentMode;
 
-const AGENT_NAMES: &str = include_str!("../agent_names.txt");
-
 struct SpawnAgentThreadInheritance {
     environments: Option<TurnEnvironmentSnapshot>,
     exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
     inherited_multi_agent_mode: Option<MultiAgentMode>,
-}
-
-fn default_agent_nickname_list() -> Vec<&'static str> {
-    AGENT_NAMES
-        .lines()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .collect()
-}
-
-pub(super) fn agent_nickname_candidates(config: &Config, role_name: Option<&str>) -> Vec<String> {
-    let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
-    if let Some(candidates) =
-        resolve_role_config(config, role_name).and_then(|role| role.nickname_candidates.clone())
-    {
-        return candidates;
-    }
-
-    default_agent_nickname_list()
-        .into_iter()
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item: bool) -> bool {

@@ -528,7 +528,9 @@ impl ChatWidget {
 
     // Review mode counts as cancellable work so Ctrl+C interrupts instead of quitting.
     fn is_cancellable_work_active(&self) -> bool {
-        self.bottom_pane.is_task_running() || self.review.is_review_mode
+        self.turn_lifecycle.agent_turn_running
+            || self.bottom_pane.is_task_running()
+            || self.review.is_review_mode
     }
 
     fn pause_active_goal_for_interrupt(&self) {

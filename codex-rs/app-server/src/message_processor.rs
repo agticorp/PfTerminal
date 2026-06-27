@@ -1099,6 +1099,18 @@ impl MessageProcessor {
                     )
                     .await
             }
+            ClientRequest::ThreadSpawnAgent { params, .. } => {
+                self.thread_processor
+                    .thread_spawn_agent(
+                        request_id.clone(),
+                        params,
+                        app_server_client_name.clone(),
+                        client_version.clone(),
+                        supports_openai_form_elicitation,
+                        request_context,
+                    )
+                    .await
+            }
             ClientRequest::ThreadUnsubscribe { params, .. } => {
                 self.thread_processor
                     .thread_unsubscribe(&request_id, params)

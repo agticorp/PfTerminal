@@ -107,6 +107,14 @@ pub struct ThreadStartParams {
     /// Optional client-supplied analytics source classification for this thread.
     #[ts(optional = nullable)]
     pub thread_source: Option<ThreadSource>,
+    /// If set, start this thread as a native spawned-agent child of the given parent.
+    #[experimental("thread/start.spawnAgentParentThreadId")]
+    #[ts(optional = nullable)]
+    pub spawn_agent_parent_thread_id: Option<String>,
+    /// Role metadata for a native spawned-agent thread.
+    #[experimental("thread/start.spawnAgentRole")]
+    #[ts(optional = nullable)]
+    pub spawn_agent_role: Option<String>,
     /// Optional sticky environments for this thread.
     ///
     /// Omitted selects the default environment when environment access is
@@ -137,6 +145,64 @@ pub struct ThreadStartParams {
     #[experimental("thread/start.experimentalRawEvents")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub experimental_raw_events: bool,
+}
+
+#[derive(
+    Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema, TS, ExperimentalApi,
+)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSpawnAgentParams {
+    /// Existing parent thread that owns this spawned agent pane.
+    pub parent_thread_id: String,
+    /// Role metadata to store on the native spawned-agent thread.
+    pub agent_role: String,
+    /// Optional display name to store on the native spawned-agent thread.
+    #[ts(optional = nullable)]
+    pub agent_nickname: Option<String>,
+    /// Thread creation settings for the agent pane.
+    pub thread: ThreadStartParams,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSpawnAgentResponse {
+    pub thread: Thread,
+    pub model: String,
+    pub model_provider: String,
+    pub service_tier: Option<String>,
+    pub cwd: AbsolutePathBuf,
+    pub runtime_workspace_roots: Vec<AbsolutePathBuf>,
+    pub instruction_sources: Vec<LegacyAppPathString>,
+    pub approval_policy: AskForApproval,
+    pub approvals_reviewer: ApprovalsReviewer,
+    pub sandbox: SandboxPolicy,
+    pub active_permission_profile: Option<ActivePermissionProfile>,
+    #[ts(optional = nullable)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[ts(optional = nullable)]
+    pub multi_agent_mode: Option<MultiAgentMode>,
+}
+
+impl From<ThreadStartResponse> for ThreadSpawnAgentResponse {
+    fn from(response: ThreadStartResponse) -> Self {
+        Self {
+            thread: response.thread,
+            model: response.model,
+            model_provider: response.model_provider,
+            service_tier: response.service_tier,
+            cwd: response.cwd,
+            runtime_workspace_roots: response.runtime_workspace_roots,
+            instruction_sources: response.instruction_sources,
+            approval_policy: response.approval_policy,
+            approvals_reviewer: response.approvals_reviewer,
+            sandbox: response.sandbox,
+            active_permission_profile: response.active_permission_profile,
+            reasoning_effort: response.reasoning_effort,
+            multi_agent_mode: response.multi_agent_mode,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, JsonSchema, TS)]

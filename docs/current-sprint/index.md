@@ -20,6 +20,8 @@ credentials, created automatically on login/startup and usable through
 | Tool-call runaway remedy | Live worker logs show malformed oversized `structured_write` calls looping through normal follow-up handling. The remedy is a non-retriable malformed-tool boundary plus bounded/chunked write mechanics. | [Tool Call Runaway Remedy](tool-call-runaway-remedy.md) |
 | Subagents | Current Codex supports explicit subagent workflows, but PFTerminal must make the tool exposure reliable and diagnosable across third-party provider sessions. | [PFTerminal Subagents](subagents.md) |
 | Spawn orchestration | Scope down `docs/nazgul_spec.md` into `/spawn`: a user-facing creation flow for Troll and Orc roles with explicit model, harness, parent/child status, and upward reporting to the Nazgul pane. | [Spawn Orchestration](spawn-orchestration.md) |
+| Spawn acceptance gate | Live use showed `/spawn` is not done until pane state, dispatch provenance, supervisor action, duplicate-task prevention, and interrupts are pane-local and auditable. | [Spawn Orchestration Acceptance](spawn-orchestration-acceptance.md) |
+| Agent vault access | Agents, subagents, and Claude panes need provider credentials without reading raw vault records or inheriting long-lived API keys. | [Agent Vault Access](agent-vault-access.md) |
 | Codex account login | OpenAI Codex account login should appear as a provider credential, use device auth from `/providers`, expose only GPT-5.5, and avoid wiping provider vault keys on default logout. | [Codex Account Login](codex-account-login.md) |
 | Claude headless panes | Ambient `/panes` parity workflow suite passed after removing the hidden local tool-call ceiling; non-Ambient profiles remain experimental until they pass the same suite. | [Implementation Note](claude-headless-panes.md), [Completion Spec](claude-code-integration-completion-spec.md) |
 
@@ -44,11 +46,15 @@ credentials, created automatically on login/startup and usable through
 8. Read [Spawn Orchestration](spawn-orchestration.md) for the scoped `/spawn`
    plan that turns the Nazgul/Troll/Orc hierarchy into a concrete
    parent-aware workflow.
-9. Read [Codex Account Login](codex-account-login.md) for the plan to
+9. Read [Spawn Orchestration Acceptance](spawn-orchestration-acceptance.md)
+   for the actual done criteria before calling `/spawn` orchestration complete.
+10. Read [Agent Vault Access](agent-vault-access.md) for the proposal to let
+   agents use provider credentials without direct secret access.
+11. Read [Codex Account Login](codex-account-login.md) for the plan to
    reintegrate OpenAI Codex account auth into `/providers` and Coding Plans.
-10. Read [Claude Headless Panes](claude-headless-panes.md) for the current
+12. Read [Claude Headless Panes](claude-headless-panes.md) for the current
    Ambient-backed `/panes` implementation.
-11. Read [Claude Code Completion Spec](claude-code-integration-completion-spec.md)
+13. Read [Claude Code Completion Spec](claude-code-integration-completion-spec.md)
    for the actual completion bar before calling the Claude Code integration
    done.
 

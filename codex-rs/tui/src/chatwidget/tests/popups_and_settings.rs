@@ -12,6 +12,8 @@ use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 use codex_model_provider_info::BASETEN_DEFAULT_MODEL;
 use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
+use codex_model_provider_info::VERCEL_DEFAULT_MODEL;
+use codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use pretty_assertions::assert_eq;
 
@@ -2644,7 +2646,7 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
         .try_list_models()
         .expect("model catalog should load");
     chat.open_all_models_popup(presets);
-    let popup = render_bottom_popup(&chat, /*width*/ 140);
+    let popup = render_bottom_popup_with_height(&chat, /*width*/ 140, /*height*/ 28);
 
     assert!(
         popup.contains(AMBIENT_DEFAULT_MODEL),
@@ -2683,12 +2685,53 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
         "expected Baseten GLM price description in /model picker:\n{popup}"
     );
     assert!(
-        popup.contains("minimax/minimax-m3"),
-        "expected MiniMax M3 in /model picker:\n{popup}"
+        popup.contains(VERCEL_DEFAULT_MODEL),
+        "expected Vercel GLM 5.2 in /model picker:\n{popup}"
     );
     assert!(
-        popup.contains("OpenRouter: MiniMax M3 - $0.30/M input, $1.20/M output."),
-        "expected MiniMax M3 price description in /model picker:\n{popup}"
+        popup.contains("Vercel: GLM 5.2 - $1.40/M input, $0.26/M cached input, $4.40/M output."),
+        "expected Vercel GLM price description in /model picker:\n{popup}"
+    );
+
+    let (mut vercel_fast_chat, _vercel_fast_rx, _vercel_fast_op_rx) =
+        make_chatwidget_manual(Some(VERCEL_GLM_5_2_FAST_MODEL)).await;
+    vercel_fast_chat.thread_id = Some(ThreadId::new());
+    let presets = vercel_fast_chat
+        .model_catalog
+        .try_list_models()
+        .expect("model catalog should load");
+    vercel_fast_chat.open_all_models_popup(presets);
+    let vercel_fast_popup =
+        render_bottom_popup_with_height(&vercel_fast_chat, /*width*/ 140, /*height*/ 28);
+
+    assert!(
+        vercel_fast_popup.contains(VERCEL_GLM_5_2_FAST_MODEL),
+        "expected Vercel GLM 5.2 Fast in /model picker:\n{vercel_fast_popup}"
+    );
+    assert!(
+        vercel_fast_popup.contains(
+            "Vercel: GLM 5.2 Fast - $3.00/M input, $0.50/M cached input, $10.25/M output."
+        ),
+        "expected Vercel GLM Fast price description in /model picker:\n{vercel_fast_popup}"
+    );
+    let (mut minimax_chat, _minimax_rx, _minimax_op_rx) =
+        make_chatwidget_manual(Some("minimax/minimax-m3")).await;
+    minimax_chat.thread_id = Some(ThreadId::new());
+    let presets = minimax_chat
+        .model_catalog
+        .try_list_models()
+        .expect("model catalog should load");
+    minimax_chat.open_all_models_popup(presets);
+    let minimax_popup =
+        render_bottom_popup_with_height(&minimax_chat, /*width*/ 140, /*height*/ 28);
+
+    assert!(
+        minimax_popup.contains("minimax/minimax-m3"),
+        "expected MiniMax M3 in /model picker:\n{minimax_popup}"
+    );
+    assert!(
+        minimax_popup.contains("OpenRouter: MiniMax M3 - $0.30/M input, $1.20/M output."),
+        "expected MiniMax M3 price description in /model picker:\n{minimax_popup}"
     );
     assert!(
         popup.contains("gpt-5.5"),
@@ -2786,10 +2829,10 @@ async fn model_picker_opens_openrouter_reasoning_options_for_gemini() {
         .expect("model catalog should load");
     chat.open_all_models_popup(presets);
 
-    for _ in 0..7 {
+    for _ in 0..9 {
         chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     }
-    let before = render_bottom_popup(&chat, /*width*/ 100);
+    let before = render_bottom_popup_with_height(&chat, /*width*/ 140, /*height*/ 32);
     assert!(
         before.contains("google/gemini-3.5-flash"),
         "expected Gemini OpenRouter row before selection:\n{before}"
@@ -2825,6 +2868,35 @@ async fn model_picker_opens_openrouter_reasoning_options_for_gemini() {
         !reasoning_popup.contains("(default)"),
         "expected Gemini reasoning picker not to invent a PFTerminal default:\n{reasoning_popup}"
     );
+}
+
+#[tokio::test]
+async fn model_picker_opens_vercel_glm_reasoning_modes() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some(AMBIENT_DEFAULT_MODEL)).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    let preset = chat
+        .model_catalog
+        .try_list_models()
+        .expect("model catalog should load")
+        .into_iter()
+        .find(|preset| preset.model == VERCEL_DEFAULT_MODEL)
+        .expect("Vercel GLM should be in the model catalog");
+    assert_eq!(preset.supported_reasoning_efforts.len(), 2);
+
+    chat.open_reasoning_popup(preset);
+
+    let reasoning_popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(
+        reasoning_popup.contains("Select Reasoning Mode"),
+        "expected Vercel GLM to use the GLM reasoning mode picker:\n{reasoning_popup}"
+    );
+    for label in ["Standard (default)", "Deep"] {
+        assert!(
+            reasoning_popup.contains(label),
+            "expected Vercel reasoning option {label:?} in picker:\n{reasoning_popup}"
+        );
+    }
 }
 
 #[tokio::test]

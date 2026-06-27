@@ -84,6 +84,9 @@ use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_DEFAULT_MODEL;
+use codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL;
+use codex_model_provider_info::VERCEL_PROVIDER_ID;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
@@ -2126,6 +2129,14 @@ pub struct AgentRoleConfig {
     pub nickname_candidates: Option<Vec<String>>,
 }
 
+/// Returns the candidate nickname list that native agent spawning will use for a role.
+///
+/// UI surfaces use this to preview the name preference they pass into the app-server. The core
+/// spawn path still reserves the final nickname, so concurrent spawns cannot collide.
+pub fn agent_nickname_candidates_for_role(config: &Config, role_name: Option<&str>) -> Vec<String> {
+    crate::agent::role::agent_nickname_candidates(config, role_name)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomPermissionProfileSummary {
     pub id: String,
@@ -2448,6 +2459,17 @@ fn resolve_model_for_provider(model: Option<String>, model_provider_id: &str) ->
         BASETEN_PROVIDER_ID => match model {
             Some(model) if model.trim() == BASETEN_DEFAULT_MODEL => Some(model),
             _ => Some(BASETEN_DEFAULT_MODEL.to_string()),
+        },
+        VERCEL_PROVIDER_ID => match model {
+            Some(model)
+                if matches!(
+                    model.trim(),
+                    VERCEL_DEFAULT_MODEL | VERCEL_GLM_5_2_FAST_MODEL
+                ) =>
+            {
+                Some(model)
+            }
+            _ => Some(VERCEL_DEFAULT_MODEL.to_string()),
         },
         _ => model,
     }
@@ -3496,6 +3518,7 @@ impl Config {
         let ambient_provider_selected = model_provider_id == AMBIENT_PROVIDER_ID;
         let baseten_provider_selected = model_provider_id == BASETEN_PROVIDER_ID;
         let openrouter_provider_selected = model_provider_id == OPENROUTER_PROVIDER_ID;
+        let vercel_provider_selected = model_provider_id == VERCEL_PROVIDER_ID;
         let zai_provider_selected = model_provider_id == ZAI_PROVIDER_ID;
         let forced_login_method = cfg
             .forced_login_method
@@ -3503,6 +3526,7 @@ impl Config {
                 (ambient_provider_selected
                     || baseten_provider_selected
                     || openrouter_provider_selected
+                    || vercel_provider_selected
                     || zai_provider_selected)
                     .then_some(ForcedLoginMethod::Api)
             });

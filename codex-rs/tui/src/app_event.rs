@@ -155,22 +155,57 @@ pub(crate) enum AppEvent {
     BindSpawnNazgulPane {
         pane_id: String,
     },
+    /// Choose the parent/supervisor for a spawn role.
+    OpenSpawnParentPicker {
+        role: crate::spawn_orchestration::SpawnRole,
+    },
     /// Open the P0 harness picker for a spawn role.
     OpenSpawnHarnessPicker {
         role: crate::spawn_orchestration::SpawnRole,
+        parent_node_id: Option<String>,
     },
     /// Open the inherited model/effort confirmation step for a spawn role.
     OpenSpawnModelPicker {
         role: crate::spawn_orchestration::SpawnRole,
+        parent_node_id: Option<String>,
     },
-    /// Open the task prompt for a spawn role.
-    OpenSpawnTaskPrompt {
+    /// Open the Claude Code provider picker for a spawn role.
+    OpenSpawnClaudeProfilePicker {
         role: crate::spawn_orchestration::SpawnRole,
+        parent_node_id: Option<String>,
     },
-    /// Submit a concrete spawn task from `/spawn` inline args or prompt entry.
-    SubmitSpawnTask {
+    /// Create a native spawned-agent pane for a role/model selection.
+    CreateSpawnAgent {
         role: crate::spawn_orchestration::SpawnRole,
+        parent_node_id: Option<String>,
+        agent_nickname: Option<String>,
+        model: String,
+        provider: Option<String>,
+        effort: Option<ReasoningEffort>,
+    },
+    /// Create the default persistent demo crew: one Troll and two Orc children.
+    CreateSpawnDemoCrew,
+    /// Open a prompt that sends work to an existing spawned-agent pane.
+    OpenSpawnAgentTaskPrompt {
+        thread_id: codex_protocol::ThreadId,
+    },
+    /// Open a prompt that sends work to an existing Claude spawn pane.
+    OpenSpawnClaudePaneTaskPrompt {
+        pane_id: String,
+    },
+    /// Start a normal turn in an existing spawned-agent pane.
+    SubmitSpawnAgentTask {
+        thread_id: codex_protocol::ThreadId,
         task: String,
+    },
+    /// Start a normal turn in an existing Claude spawn pane.
+    SubmitSpawnClaudePaneTask {
+        pane_id: String,
+        task: String,
+    },
+    /// Send the built-in two-Orc demo orchestration task to a Troll pane.
+    RunSpawnDemoTask {
+        troll_thread_id: codex_protocol::ThreadId,
     },
     /// Show the current orchestration tree.
     OpenSpawnStatus,
@@ -178,8 +213,24 @@ pub(crate) enum AppEvent {
     SelectUserPane {
         pane_id: String,
     },
+    /// Open the model picker for creating a native Codex pane.
+    OpenCodexPaneModelPicker,
+    /// Create and switch to a native Codex pane.
+    CreateCodexPane {
+        model: String,
+        provider: Option<String>,
+        effort: Option<ReasoningEffort>,
+    },
+    /// Open the Claude Code provider picker.
+    OpenClaudePaneProfilePicker,
     /// Create and switch to a Claude Code headless pane.
     CreateClaudePane {
+        profile: crate::claude_panes::ClaudeProviderProfileKind,
+    },
+    /// Create and switch to a Claude Code headless pane for a spawn role.
+    CreateSpawnClaudePane {
+        role: crate::spawn_orchestration::SpawnRole,
+        parent_node_id: Option<String>,
         profile: crate::claude_panes::ClaudeProviderProfileKind,
     },
     /// A Claude Code headless pane turn finished.

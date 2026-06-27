@@ -561,6 +561,7 @@ pub(crate) struct App {
     pub(crate) file_search: FileSearchManager,
 
     pub(crate) transcript_cells: Vec<Arc<dyn HistoryCell>>,
+    pub(crate) claude_pane_transcript_cells: HashMap<String, Vec<Arc<dyn HistoryCell>>>,
 
     // Pager overlay state (Transcript or Static like Diff)
     pub(crate) overlay: Option<Overlay>,
@@ -611,6 +612,7 @@ pub(crate) struct App {
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     pub(crate) agent_navigation: AgentNavigationState,
     pub(crate) spawn_parent_by_thread: HashMap<ThreadId, ThreadId>,
+    pub(crate) spawn_parent_by_node: HashMap<String, String>,
     pub(crate) spawn_status_by_thread:
         HashMap<ThreadId, codex_app_server_protocol::CollabAgentState>,
     pub(crate) spawn_nazgul_pane_id: Option<String>,
@@ -1068,6 +1070,7 @@ See the PFTerminal keymap documentation for supported actions and examples."
             enhanced_keys_supported,
             keymap: runtime_keymap,
             transcript_cells: Vec::new(),
+            claude_pane_transcript_cells: HashMap::new(),
             overlay: None,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
@@ -1090,6 +1093,7 @@ See the PFTerminal keymap documentation for supported actions and examples."
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             spawn_parent_by_thread: HashMap::new(),
+            spawn_parent_by_node: HashMap::new(),
             spawn_status_by_thread: HashMap::new(),
             spawn_nazgul_pane_id: None,
             side_threads: HashMap::new(),
@@ -1240,6 +1244,27 @@ See the PFTerminal keymap documentation for supported actions and examples."
                             }
                         } else {
                             tracing::warn!("terminal input stream closed; shutting down active thread");
+                            app.handle_exit_mode(&mut app_server, ExitMode::ShutdownFirst).await
+                        }
+                    }
+                    signal = tokio::signal::ctrl_c() => {
+                        if let Err(err) = signal {
+                            tracing::warn!(error = %err, "failed to listen for SIGINT");
+                            AppRunControl::Continue
+                        } else if app.active_thread_id.is_some() {
+                            match Box::pin(app.handle_event(
+                                tui,
+                                &mut app_server,
+                                AppEvent::CodexOp(
+                                    AppCommand::interrupt_and_restore_prompt_if_no_output(),
+                                ),
+                            ))
+                            .await
+                            {
+                                Ok(control) => control,
+                                Err(err) => break Err(err),
+                            }
+                        } else {
                             app.handle_exit_mode(&mut app_server, ExitMode::ShutdownFirst).await
                         }
                     }

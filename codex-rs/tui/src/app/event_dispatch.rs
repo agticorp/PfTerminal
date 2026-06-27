@@ -1920,11 +1920,21 @@ impl App {
                 self.open_agent_picker(app_server).await;
             }
             AppEvent::SelectAgentThread(thread_id) => {
+                self.save_active_claude_pane_transcript();
+                let _ = self
+                    .claude_panes
+                    .set_active_user_pane(crate::claude_panes::CODEX_MAIN_PANE_ID);
                 self.select_agent_thread_and_discard_side(tui, app_server, thread_id)
                     .await?;
             }
             AppEvent::OpenPanePicker => {
                 self.open_pane_picker();
+            }
+            AppEvent::OpenCodexPaneModelPicker => {
+                self.open_codex_pane_model_picker();
+            }
+            AppEvent::OpenClaudePaneProfilePicker => {
+                self.open_claude_pane_profile_picker();
             }
             AppEvent::OpenSpawnRolePicker => {
                 self.open_spawn_role_picker();
@@ -1935,26 +1945,294 @@ impl App {
             AppEvent::BindSpawnNazgulPane { pane_id } => {
                 self.bind_spawn_nazgul_pane(pane_id);
             }
-            AppEvent::OpenSpawnHarnessPicker { role } => {
-                self.open_spawn_harness_picker(role);
+            AppEvent::OpenSpawnParentPicker { role } => {
+                self.open_spawn_parent_picker(role);
             }
-            AppEvent::OpenSpawnModelPicker { role } => {
-                self.open_spawn_model_picker(role);
+            AppEvent::OpenSpawnHarnessPicker {
+                role,
+                parent_node_id,
+            } => {
+                self.open_spawn_harness_picker(role, parent_node_id);
             }
-            AppEvent::OpenSpawnTaskPrompt { role } => {
-                self.open_spawn_task_prompt(role);
+            AppEvent::OpenSpawnModelPicker {
+                role,
+                parent_node_id,
+            } => {
+                self.open_spawn_model_picker(role, parent_node_id);
             }
-            AppEvent::SubmitSpawnTask { role, task } => {
-                self.submit_spawn_task(role, task);
+            AppEvent::OpenSpawnClaudeProfilePicker {
+                role,
+                parent_node_id,
+            } => {
+                self.open_spawn_claude_profile_picker(role, parent_node_id);
+            }
+            AppEvent::CreateSpawnAgent {
+                role,
+                parent_node_id,
+                agent_nickname,
+                model,
+                provider,
+                effort,
+            } => {
+                let Some(agent_type) = role.agent_type() else {
+                    self.chat_widget.add_error_message(
+                        "Nazgul is a pane binding, not a spawned worker.".to_string(),
+                    );
+                    return Ok(AppRunControl::Continue);
+                };
+                let Some(parent_thread_id) =
+                    self.backend_parent_thread_for_spawn(role, parent_node_id.as_deref())
+                else {
+                    self.chat_widget.add_error_message(
+                        "Cannot spawn a native agent before Codex Main has started.".to_string(),
+                    );
+                    return Ok(AppRunControl::Continue);
+                };
+                let logical_parent_node_id =
+                    self.logical_parent_node_for_spawn(role, parent_node_id.as_deref());
+                let agent_nickname =
+                    agent_nickname.or_else(|| self.next_spawn_agent_nickname(role));
+                if let Err(err) = self.ensure_native_spawn_provider_ready(provider.as_deref()) {
+                    self.chat_widget.add_error_message(err.to_string());
+                    return Ok(AppRunControl::Continue);
+                }
+                let spawn_config = match self.native_spawn_agent_config() {
+                    Ok(config) => config,
+                    Err(err) => {
+                        self.chat_widget.add_error_message(err.to_string());
+                        return Ok(AppRunControl::Continue);
+                    }
+                };
+                match app_server
+                    .spawn_agent_thread(
+                        &spawn_config,
+                        parent_thread_id,
+                        agent_type.to_string(),
+                        agent_nickname.clone(),
+                        model.clone(),
+                        provider.clone(),
+                        effort.clone(),
+                    )
+                    .await
+                {
+                    Ok(started) => {
+                        let thread_id = started.session.thread_id;
+                        self.register_spawn_agent_pane(
+                            thread_id,
+                            parent_thread_id,
+                            logical_parent_node_id.clone(),
+                            agent_nickname.clone(),
+                            agent_type,
+                            started,
+                        )
+                        .await;
+                        self.select_agent_thread_and_discard_side(tui, app_server, thread_id)
+                            .await?;
+                        self.chat_widget.add_info_message(
+                            format!(
+                                "Spawned Codex {} pane{}.",
+                                role.label(),
+                                agent_nickname
+                                    .as_deref()
+                                    .map(|nickname| format!(" {nickname}"))
+                                    .unwrap_or_default()
+                            ),
+                            Some(format!("{model}; no task was started.")),
+                        );
+                    }
+                    Err(err) => {
+                        self.chat_widget.add_error_message(format!(
+                            "Failed to spawn Codex {} pane: {err}",
+                            role.label()
+                        ));
+                    }
+                }
+            }
+            AppEvent::CreateSpawnDemoCrew => match self.create_spawn_demo_crew(app_server).await {
+                Ok(troll_thread_id) => {
+                    self.open_spawn_status();
+                    self.chat_widget.add_info_message(
+                        "Created demo crew: Troll + 2 Orcs.".to_string(),
+                        Some(format!(
+                            "Troll: {troll_thread_id}. Run the demo task from /spawn status."
+                        )),
+                    );
+                }
+                Err(err) => {
+                    self.chat_widget
+                        .add_error_message(format!("Failed to create demo crew: {err}"));
+                }
+            },
+            AppEvent::OpenSpawnAgentTaskPrompt { thread_id } => {
+                self.open_spawn_agent_task_prompt(thread_id);
+            }
+            AppEvent::OpenSpawnClaudePaneTaskPrompt { pane_id } => {
+                self.open_spawn_claude_pane_task_prompt(pane_id);
+            }
+            AppEvent::SubmitSpawnAgentTask { thread_id, task } => {
+                let task = task.trim().to_string();
+                if task.is_empty() {
+                    self.chat_widget
+                        .add_error_message("Spawn task cannot be empty.".to_string());
+                    return Ok(AppRunControl::Continue);
+                }
+                let task_preview = task.chars().take(240).collect::<String>();
+                let task_for_submission = self.spawn_agent_task_for_submission(thread_id, &task);
+                let label = self.thread_label(thread_id);
+                let session = if self.primary_thread_id == Some(thread_id) {
+                    self.primary_session_configured.clone()
+                } else if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+                    let store = channel.store.lock().await;
+                    store.session.clone()
+                } else {
+                    None
+                };
+                let Some(session) = session else {
+                    self.chat_widget.add_error_message(format!(
+                        "Cannot send task to {label}; pane session is not loaded."
+                    ));
+                    return Ok(AppRunControl::Continue);
+                };
+                if let Some(message) =
+                    self.native_spawn_provider_auth_error(Some(session.model_provider_id.as_str()))
+                {
+                    self.chat_widget
+                        .add_error_message(format!("Cannot send task to {label}: {message}"));
+                    return Ok(AppRunControl::Continue);
+                }
+                match app_server
+                    .turn_start(
+                        thread_id,
+                        vec![codex_app_server_protocol::UserInput::Text {
+                            text: task_for_submission,
+                            text_elements: Vec::new(),
+                        }],
+                        session.cwd.to_path_buf(),
+                        session.approval_policy,
+                        session.approvals_reviewer,
+                        TurnPermissionsOverride::Preserve,
+                        &session.runtime_workspace_roots,
+                        session.model.clone(),
+                        session.reasoning_effort.clone(),
+                        /*summary*/ None,
+                        /*service_tier*/ None,
+                        session
+                            .collaboration_mode
+                            .as_ref()
+                            .map(|mode| (**mode).clone()),
+                        session.personality,
+                        /*output_schema*/ None,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        self.agent_navigation
+                            .set_running(thread_id, /*is_running*/ true);
+                        self.agent_navigation
+                            .set_last_task_message(thread_id, Some(task_preview));
+                        if !task.starts_with("Assigned by ") {
+                            self.chat_widget.add_info_message(
+                                format!("Task sent to {label}."),
+                                Some("The pane will run it as a normal turn.".to_string()),
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        self.chat_widget
+                            .add_error_message(format!("Failed to send task to {label}: {err}"));
+                    }
+                }
+            }
+            AppEvent::SubmitSpawnClaudePaneTask { pane_id, task } => {
+                self.submit_claude_pane_task(pane_id, task);
+            }
+            AppEvent::RunSpawnDemoTask { troll_thread_id } => {
+                match self.spawn_demo_task_for_troll(troll_thread_id) {
+                    Ok(task) => {
+                        self.app_event_tx.send(AppEvent::SubmitSpawnAgentTask {
+                            thread_id: troll_thread_id,
+                            task,
+                        });
+                    }
+                    Err(err) => {
+                        self.chat_widget.add_error_message(err);
+                    }
+                }
             }
             AppEvent::OpenSpawnStatus => {
                 self.open_spawn_status();
             }
             AppEvent::SelectUserPane { pane_id } => {
-                self.select_user_pane(pane_id);
+                let is_codex_main = pane_id == crate::claude_panes::CODEX_MAIN_PANE_ID;
+                self.select_user_pane(tui, pane_id).await;
+                if is_codex_main && let Some(primary_thread_id) = self.primary_thread_id {
+                    self.select_agent_thread_and_discard_side(tui, app_server, primary_thread_id)
+                        .await?;
+                }
+            }
+            AppEvent::CreateCodexPane {
+                model,
+                provider,
+                effort,
+            } => {
+                let Some(parent_thread_id) = self.primary_thread_id.or(self.active_thread_id)
+                else {
+                    self.chat_widget.add_error_message(
+                        "Cannot create a Codex pane before Codex Main has started.".to_string(),
+                    );
+                    return Ok(AppRunControl::Continue);
+                };
+                let spawn_config = match self.native_spawn_agent_config() {
+                    Ok(config) => config,
+                    Err(err) => {
+                        self.chat_widget.add_error_message(err.to_string());
+                        return Ok(AppRunControl::Continue);
+                    }
+                };
+                let nickname = self.next_codex_pane_nickname();
+                match app_server
+                    .spawn_agent_thread(
+                        &spawn_config,
+                        parent_thread_id,
+                        "default".to_string(),
+                        Some(nickname.clone()),
+                        model.clone(),
+                        provider.clone(),
+                        effort.clone(),
+                    )
+                    .await
+                {
+                    Ok(started) => {
+                        let thread_id = started.session.thread_id;
+                        self.register_codex_user_pane(thread_id, Some(nickname.clone()), started)
+                            .await;
+                        self.save_active_claude_pane_transcript();
+                        let _ = self
+                            .claude_panes
+                            .set_active_user_pane(crate::claude_panes::CODEX_MAIN_PANE_ID);
+                        self.select_agent_thread_and_discard_side(tui, app_server, thread_id)
+                            .await?;
+                        self.chat_widget.add_info_message(
+                            format!("Created and switched to Codex pane {nickname}."),
+                            Some(format!("{model}; no task was started.")),
+                        );
+                    }
+                    Err(err) => {
+                        self.chat_widget
+                            .add_error_message(format!("Failed to create Codex pane: {err}"));
+                    }
+                }
             }
             AppEvent::CreateClaudePane { profile } => {
-                self.create_claude_pane(profile);
+                self.create_claude_pane(tui, profile).await;
+            }
+            AppEvent::CreateSpawnClaudePane {
+                role,
+                parent_node_id,
+                profile,
+            } => {
+                self.create_spawn_claude_pane(tui, role, parent_node_id, profile)
+                    .await;
             }
             AppEvent::ClaudePaneTurnFinished { pane_id, result } => {
                 self.on_claude_pane_turn_finished(pane_id, result);

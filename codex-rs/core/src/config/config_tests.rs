@@ -73,6 +73,9 @@ use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
 use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_DEFAULT_MODEL;
+use codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL;
+use codex_model_provider_info::VERCEL_PROVIDER_ID;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
@@ -790,6 +793,56 @@ model = "zai-org/GLM-5.2"
     assert_eq!(config.model_provider_id, BASETEN_PROVIDER_ID);
     assert_eq!(config.model.as_deref(), Some(BASETEN_DEFAULT_MODEL));
     assert_eq!(config.model_provider.wire_api, WireApi::Chat);
+    assert_eq!(config.forced_login_method, Some(ForcedLoginMethod::Api));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_vercel_provider_uses_api_login() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "vercel"
+model = "zai/glm-5.2-fast"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, VERCEL_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(VERCEL_GLM_5_2_FAST_MODEL));
+    assert_eq!(config.model_provider.wire_api, WireApi::Responses);
+    assert_eq!(config.forced_login_method, Some(ForcedLoginMethod::Api));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_vercel_provider_defaults_to_glm_52() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "vercel"
+model = "gpt-5.5"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, VERCEL_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(VERCEL_DEFAULT_MODEL));
+    assert_eq!(config.model_provider.wire_api, WireApi::Responses);
     assert_eq!(config.forced_login_method, Some(ForcedLoginMethod::Api));
 
     Ok(())

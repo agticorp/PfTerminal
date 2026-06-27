@@ -47,6 +47,16 @@ pub(crate) struct FollowupTaskArgs {
     pub(crate) message: String,
 }
 
+#[derive(Debug, Serialize)]
+struct MessageToolResult {
+    target_thread_id: String,
+    agent_path: String,
+    agent_nickname: Option<String>,
+    agent_role: Option<String>,
+    delivery: &'static str,
+    triggered_turn: bool,
+}
+
 fn message_content(message: String) -> Result<String, FunctionCallError> {
     if message.trim().is_empty() {
         return Err(FunctionCallError::RespondToModel(
@@ -64,6 +74,7 @@ pub(crate) async fn handle_message_string_tool(
     message: String,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
     let message = message_content(message)?;
+    let task_preview = message.clone();
     let ToolInvocation {
         session,
         turn,
@@ -113,6 +124,10 @@ pub(crate) async fn handle_message_string_tool(
         .await
         .map_err(|err| collab_agent_error(receiver_thread_id, err));
     result?;
+    let task_preview = session
+        .services
+        .agent_control
+        .record_agent_task_message(receiver_thread_id, task_preview);
     session
         .send_event(
             &turn,
@@ -120,12 +135,27 @@ pub(crate) async fn handle_message_string_tool(
                 event_id: call_id,
                 occurred_at_ms: now_unix_timestamp_ms(),
                 agent_thread_id: receiver_thread_id,
-                agent_path: receiver_agent_path,
+                agent_path: receiver_agent_path.clone(),
+                task_preview,
                 kind: SubAgentActivityKind::Interacted,
             }
             .into(),
         )
         .await;
 
-    Ok(FunctionToolOutput::from_text(String::new(), Some(true)))
+    let result = MessageToolResult {
+        target_thread_id: receiver_thread_id.to_string(),
+        agent_path: receiver_agent_path.to_string(),
+        agent_nickname: receiver_agent.agent_nickname,
+        agent_role: receiver_agent.agent_role,
+        delivery: match mode {
+            MessageDeliveryMode::QueueOnly => "queued",
+            MessageDeliveryMode::TriggerTurn => "followup_task_sent",
+        },
+        triggered_turn: mode == MessageDeliveryMode::TriggerTurn,
+    };
+    Ok(FunctionToolOutput::from_text(
+        tool_output_json_text(&result, "agent_message"),
+        Some(true),
+    ))
 }

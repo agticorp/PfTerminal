@@ -154,11 +154,12 @@ to use.
 | Z.AI       | `zai`        | `ZAI_API_KEY`        | `glm-5.2`                                                                               |
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `z-ai/glm-5.2`, `minimax/minimax-m3`, `openrouter/owl-alpha`, `google/gemini-3.5-flash` |
 | Baseten    | `baseten`    | `BASETEN_API_KEY`    | `zai-org/GLM-5.2`                                                                       |
+| Vercel     | `vercel`     | `AI_GATEWAY_API_KEY` | `zai/glm-5.2`, `zai/glm-5.2-fast`                                                       |
 
 The first-run provider picker and `/providers` can start OpenAI Codex account
-device login or accept Ambient, Z.AI, OpenRouter, or Baseten API keys. Provider
-keys entered through the PFTerminal UI are stored in the encrypted vault and
-are available from any working directory.
+device login or accept Ambient, Z.AI, OpenRouter, Baseten, or Vercel API keys.
+Provider keys entered through the PFTerminal UI are stored in the encrypted
+vault and are available from any working directory.
 
 You can also provide keys through environment variables:
 
@@ -167,6 +168,7 @@ export AMBIENT_API_KEY="..."
 export ZAI_API_KEY="..."
 export OPENROUTER_API_KEY="..."
 export BASETEN_API_KEY="..."
+export AI_GATEWAY_API_KEY="..."
 ```
 
 Environment variables are useful for CI and temporary shells. For a normal
@@ -184,6 +186,7 @@ stable labels derived from their key names:
 | `ZAI_API_KEY`        | `provider/zai_api_key`        |
 | `OPENROUTER_API_KEY` | `provider/openrouter_api_key` |
 | `BASETEN_API_KEY`    | `provider/baseten_api_key`    |
+| `AI_GATEWAY_API_KEY` | `provider/ai_gateway_api_key` |
 
 The vault backend is the Codex managed-secrets substrate:
 
@@ -228,12 +231,14 @@ pfterminal -m minimax/minimax-m3       # OpenRouter MiniMax M3
 pfterminal -m openrouter/owl-alpha     # OpenRouter Owl Alpha
 pfterminal -m google/gemini-3.5-flash  # OpenRouter Gemini 3.5 Flash
 pfterminal -m zai-org/GLM-5.2          # Baseten GLM 5.2
+pfterminal -m zai/glm-5.2              # Vercel GLM 5.2
+pfterminal -m zai/glm-5.2-fast         # Vercel GLM 5.2 Fast
 ```
 
 The `/model` picker groups models into:
 
 - `Coding Plans`: OpenAI Codex, Ambient, and Z.AI plan-backed models.
-- `Pay Per API Call`: OpenRouter and Baseten metered models.
+- `Pay Per API Call`: OpenRouter, Baseten, and Vercel metered models.
 
 Current visible model metadata:
 
@@ -243,6 +248,8 @@ Current visible model metadata:
 | `zai-org/GLM-5.2-FP8`     | Ambient    | Ambient default GLM 5.2 coding model                                         |
 | `glm-5.2`                 | Z.AI       | Z.AI coding-plan GLM 5.2                                                     |
 | `zai-org/GLM-5.2`         | Baseten    | GLM 5.2, listed as `$1.50/M input`, `$0.30/M cached input`, `$4.50/M output` |
+| `zai/glm-5.2`             | Vercel     | GLM 5.2, listed as `$1.40/M input`, `$0.26/M cached input`, `$4.40/M output` |
+| `zai/glm-5.2-fast`        | Vercel     | GLM 5.2 Fast, listed as `$3.00/M input`, `$0.50/M cached input`, `$10.25/M output` |
 | `z-ai/glm-5.2`            | OpenRouter | GLM 5.2, listed as `$0.98/M input`, `$3.08/M output`                         |
 | `minimax/minimax-m3`      | OpenRouter | MiniMax M3, listed as `$0.30/M input`, `$1.20/M output`                      |
 | `openrouter/owl-alpha`    | OpenRouter | Owl Alpha, listed as `$0/M input`, `$0/M output`                             |

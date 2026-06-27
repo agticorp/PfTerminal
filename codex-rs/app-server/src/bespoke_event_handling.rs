@@ -1320,6 +1320,7 @@ async fn handle_turn_plan_update(
 struct TurnCompletionMetadata {
     status: TurnStatus,
     error: Option<TurnError>,
+    last_agent_message: Option<String>,
     started_at: Option<i64>,
     completed_at: Option<i64>,
     duration_ms: Option<i64>,
@@ -1331,12 +1332,29 @@ async fn emit_turn_completed_with_status(
     turn_completion_metadata: TurnCompletionMetadata,
     outgoing: &ThreadScopedOutgoingMessageSender,
 ) {
+    let items = turn_completion_metadata
+        .last_agent_message
+        .filter(|message| !message.trim().is_empty())
+        .map(|message| {
+            vec![ThreadItem::AgentMessage {
+                id: format!("{event_turn_id}-agent-message"),
+                text: message,
+                phase: None,
+                memory_citation: None,
+            }]
+        })
+        .unwrap_or_default();
+    let items_view = if items.is_empty() {
+        TurnItemsView::NotLoaded
+    } else {
+        TurnItemsView::Full
+    };
     let notification = TurnCompletedNotification {
         thread_id: conversation_id.to_string(),
         turn: Turn {
             id: event_turn_id,
-            items: vec![],
-            items_view: TurnItemsView::NotLoaded,
+            items,
+            items_view,
             error: turn_completion_metadata.error,
             status: turn_completion_metadata.status,
             started_at: turn_completion_metadata.started_at,
@@ -1523,6 +1541,7 @@ async fn handle_turn_complete(
         TurnCompletionMetadata {
             status,
             error,
+            last_agent_message: turn_complete_event.last_agent_message,
             started_at: turn_summary.started_at,
             completed_at: turn_complete_event.completed_at,
             duration_ms: turn_complete_event.duration_ms,
@@ -1547,6 +1566,7 @@ async fn handle_turn_interrupted(
         TurnCompletionMetadata {
             status: TurnStatus::Interrupted,
             error: None,
+            last_agent_message: None,
             started_at: turn_summary.started_at,
             completed_at: turn_aborted_event.completed_at,
             duration_ms: turn_aborted_event.duration_ms,
@@ -3422,6 +3442,7 @@ mod tests {
                     agent_thread_id: child_thread_id,
                     agent_path: AgentPath::try_from("/root/worker")
                         .expect("agent path should parse"),
+                    task_preview: None,
                     kind: SubAgentActivityKind::Interrupted,
                 }),
             },
@@ -3457,6 +3478,7 @@ mod tests {
                     kind: codex_app_server_protocol::SubAgentActivityKind::Interrupted,
                     agent_thread_id: child_thread_id_string,
                     agent_path: "/root/worker".to_string(),
+                    task_preview: None,
                 },
                 thread_id: conversation_id.to_string(),
                 turn_id: "turn-1".to_string(),
@@ -3523,6 +3545,50 @@ mod tests {
             other => bail!("unexpected message: {other:?}"),
         }
         assert!(rx.try_recv().is_err(), "no extra messages expected");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_turn_complete_includes_last_agent_message_item() -> Result<()> {
+        let conversation_id = ThreadId::new();
+        let event_turn_id = "complete-with-message".to_string();
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = Arc::new(OutgoingMessageSender::new(
+            tx,
+            codex_analytics::AnalyticsEventsClient::disabled(),
+        ));
+        let outgoing = ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            vec![ConnectionId(1)],
+            ThreadId::new(),
+        );
+        let thread_state = new_thread_state();
+        let mut complete = turn_complete_event(&event_turn_id);
+        complete.last_agent_message = Some("done with proof".to_string());
+
+        handle_turn_complete(
+            conversation_id,
+            event_turn_id.clone(),
+            complete,
+            &outgoing,
+            &thread_state,
+        )
+        .await;
+
+        let msg = recv_broadcast_message(&mut rx).await?;
+        match msg {
+            OutgoingMessage::AppServerNotification(ServerNotification::TurnCompleted(n)) => {
+                assert_eq!(n.turn.id, event_turn_id);
+                assert_eq!(n.turn.status, TurnStatus::Completed);
+                assert_eq!(n.turn.items_view, TurnItemsView::Full);
+                assert_eq!(n.turn.items.len(), 1);
+                assert!(matches!(
+                    &n.turn.items[0],
+                    ThreadItem::AgentMessage { text, .. } if text == "done with proof"
+                ));
+            }
+            other => bail!("unexpected message: {other:?}"),
+        }
         Ok(())
     }
 

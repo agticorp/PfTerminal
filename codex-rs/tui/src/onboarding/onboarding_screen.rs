@@ -34,6 +34,8 @@ use codex_model_provider_info::BASETEN_API_KEY_ENV_VAR;
 use codex_model_provider_info::BASETEN_PROVIDER_ID;
 use codex_model_provider_info::OPENROUTER_API_KEY_ENV_VAR;
 use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_API_KEY_ENV_VAR;
+use codex_model_provider_info::VERCEL_PROVIDER_ID;
 use codex_model_provider_info::ZAI_API_KEY_ENV_VAR;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_protocol::config_types::ForcedLoginMethod;
@@ -114,6 +116,7 @@ struct ApiKeyEntryContext {
 
 const OPENROUTER_PROVIDER_NAME: &str = "OpenRouter";
 const BASETEN_PROVIDER_NAME: &str = "Baseten";
+const VERCEL_PROVIDER_NAME: &str = "Vercel";
 
 const RECOMMENDED_PROVIDER_API_KEY_OPTIONS: &[(&str, &str, &str)] = &[
     (AMBIENT_PROVIDER_ID, "Ambient", AMBIENT_API_KEY_ENV_VAR),
@@ -127,6 +130,11 @@ const RECOMMENDED_PROVIDER_API_KEY_OPTIONS: &[(&str, &str, &str)] = &[
         BASETEN_PROVIDER_ID,
         BASETEN_PROVIDER_NAME,
         BASETEN_API_KEY_ENV_VAR,
+    ),
+    (
+        VERCEL_PROVIDER_ID,
+        VERCEL_PROVIDER_NAME,
+        VERCEL_API_KEY_ENV_VAR,
     ),
 ];
 
@@ -180,7 +188,8 @@ fn provider_api_key_sort_rank(provider_id: &str) -> usize {
         ZAI_PROVIDER_ID => 1,
         OPENROUTER_PROVIDER_ID => 2,
         BASETEN_PROVIDER_ID => 3,
-        _ => 4,
+        VERCEL_PROVIDER_ID => 4,
+        _ => 5,
     }
 }
 
@@ -190,6 +199,7 @@ pub(crate) fn provider_api_key_display_name(provider: &ApiKeyProviderOption) -> 
         ZAI_API_KEY_ENV_VAR => "Provider: Z.AI API Key".to_string(),
         OPENROUTER_API_KEY_ENV_VAR => "Provider: OpenRouter API Key".to_string(),
         BASETEN_API_KEY_ENV_VAR => "Provider: Baseten API Key".to_string(),
+        VERCEL_API_KEY_ENV_VAR => "Provider: Vercel API Key".to_string(),
         _ => format!("Provider: {} {}", provider.name, provider.env_var),
     }
 }

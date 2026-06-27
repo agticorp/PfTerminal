@@ -346,6 +346,8 @@ pub enum ThreadItem {
         kind: SubAgentActivityKind,
         agent_thread_id: String,
         agent_path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_preview: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
