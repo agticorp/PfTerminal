@@ -1609,6 +1609,98 @@ async fn native_spawn_turn_completion_updates_status_and_result_preview() {
 }
 
 #[tokio::test]
+async fn native_orc_completion_is_reported_to_parent_troll_context() {
+    let mut app = make_test_app().await;
+    let troll_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000231").expect("valid thread id");
+    let orc_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000232").expect("valid thread id");
+
+    app.upsert_agent_picker_thread(
+        troll_thread_id,
+        Some("Burzum".to_string()),
+        Some("troll".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        orc_thread_id,
+        Some("Snaga".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.spawn_parent_by_thread
+        .insert(orc_thread_id, troll_thread_id);
+    app.agent_navigation
+        .set_last_task_message(orc_thread_id, Some("audit latency hot paths".to_string()));
+
+    app.enqueue_thread_notification(
+        orc_thread_id,
+        turn_completed_with_agent_message(
+            orc_thread_id,
+            "turn-1",
+            TurnStatus::Completed,
+            "Found two latency issues and no blockers.",
+        ),
+    )
+    .await
+    .expect("completion should enqueue");
+
+    let context = app.spawn_agent_task_for_submission(troll_thread_id, "review child reports");
+    assert!(context.contains("Recent child reports delivered to this pane:"));
+    assert!(context.contains("Snaga [orc]; status=done"));
+    assert!(context.contains("result=Found two latency issues and no blockers."));
+}
+
+#[tokio::test]
+async fn native_orc_completion_is_reported_to_claude_troll_context() {
+    let mut app = make_test_app().await;
+    let troll_pane_id = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            app.config.codex_home.as_ref(),
+            Some(crate::spawn_orchestration::SpawnRole::Troll),
+            Some("Burzum".to_string()),
+        )
+        .expect("create Claude Troll pane");
+    let orc_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000233").expect("valid thread id");
+
+    app.upsert_agent_picker_thread(
+        orc_thread_id,
+        Some("Ghash".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.spawn_parent_by_node.insert(
+        crate::spawn_orchestration::thread_node_id(orc_thread_id),
+        crate::spawn_orchestration::pane_node_id(&troll_pane_id),
+    );
+
+    app.enqueue_thread_notification(
+        orc_thread_id,
+        turn_completed_with_agent_message(
+            orc_thread_id,
+            "turn-1",
+            TurnStatus::Completed,
+            "Delivered the code-quality audit with three concrete findings.",
+        ),
+    )
+    .await
+    .expect("completion should enqueue");
+
+    let context = app
+        .spawn_context_for_user_pane(&troll_pane_id)
+        .expect("Troll pane should receive spawn context");
+    assert!(context.contains("Recent child reports delivered to this pane:"));
+    assert!(context.contains("Ghash [orc]; status=done"));
+    assert!(
+        context.contains("result=Delivered the code-quality audit with three concrete findings.")
+    );
+}
+
+#[tokio::test]
 async fn enqueued_native_spawn_turn_completion_updates_status_before_replay() {
     let mut app = make_test_app().await;
     let troll_thread_id =
@@ -1831,6 +1923,116 @@ async fn bound_claude_nazgul_context_auto_nests_orphans_under_single_claude_trol
     assert!(context.contains("Claude Code Burzum [troll] - Claude Plan; role=Troll"));
     assert!(context.contains("  - Snaga [orc]; status=idle"));
     assert!(!context.contains("Unassigned Orcs"));
+}
+
+#[tokio::test]
+async fn claude_orc_completion_is_reported_to_parent_troll_context() {
+    let mut app = make_test_app().await;
+    let troll_pane_id = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            app.config.codex_home.as_ref(),
+            Some(crate::spawn_orchestration::SpawnRole::Troll),
+            Some("Burzum".to_string()),
+        )
+        .expect("create Claude Troll pane");
+    let orc_pane_id = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            app.config.codex_home.as_ref(),
+            Some(crate::spawn_orchestration::SpawnRole::Orc),
+            Some("Snaga".to_string()),
+        )
+        .expect("create Claude Orc pane");
+    app.spawn_parent_by_node.insert(
+        crate::spawn_orchestration::pane_node_id(&orc_pane_id),
+        crate::spawn_orchestration::pane_node_id(&troll_pane_id),
+    );
+
+    let artifact_path = app.config.cwd.join("turn-0001.jsonl").to_path_buf();
+    let audit_path = app.config.cwd.join("turn-0001.audit.json").to_path_buf();
+    app.on_claude_pane_turn_finished(
+        orc_pane_id,
+        Ok(crate::claude_panes::ClaudePaneTurnOutput {
+            text: "Implemented the mock website and npm run build passed.".to_string(),
+            status: crate::claude_panes::ClaudePaneTurnStatus::Success,
+            session_id: Some("claude-session".to_string()),
+            usage_summary: None,
+            usage_status: crate::claude_panes::ClaudePaneUsageStatus::Missing,
+            artifact_path,
+            audit_path,
+            duration_ms: 1,
+            terminal_reason: None,
+            error_summary: None,
+            tool_names: Vec::new(),
+            tool_events: Vec::new(),
+            reasoning_events: Vec::new(),
+            command_mode: crate::claude_panes::ClaudeCommandMode::NewSession,
+        }),
+    );
+
+    let context = app
+        .spawn_context_for_user_pane(&troll_pane_id)
+        .expect("Troll pane should receive spawn context");
+    assert!(context.contains("Recent child reports delivered to this pane:"));
+    assert!(context.contains("Claude Code Snaga [orc] - Claude Plan; status=success"));
+    assert!(context.contains("result=Implemented the mock website and npm run build passed."));
+}
+
+#[tokio::test]
+async fn claude_orc_completion_is_reported_to_native_troll_context() {
+    let mut app = make_test_app().await;
+    let troll_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000234").expect("valid thread id");
+    app.upsert_agent_picker_thread(
+        troll_thread_id,
+        Some("Burzum".to_string()),
+        Some("troll".to_string()),
+        /*is_closed*/ false,
+    );
+    let orc_pane_id = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            app.config.codex_home.as_ref(),
+            Some(crate::spawn_orchestration::SpawnRole::Orc),
+            Some("Snaga".to_string()),
+        )
+        .expect("create Claude Orc pane");
+    app.spawn_parent_by_node.insert(
+        crate::spawn_orchestration::pane_node_id(&orc_pane_id),
+        crate::spawn_orchestration::thread_node_id(troll_thread_id),
+    );
+
+    app.on_claude_pane_turn_finished(
+        orc_pane_id,
+        Ok(crate::claude_panes::ClaudePaneTurnOutput {
+            text: "Finished the latency benchmark table and saved the output.".to_string(),
+            status: crate::claude_panes::ClaudePaneTurnStatus::Success,
+            session_id: Some("claude-session".to_string()),
+            usage_summary: None,
+            usage_status: crate::claude_panes::ClaudePaneUsageStatus::Missing,
+            artifact_path: app.config.cwd.join("turn-0001.jsonl").to_path_buf(),
+            audit_path: app.config.cwd.join("turn-0001.audit.json").to_path_buf(),
+            duration_ms: 1,
+            terminal_reason: None,
+            error_summary: None,
+            tool_names: Vec::new(),
+            tool_events: Vec::new(),
+            reasoning_events: Vec::new(),
+            command_mode: crate::claude_panes::ClaudeCommandMode::NewSession,
+        }),
+    );
+
+    let context = app.spawn_agent_task_for_submission(troll_thread_id, "review child reports");
+    assert!(context.contains("Recent child reports delivered to this pane:"));
+    assert!(context.contains("Claude Code Snaga [orc] - Claude Plan; status=success"));
+    assert!(context.contains("result=Finished the latency benchmark table and saved the output."));
 }
 
 #[test]
@@ -4906,6 +5108,7 @@ async fn make_test_app() -> App {
         spawn_parent_by_thread: HashMap::new(),
         spawn_parent_by_node: HashMap::new(),
         spawn_status_by_thread: HashMap::new(),
+        spawn_parent_reports_by_node: HashMap::new(),
         spawn_nazgul_pane_id: None,
         side_threads: HashMap::new(),
         claude_panes: crate::claude_panes::ClaudePaneRegistry::new(),
@@ -4977,6 +5180,7 @@ async fn make_test_app_with_channels() -> (
             spawn_parent_by_thread: HashMap::new(),
             spawn_parent_by_node: HashMap::new(),
             spawn_status_by_thread: HashMap::new(),
+            spawn_parent_reports_by_node: HashMap::new(),
             spawn_nazgul_pane_id: None,
             side_threads: HashMap::new(),
             claude_panes: crate::claude_panes::ClaudePaneRegistry::new(),

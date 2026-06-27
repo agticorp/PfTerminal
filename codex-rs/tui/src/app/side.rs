@@ -403,6 +403,8 @@ impl App {
             self.spawn_parent_by_thread.remove(&thread_id);
             self.spawn_parent_by_node
                 .remove(&crate::spawn_orchestration::thread_node_id(thread_id));
+            self.spawn_parent_reports_by_node
+                .remove(&crate::spawn_orchestration::thread_node_id(thread_id));
             self.spawn_status_by_thread.remove(&thread_id);
         }
         if self.active_thread_id == Some(thread_id) {

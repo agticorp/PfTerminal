@@ -5116,6 +5116,17 @@ impl App {
                     .claude_panes
                     .filter_new_spawn_dispatches(&pane_id, dispatches);
                 self.claude_panes.finish_turn(&pane_id, &Ok(output.clone()));
+                let report_status = output.status.label().to_string();
+                let report_text = if output.text.trim().is_empty() {
+                    output.failure_message()
+                } else {
+                    output.text.clone()
+                };
+                self.record_spawn_child_report_for_claude_pane(
+                    &pane_id,
+                    &report_status,
+                    Some(&report_text),
+                );
                 if !dispatches.is_empty() {
                     self.dispatch_spawn_task_blocks(&pane_id, dispatches);
                 }
@@ -5176,6 +5187,7 @@ impl App {
             }
             Err(error) => {
                 self.claude_panes.finish_turn(&pane_id, &Err(error.clone()));
+                self.record_spawn_child_report_for_claude_pane(&pane_id, "error", Some(&error));
                 if self.claude_panes.active_user_pane_id() == pane_id {
                     self.chat_widget.fail_external_pane_turn(error);
                 } else {
@@ -5623,6 +5635,42 @@ mod tests {
         let duplicate = registry.collect_spawn_dispatches_from_assistant_delta(
             &pane_id,
             "```pfterminal-send-task\ntarget: Snaga\ntask:\nbuild site\n```",
+        );
+        assert!(duplicate.is_empty());
+    }
+
+    #[test]
+    fn streaming_xmlish_dispatch_preserves_code_fences_until_close_tag() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut registry = ClaudePaneRegistry::new();
+        let pane_id = registry
+            .create_pane(
+                ClaudeProviderProfileKind::ClaudePlan,
+                std::env::current_dir().expect("cwd"),
+                dir.path(),
+            )
+            .expect("pane");
+
+        let first = registry.collect_spawn_dispatches_from_assistant_delta(
+            &pane_id,
+            "Before <pfterminal_send_task target=\"Burzum\">\nProblem A:\n```systemd\nExecStart=/bin/postfiat",
+        );
+        assert!(first.is_empty());
+
+        let second = registry.collect_spawn_dispatches_from_assistant_delta(
+            &pane_id,
+            "\n```\nProblem B: verify writes.\n</pfterminal_send_task> after",
+        );
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].target, "Burzum");
+        assert!(second[0].task.contains("Problem A:"));
+        assert!(second[0].task.contains("```systemd"));
+        assert!(second[0].task.contains("ExecStart=/bin/postfiat"));
+        assert!(second[0].task.contains("Problem B: verify writes."));
+
+        let duplicate = registry.collect_spawn_dispatches_from_assistant_delta(
+            &pane_id,
+            "<pfterminal_send_task target=\"Burzum\">\nProblem A:\n```systemd\nExecStart=/bin/postfiat\n```\nProblem B: verify writes.\n</pfterminal_send_task>",
         );
         assert!(duplicate.is_empty());
     }

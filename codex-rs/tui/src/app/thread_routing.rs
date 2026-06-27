@@ -1564,10 +1564,11 @@ impl App {
             codex_app_server_protocol::CollabAgentStatus::PendingInit
                 | codex_app_server_protocol::CollabAgentStatus::Running
         );
+        let report_message = message.clone();
         self.spawn_status_by_thread.insert(
             thread_id,
             codex_app_server_protocol::CollabAgentState {
-                status,
+                status: status.clone(),
                 message: message.clone(),
             },
         );
@@ -1575,6 +1576,9 @@ impl App {
         if message.is_some() {
             self.agent_navigation
                 .set_last_result_message(thread_id, message);
+        }
+        if !is_running {
+            self.record_spawn_child_report_for_thread(thread_id, status, report_message);
         }
     }
 

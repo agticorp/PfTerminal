@@ -26,6 +26,7 @@ const SEND_TASK_FENCE_OPEN: &str = "```pfterminal-send-task";
 const SEND_TASK_FENCE_CLOSE: &str = "```";
 const SEND_TASK_OPEN: &str = "<pfterminal_send_task";
 const SEND_TASK_CLOSE: &str = "</pfterminal_send_task>";
+const SPAWN_PARENT_REPORT_LIMIT: usize = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SpawnTaskDispatch {
@@ -292,7 +293,7 @@ impl App {
             parent_node_id.clone(),
             current_model.clone(),
             ChatWidget::model_provider_for_selection(&current_model),
-            current_effort.clone(),
+            current_effort,
             Some(format!(
                 "Create a Codex-native {} pane with the current model and role default reasoning.",
                 role.label()
@@ -455,6 +456,7 @@ impl App {
                 let _ = writeln!(context, "  canonical_task_name={path}");
             }
         }
+        self.write_spawn_parent_reports(&mut context, &thread_node_id(thread_id));
         if has_orcs {
             let _ = writeln!(
                 context,
@@ -554,6 +556,99 @@ impl App {
                     self.record_spawn_dispatch_error(source_pane_id, source_is_active, err);
                 }
             }
+        }
+    }
+
+    pub(crate) fn record_spawn_child_report_for_thread(
+        &mut self,
+        thread_id: ThreadId,
+        status: codex_app_server_protocol::CollabAgentStatus,
+        result: Option<String>,
+    ) {
+        if !self.is_spawn_orchestration_thread(thread_id) {
+            return;
+        }
+        let Some(parent_node_id) = self.logical_parent_node_for_thread(thread_id) else {
+            return;
+        };
+        let Some(entry) = self.agent_navigation.get(&thread_id) else {
+            return;
+        };
+        let child_title = format_agent_picker_item_name(
+            entry.agent_nickname.as_deref(),
+            entry.agent_role.as_deref(),
+            self.primary_thread_id == Some(thread_id),
+        );
+        let report = spawn_child_report(
+            &child_title,
+            collab_status_label(&status),
+            result.as_deref(),
+        );
+        self.record_spawn_parent_report(parent_node_id, report);
+    }
+
+    pub(crate) fn record_spawn_child_report_for_claude_pane(
+        &mut self,
+        pane_id: &str,
+        status: &str,
+        result: Option<&str>,
+    ) {
+        if !self
+            .claude_panes
+            .panes()
+            .iter()
+            .any(|pane| pane.id == pane_id && pane.spawn_role.is_some())
+        {
+            return;
+        }
+        let Some(parent_node_id) = self.logical_parent_node_for_pane(pane_id) else {
+            return;
+        };
+        let child_title = self.user_pane_title(pane_id);
+        let report = spawn_child_report(&child_title, status, result);
+        self.record_spawn_parent_report(parent_node_id, report);
+    }
+
+    fn record_spawn_parent_report(&mut self, parent_node_id: String, report: String) {
+        let inserted = {
+            let reports = self
+                .spawn_parent_reports_by_node
+                .entry(parent_node_id.clone())
+                .or_default();
+            if reports.back() == Some(&report) {
+                false
+            } else {
+                reports.push_back(report.clone());
+                while reports.len() > SPAWN_PARENT_REPORT_LIMIT {
+                    reports.pop_front();
+                }
+                true
+            }
+        };
+        if inserted {
+            self.notify_spawn_parent_report(&parent_node_id, &report);
+        }
+    }
+
+    fn notify_spawn_parent_report(&mut self, parent_node_id: &str, report: &str) {
+        let summary = "Child report delivered.".to_string();
+        let hint = Some(report.to_string());
+        if let Some(parent_pane_id) = node_id_pane(parent_node_id) {
+            if self.claude_panes.active_user_pane_id() == parent_pane_id {
+                self.chat_widget.add_info_message(summary, hint);
+            } else {
+                self.append_inactive_claude_pane_transcript_cell(
+                    parent_pane_id,
+                    Arc::new(crate::history_cell::new_info_event(summary, hint)),
+                );
+            }
+            return;
+        }
+        if let Some(parent_thread_id) = node_id_thread(parent_node_id)
+            && self.active_thread_id == Some(parent_thread_id)
+            && self.claude_panes.active_user_pane_id() == CODEX_MAIN_PANE_ID
+        {
+            self.chat_widget.add_info_message(summary, hint);
         }
     }
 
@@ -1625,6 +1720,7 @@ impl App {
                 self.write_spawn_context_claude_pane(&mut context, "- ", pane, SpawnRole::Orc);
             }
         }
+        self.write_spawn_parent_reports(&mut context, &troll_node_id);
         let _ = writeln!(context, "</pfterminal_spawn_context>");
         context
     }
@@ -1776,6 +1872,7 @@ impl App {
                 self.write_spawn_context_claude_pane(&mut context, "- ", pane, SpawnRole::Orc);
             }
         }
+        self.write_spawn_parent_reports(&mut context, &self.spawn_root_node_id());
 
         let _ = writeln!(
             context,
@@ -1861,6 +1958,19 @@ impl App {
             );
         }
     }
+
+    fn write_spawn_parent_reports(&self, context: &mut String, parent_node_id: &str) {
+        let Some(reports) = self.spawn_parent_reports_by_node.get(parent_node_id) else {
+            return;
+        };
+        if reports.is_empty() {
+            return;
+        }
+        let _ = writeln!(context, "Recent child reports delivered to this pane:");
+        for report in reports.iter().rev().take(6).rev() {
+            let _ = writeln!(context, "- {}", compact_spawn_context_value(report));
+        }
+    }
 }
 
 fn spawn_demo_task_prompt(
@@ -1896,7 +2006,7 @@ fn write_spawn_dispatch_contract(context: &mut String) {
     );
     let _ = writeln!(
         context,
-        "```pfterminal-send-task\ntarget: Burzum\ntask:\nTask text here.\n```"
+        "<pfterminal_send_task target=\"Burzum\">\nTask text here.\n</pfterminal_send_task>"
     );
     let _ = writeln!(
         context,
@@ -1904,11 +2014,15 @@ fn write_spawn_dispatch_contract(context: &mut String) {
     );
     let _ = writeln!(
         context,
-        "Dispatch blocks are plain assistant text, not Claude tools. Do not use XML tags, <invoke>, <arg_key>, <arg_value>, or tool-call syntax for dispatch; use only fenced blocks."
+        "Dispatch blocks are plain assistant text, not Claude tools. Use only the pfterminal_send_task host tags; do not use <invoke>, <arg_key>, <arg_value>, or tool-call syntax for dispatch."
     );
     let _ = writeln!(
         context,
-        "When assigning work to multiple panes, emit one complete fenced block per target in the same assistant message before saying the work was sent."
+        "When assigning work to multiple panes, emit one complete pfterminal_send_task block per target in the same assistant message before saying the work was sent."
+    );
+    let _ = writeln!(
+        context,
+        "Do not wrap dispatch payloads in markdown fences; task bodies may contain code fences or long config snippets and must be preserved verbatim inside the host tags."
     );
     let _ = writeln!(
         context,
@@ -2226,7 +2340,11 @@ fn spawn_agent_description(
 }
 
 fn spawn_status_label(status: &codex_app_server_protocol::CollabAgentState) -> &'static str {
-    match status.status {
+    collab_status_label(&status.status)
+}
+
+fn collab_status_label(status: &codex_app_server_protocol::CollabAgentStatus) -> &'static str {
+    match *status {
         codex_app_server_protocol::CollabAgentStatus::PendingInit => "pending",
         codex_app_server_protocol::CollabAgentStatus::Running => "running",
         codex_app_server_protocol::CollabAgentStatus::Interrupted => "interrupted",
@@ -2235,6 +2353,14 @@ fn spawn_status_label(status: &codex_app_server_protocol::CollabAgentState) -> &
         codex_app_server_protocol::CollabAgentStatus::Shutdown => "closed",
         codex_app_server_protocol::CollabAgentStatus::NotFound => "not found",
     }
+}
+
+fn spawn_child_report(child_title: &str, status: &str, result: Option<&str>) -> String {
+    let mut report = format!("{child_title}; status={status}");
+    if let Some(result) = result.filter(|result| !result.trim().is_empty()) {
+        let _ = write!(report, "; result={}", compact_spawn_context_value(result));
+    }
+    report
 }
 
 fn next_spawn_agent_nickname_from_used<'candidate, 'used>(
@@ -2436,17 +2562,58 @@ I queued the work."#;
     }
 
     #[test]
+    fn xmlish_spawn_task_dispatch_preserves_markdown_fenced_payloads() {
+        let text = r#"Dispatching the full edict.
+<pfterminal_send_task target="Burzum">
+Burzum, full authority directive from Sauron via Nazgul.
+
+Problem A: Systemd service files have no mempool submit flags.
+
+```systemd
+[Service]
+ExecStart=/usr/local/bin/postfiat-validator rpc \
+  --rpc-enable-submit \
+  --rpc-enable-wrap-owned
+```
+
+Problem B: verify the WAN validators accept writes after redeploy.
+</pfterminal_send_task>
+Done."#;
+
+        let (visible, dispatches) = extract_spawn_task_dispatches(text);
+
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].target, "Burzum");
+        assert!(dispatches[0].task.contains("full authority directive"));
+        assert!(dispatches[0].task.contains("```systemd"));
+        assert!(
+            dispatches[0]
+                .task
+                .contains("ExecStart=/usr/local/bin/postfiat-validator rpc")
+        );
+        assert!(dispatches[0].task.contains("--rpc-enable-wrap-owned"));
+        assert!(
+            dispatches[0]
+                .task
+                .contains("Problem B: verify the WAN validators")
+        );
+        assert!(!visible.contains("ExecStart=/usr/local/bin/postfiat-validator rpc"));
+        assert!(visible.contains("Dispatching the full edict."));
+        assert!(visible.contains("Done."));
+    }
+
+    #[test]
     fn dispatch_contract_tells_claude_not_to_claim_without_block() {
         let mut context = String::new();
         write_spawn_dispatch_contract(&mut context);
 
-        assert!(context.contains("```pfterminal-send-task"));
-        assert!(context.contains("target: Burzum"));
+        assert!(context.contains("<pfterminal_send_task target=\"Burzum\">"));
         assert!(context.contains("Do not claim you sent a task unless you emit a dispatch block"));
         assert!(context.contains("Dispatch blocks are plain assistant text"));
         assert!(context.contains("tool-call syntax"));
         assert!(context.contains("<invoke>"));
-        assert!(context.contains("one complete fenced block per target"));
+        assert!(context.contains("one complete pfterminal_send_task block per target"));
+        assert!(context.contains("Do not wrap dispatch payloads in markdown fences"));
     }
 
     #[test]

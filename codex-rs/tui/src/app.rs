@@ -615,6 +615,7 @@ pub(crate) struct App {
     pub(crate) spawn_parent_by_node: HashMap<String, String>,
     pub(crate) spawn_status_by_thread:
         HashMap<ThreadId, codex_app_server_protocol::CollabAgentState>,
+    pub(crate) spawn_parent_reports_by_node: HashMap<String, VecDeque<String>>,
     pub(crate) spawn_nazgul_pane_id: Option<String>,
     side_threads: HashMap<ThreadId, SideThreadState>,
     pub(crate) claude_panes: crate::claude_panes::ClaudePaneRegistry,
@@ -1095,6 +1096,7 @@ See the PFTerminal keymap documentation for supported actions and examples."
             spawn_parent_by_thread: HashMap::new(),
             spawn_parent_by_node: HashMap::new(),
             spawn_status_by_thread: HashMap::new(),
+            spawn_parent_reports_by_node: HashMap::new(),
             spawn_nazgul_pane_id: None,
             side_threads: HashMap::new(),
             claude_panes: crate::claude_panes::ClaudePaneRegistry::new(),

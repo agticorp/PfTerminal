@@ -230,6 +230,8 @@ impl App {
                     self.spawn_parent_by_thread.remove(&thread_id);
                     self.spawn_parent_by_node
                         .remove(&crate::spawn_orchestration::thread_node_id(thread_id));
+                    self.spawn_parent_reports_by_node
+                        .remove(&crate::spawn_orchestration::thread_node_id(thread_id));
                     return false;
                 }
                 let is_closed = Self::closed_state_for_thread_read_error(
@@ -486,6 +488,7 @@ impl App {
         self.spawn_parent_by_thread.clear();
         self.spawn_parent_by_node.clear();
         self.spawn_status_by_thread.clear();
+        self.spawn_parent_reports_by_node.clear();
         self.side_threads.clear();
         self.active_thread_id = None;
         self.active_thread_rx = None;
