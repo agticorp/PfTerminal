@@ -310,6 +310,7 @@ struct ClaudePaneLiveTurn {
     elapsed_ms: i64,
     current: String,
     phase: String,
+    thinking_tokens: Option<String>,
     reasoning_blurbs: Vec<String>,
     tool_blurbs: Vec<String>,
     assistant_dispatch_buffer: String,
@@ -328,6 +329,7 @@ impl ClaudePaneLiveTurn {
             elapsed_ms: 0,
             current: "starting Claude".to_string(),
             phase: "starting".to_string(),
+            thinking_tokens: None,
             reasoning_blurbs: Vec::new(),
             tool_blurbs: Vec::new(),
             assistant_dispatch_buffer: String::new(),
@@ -352,6 +354,11 @@ impl ClaudePaneLiveTurn {
                 if self.reasoning_blurbs.last() != Some(&reasoning) {
                     self.reasoning_blurbs.push(reasoning);
                 }
+            }
+            "reasoning-tokens" => {
+                let reasoning = reasoning_blurb_from_progress(progress);
+                self.current = reasoning.clone();
+                self.thinking_tokens = Some(reasoning);
             }
             "waiting" => {
                 // Keep the last tool visible during Claude-side thinking so heartbeat ticks update
@@ -378,8 +385,11 @@ impl ClaudePaneLiveTurn {
     fn display(&self) -> ClaudePaneLiveStatus {
         let header = format!("Claude running · {}", format_elapsed_ms(self.elapsed_ms));
         let mut lines = vec![format!("Current: {}", self.current)];
-        if !self.reasoning_blurbs.is_empty() {
+        if self.thinking_tokens.is_some() || !self.reasoning_blurbs.is_empty() {
             lines.push("Reasoning:".to_string());
+            if let Some(thinking_tokens) = &self.thinking_tokens {
+                lines.push(format!("  {thinking_tokens}"));
+            }
             let hidden = self.reasoning_blurbs.len().saturating_sub(3);
             if hidden > 0 {
                 lines.push(format!("  +{hidden} earlier"));
@@ -396,7 +406,10 @@ impl ClaudePaneLiveTurn {
                 lines.push(format!("  +{hidden} earlier"));
             }
             let visible_start = self.tool_blurbs.len().saturating_sub(5);
-            let all_done = self.phase == "assistant-result" || self.phase == "error";
+            let all_done = matches!(
+                self.phase.as_str(),
+                "assistant-result" | "error" | "reasoning" | "reasoning-tokens"
+            );
             for (index, tool) in self.tool_blurbs.iter().enumerate().skip(visible_start) {
                 let is_last = index + 1 == self.tool_blurbs.len();
                 let state = if is_last && !all_done {
@@ -4384,8 +4397,48 @@ fn progress_status_text(progress: &ClaudePaneTurnProgress) -> String {
         "waiting" => "waiting for Claude".to_string(),
         "error" => progress.summary.trim().to_string(),
         "tool-call" => tool_blurb_from_progress(progress),
-        "reasoning" => reasoning_blurb_from_progress(progress),
+        "reasoning" | "reasoning-tokens" => reasoning_blurb_from_progress(progress),
         _ => progress.summary.trim().to_string(),
+    }
+}
+
+fn thinking_tokens_progress(
+    plan: &ClaudeCommandPlan,
+    started_at: &Instant,
+    value: &Value,
+) -> Option<ClaudePaneTurnProgress> {
+    let estimated_tokens = value.get("estimated_tokens").and_then(Value::as_u64)?;
+    let bucket = thinking_tokens_progress_bucket(estimated_tokens);
+    Some(ClaudePaneTurnProgress {
+        pane_id: plan.pane_id.clone(),
+        phase: "reasoning-tokens".to_string(),
+        summary: format!(
+            "{}thinking: {} reasoning tokens",
+            CLAUDE_REASONING_PREFIX,
+            format_reasoning_token_count(estimated_tokens)
+        ),
+        assistant_text_delta: None,
+        hint: Some(format!("thinking-token-bucket:{bucket}")),
+        elapsed_ms: elapsed_ms(started_at),
+        artifact_path: plan.artifact_path.clone(),
+        audit_path: plan.audit_path.clone(),
+    })
+}
+
+fn thinking_tokens_progress_bucket(tokens: u64) -> u64 {
+    if tokens < 100 {
+        tokens / 10
+    } else {
+        tokens / 100
+    }
+}
+
+fn format_reasoning_token_count(tokens: u64) -> String {
+    if tokens < 1_000 {
+        tokens.to_string()
+    } else {
+        let tenths = tokens / 100;
+        format!("{}.{}K", tenths / 10, tenths % 10)
     }
 }
 
@@ -4438,6 +4491,14 @@ fn progresses_from_claude_value(
 ) -> Vec<ClaudePaneTurnProgress> {
     let mut progresses = Vec::new();
     let value_type = value.get("type").and_then(Value::as_str).unwrap_or("event");
+    if value_type == "system"
+        && value.get("subtype").and_then(Value::as_str) == Some("thinking_tokens")
+    {
+        if let Some(progress) = thinking_tokens_progress(plan, started_at, value) {
+            progresses.push(progress);
+        }
+        return progresses;
+    }
     let mut text_chunks = Vec::new();
     collect_text_chunks(value, &mut text_chunks);
     for chunk in text_chunks {
@@ -4516,7 +4577,7 @@ fn progresses_from_claude_value(
         });
         return progresses;
     }
-    if value_type == "system" {
+    if value_type == "system" && value.get("subtype").and_then(Value::as_str) == Some("init") {
         progresses.push(ClaudePaneTurnProgress {
             pane_id: plan.pane_id.clone(),
             phase: "system".to_string(),
@@ -4535,6 +4596,16 @@ fn progresses_from_claude_value(
 }
 
 fn progress_key(progress: &ClaudePaneTurnProgress) -> String {
+    if progress.phase == "reasoning-tokens" {
+        return format!(
+            "{}\n{}",
+            progress.phase,
+            progress
+                .hint
+                .as_deref()
+                .unwrap_or(progress.summary.as_str())
+        );
+    }
     format!(
         "{}\n{}\n{}",
         progress.phase,
@@ -5387,6 +5458,31 @@ mod tests {
     }
 
     #[test]
+    fn thinking_token_system_events_render_as_reasoning_progress() {
+        let (dir, pane) = pane(ClaudeProviderProfileKind::ClaudePlan);
+        let plan =
+            build_claude_command_plan(&pane, "review".to_string(), dir.path()).expect("plan");
+        let started_at = Instant::now();
+        let value = json!({
+            "type": "system",
+            "subtype": "thinking_tokens",
+            "estimated_tokens": 3136,
+            "estimated_tokens_delta": 1,
+            "session_id": "11111111-2222-4333-8444-555555555555"
+        });
+
+        let progress =
+            progress_from_claude_value(&plan, &started_at, &value).expect("thinking progress");
+        assert_eq!(progress.phase, "reasoning-tokens");
+        assert_eq!(
+            progress.summary,
+            "Claude reasoning: thinking: 3.1K reasoning tokens"
+        );
+        assert_eq!(progress.hint.as_deref(), Some("thinking-token-bucket:31"));
+        assert_ne!(progress_status_text(&progress), "session initialized");
+    }
+
+    #[test]
     fn assistant_text_progress_carries_streaming_delta() {
         let (dir, pane) = pane(ClaudeProviderProfileKind::ClaudePlan);
         let plan =
@@ -5583,6 +5679,56 @@ mod tests {
         assert!(details.contains("Inspect the hierarchy before asking Orcs to execute."));
         assert!(!details.contains("artifact:"));
         assert!(!details.contains("audit:"));
+    }
+
+    #[test]
+    fn live_status_panel_shows_thinking_tokens_and_marks_prior_tool_done() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut registry = ClaudePaneRegistry::new();
+        let pane_id = registry
+            .create_pane(
+                ClaudeProviderProfileKind::ClaudePlan,
+                std::env::current_dir().expect("cwd"),
+                dir.path(),
+            )
+            .expect("pane");
+        let artifact_path = dir.path().join("turn-0001.jsonl");
+        let audit_path = dir.path().join("turn-0001.audit.json");
+
+        let tool = ClaudePaneTurnProgress {
+            pane_id: pane_id.clone(),
+            phase: "tool-call".to_string(),
+            summary: "Claude tool call: Bash: Run all Rust tests".to_string(),
+            assistant_text_delta: None,
+            hint: None,
+            elapsed_ms: 30_000,
+            artifact_path: artifact_path.clone(),
+            audit_path: audit_path.clone(),
+        };
+        registry.update_live_progress(&tool).expect("tool status");
+
+        let thinking = ClaudePaneTurnProgress {
+            pane_id,
+            phase: "reasoning-tokens".to_string(),
+            summary: "Claude reasoning: thinking: 3.1K reasoning tokens".to_string(),
+            assistant_text_delta: None,
+            hint: Some("thinking-token-bucket:31".to_string()),
+            elapsed_ms: 90_000,
+            artifact_path,
+            audit_path,
+        };
+        let status = registry
+            .update_live_progress(&thinking)
+            .expect("thinking status");
+
+        assert_eq!(status.header, "Claude running · 1m30s");
+        let details = status.details.expect("details");
+        assert!(details.contains("Current: thinking: 3.1K reasoning tokens"));
+        assert!(details.contains("Reasoning:"));
+        assert!(details.contains("thinking: 3.1K reasoning tokens"));
+        assert!(details.contains("done    Bash: Run all Rust tests"));
+        assert!(!details.contains("running Bash: Run all Rust tests"));
+        assert!(!details.contains("session initialized"));
     }
 
     #[test]
