@@ -2092,6 +2092,111 @@ async fn claude_orc_completion_is_reported_to_parent_troll_context() {
     assert!(context.contains("result=Implemented the mock website and npm run build passed."));
 }
 
+async fn make_child_report_auto_claude_pane_app() -> (
+    App,
+    tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    String,
+    String,
+) {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let troll_pane_id = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            app.config.codex_home.as_ref(),
+            Some(crate::spawn_orchestration::SpawnRole::Troll),
+            Some("Burzum".to_string()),
+        )
+        .expect("create Claude Troll pane");
+    let orc_pane_id = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            app.config.codex_home.as_ref(),
+            Some(crate::spawn_orchestration::SpawnRole::Orc),
+            Some("Snaga".to_string()),
+        )
+        .expect("create Claude Orc pane");
+    app.spawn_parent_by_node.insert(
+        crate::spawn_orchestration::pane_node_id(&orc_pane_id),
+        crate::spawn_orchestration::pane_node_id(&troll_pane_id),
+    );
+    while app_event_rx.try_recv().is_ok() {}
+    (app, app_event_rx, troll_pane_id, orc_pane_id)
+}
+
+fn drain_claude_pane_task_events(
+    app_event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+) -> Vec<(String, String)> {
+    let mut submitted_tasks = Vec::new();
+    while let Ok(event) = app_event_rx.try_recv() {
+        if let AppEvent::SubmitSpawnClaudePaneTask { pane_id, task } = event {
+            submitted_tasks.push((pane_id, task));
+        }
+    }
+    submitted_tasks
+}
+
+#[tokio::test]
+async fn child_report_auto_starts_turn_on_idle_claude_pane_parent() {
+    let (mut app, mut app_event_rx, troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+
+    assert!(!app.claude_panes.claude_pane_is_running(&troll_pane_id));
+    app.record_spawn_child_report_for_claude_pane(&orc_pane_id, "done", Some("result text"));
+
+    let submitted_tasks = drain_claude_pane_task_events(&mut app_event_rx);
+    assert_eq!(submitted_tasks.len(), 1);
+    let (pane_id, task) = &submitted_tasks[0];
+    assert_eq!(pane_id, &troll_pane_id);
+    assert!(task.contains("A child pane has reported back"));
+    assert!(task.contains("result text"));
+}
+
+#[tokio::test]
+async fn child_report_auto_does_not_start_turn_on_running_claude_pane_parent() {
+    let (mut app, mut app_event_rx, troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let _prepared = app
+        .claude_panes
+        .prepare_turn(
+            &troll_pane_id,
+            "already running".to_string(),
+            app.config.codex_home.as_ref(),
+        )
+        .expect("prepare running Troll pane");
+
+    assert!(app.claude_panes.claude_pane_is_running(&troll_pane_id));
+    app.record_spawn_child_report_for_claude_pane(&orc_pane_id, "done", Some("result text"));
+
+    let submitted_tasks = drain_claude_pane_task_events(&mut app_event_rx);
+    assert!(
+        submitted_tasks
+            .iter()
+            .all(|(pane_id, _)| pane_id != &troll_pane_id)
+    );
+}
+
+#[tokio::test]
+async fn child_report_auto_duplicate_child_report_does_not_trigger_duplicate_turns() {
+    let (mut app, mut app_event_rx, troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+
+    app.record_spawn_child_report_for_claude_pane(&orc_pane_id, "done", Some("result text"));
+    app.record_spawn_child_report_for_claude_pane(&orc_pane_id, "done", Some("result text"));
+
+    let submitted_tasks = drain_claude_pane_task_events(&mut app_event_rx);
+    assert_eq!(
+        submitted_tasks
+            .iter()
+            .filter(|(pane_id, _)| pane_id == &troll_pane_id)
+            .count(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn claude_orc_completion_is_reported_to_native_troll_context() {
     let mut app = make_test_app().await;
