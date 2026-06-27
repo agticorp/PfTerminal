@@ -1,7 +1,6 @@
 # `/spawn` Orchestration Acceptance Criteria
 
-Status: live persistent-pane orchestration is passing on the GLM/Vercel path;
-the exact GPT-5.5 Orc gate remains blocked by missing PFTerminal OpenAI auth.
+Status: live persistent-pane orchestration is passing on the GLM/Vercel path; the exact GPT-5.5 Orc gate remains blocked by missing PFTerminal OpenAI auth; known limitation: native Codex Troll cannot dispatch to Claude-backed Orc (see Known Limitation section).
 
 Current live evidence:
 
@@ -373,6 +372,15 @@ Failing result:
 - Full marketplace role/plugin system.
 - Additional roles beyond Nazgul, Troll, and Orc.
 - Replacing native Codex subagents with a custom worker runtime.
+
+## Known Limitation: Native Codex Troll Cannot Dispatch To Claude-Backed Orc
+
+- A native Codex-harness Troll (e.g. GPT-5.5 on the OpenAI provider) supervises native Codex Orcs via the V1 multi-agent tools `send_input` / `followup_task` / `wait_agent` / `list_agents`. Its built-in role prompt (`core/src/agent/builtins/troll.toml`) instructs it to use those tools, not text dispatch blocks.
+- The dispatch-block parser `extract_spawn_task_dispatches` (`tui/src/spawn_orchestration.rs:2090`) and the dispatcher `dispatch_spawn_task_blocks` (`tui/src/spawn_orchestration.rs:503`) are invoked ONLY from the Claude pane turn path (`tui/src/claude_panes.rs:5248` streaming progress and `:5304` turn finished). There is no call site in the native Codex turn-completion path.
+- `send_input` resolves its target via `parse_agent_id_target` (`core/src/tools/handlers/multi_agents.rs:47`), which only accepts a `ThreadId`. It cannot target a Claude pane id.
+- Net effect: a native Codex Troll cannot send work to a Claude-backed Orc pane. Any `<pfterminal_send_task>` block a native Troll emits is silently dropped (no parser in its turn path), and native `send_input` rejects a pane id as an invalid ThreadId.
+- The reverse direction works: a Claude-backed Troll CAN dispatch to a native Codex Orc via `dispatch_spawn_task_blocks` → `SpawnTaskTarget::Native` → `AppEvent::SubmitSpawnAgentTask` (`tui/src/spawn_orchestration.rs:527`), which calls `app_server.turn_start` on the native Orc thread (`tui/src/app/event_dispatch.rs:2072`).
+- Scope decision pending: closing this gap requires (1) injecting `write_spawn_dispatch_contract` into native Troll task context when Claude Orc children exist, and (2) a native-turn-finished hook in `tui/src/app/event_dispatch.rs` that calls `extract_spawn_task_dispatches` on the native Troll's assistant text. This is feature-scope work awaiting Nazgul sign-off on the prompt-change risk for native models.
 
 ## Implementation Implications
 
