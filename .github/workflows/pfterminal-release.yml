@@ -64,7 +64,7 @@ jobs:
     needs: validate
     name: Build macOS package - ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 150
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
@@ -137,6 +137,7 @@ jobs:
           name: pfterminal-package-${{ matrix.target }}
           path: dist/${{ matrix.target }}/pfterminal-package-${{ matrix.target }}.tar.gz
           if-no-files-found: error
+          compression-level: 0
 
   build-linux:
     needs: validate
@@ -259,6 +260,7 @@ jobs:
           name: pfterminal-package-${{ matrix.target }}
           path: dist/${{ matrix.target }}/pfterminal-package-${{ matrix.target }}.tar.gz
           if-no-files-found: error
+          compression-level: 0
 
   assemble-release-assets:
     needs:
@@ -309,6 +311,7 @@ jobs:
           name: pfterminal-release-assets
           path: release-dist/*
           if-no-files-found: error
+          compression-level: 0
 
       - name: Create or update GitHub release
         if: ${{ inputs.publish_release }}
