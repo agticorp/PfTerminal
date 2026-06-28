@@ -979,6 +979,7 @@ impl App {
             return;
         };
 
+        let mut parent_map_changed = false;
         for receiver_thread_id in receiver_thread_ids {
             if collab_receiver_is_not_found(notification, receiver_thread_id) {
                 continue;
@@ -999,6 +1000,7 @@ impl App {
                     crate::spawn_orchestration::thread_node_id(thread_id),
                     crate::spawn_orchestration::thread_node_id(sender_thread_id),
                 );
+                parent_map_changed = true;
             }
 
             if let Some(status) = collab_receiver_status(notification, receiver_thread_id) {
@@ -1024,6 +1026,9 @@ impl App {
                 thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
                 /*is_closed*/ false,
             );
+        }
+        if parent_map_changed {
+            self.persist_pane_state();
         }
     }
 
@@ -1174,6 +1179,7 @@ impl App {
         self.chat_widget
             .set_initial_user_message_submit_suppressed(/*suppressed*/ true);
         self.chat_widget.handle_thread_session(session);
+        self.persist_pane_state();
         let should_buffer_initial_replay = !turns.is_empty();
         if should_buffer_initial_replay {
             self.app_event_tx
@@ -1412,7 +1418,9 @@ impl App {
     pub(super) fn should_wait_for_initial_session(session_selection: &SessionSelection) -> bool {
         matches!(
             session_selection,
-            SessionSelection::StartFresh | SessionSelection::Exit
+            SessionSelection::StartFresh
+                | SessionSelection::ResumePanesOnly { .. }
+                | SessionSelection::Exit
         )
     }
 

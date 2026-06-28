@@ -2209,9 +2209,15 @@ async fn run_claude_pane_smoke_command(command: ClaudePaneSmokeCommand) -> anyho
             .as_deref()
             .map(|error| format!(" - {error}"))
             .unwrap_or_default();
+        let timings = match (entry.first_turn_duration_ms, entry.second_turn_duration_ms) {
+            (Some(first), Some(second)) => format!("; first={first}ms resume={second}ms"),
+            (Some(first), None) => format!("; first={first}ms"),
+            (None, Some(second)) => format!("; resume={second}ms"),
+            (None, None) => String::new(),
+        };
         writeln!(
             std::io::stdout(),
-            "{}: {} ({profile}){error}",
+            "{}: {} ({profile}{timings}){error}",
             entry.provider,
             entry.status
         )?;

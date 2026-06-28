@@ -154,6 +154,7 @@ impl App {
             format!("Bound {title} as Nazgul root."),
             Some("No worker was spawned.".to_string()),
         );
+        self.persist_pane_state();
     }
 
     pub(crate) fn spawn_context_for_user_pane(&self, pane_id: &str) -> Option<String> {
@@ -976,6 +977,7 @@ impl App {
             .insert(thread_id, parent_thread_id);
         self.spawn_parent_by_node
             .insert(thread_node_id(thread_id), logical_parent_node_id);
+        self.persist_pane_state();
         self.upsert_agent_picker_thread(
             thread_id,
             agent_nickname,

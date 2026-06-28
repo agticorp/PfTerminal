@@ -1545,8 +1545,16 @@ async fn run_ratatui_app(
         match lookup_session_target_with_app_server(startup_app_server, id_str).await? {
             Some(target_session) => resume_picker::SessionSelection::Resume(target_session),
             None => {
-                shutdown_app_server_if_present(app_server.take()).await;
-                return missing_session_exit(id_str, "resume");
+                if crate::claude_panes::load_pane_layout(config.codex_home.as_ref(), Some(id_str))
+                    .is_some()
+                {
+                    resume_picker::SessionSelection::ResumePanesOnly {
+                        codex_thread_id: id_str.to_string(),
+                    }
+                } else {
+                    shutdown_app_server_if_present(app_server.take()).await;
+                    return missing_session_exit(id_str, "resume");
+                }
             }
         }
     } else if cli.resume_last {
@@ -1606,6 +1614,7 @@ async fn run_ratatui_app(
         resume_picker::SessionSelection::Resume(target_session) => {
             Some((CwdPromptAction::Resume, target_session))
         }
+        resume_picker::SessionSelection::ResumePanesOnly { .. } => None,
         resume_picker::SessionSelection::Fork(target_session) => {
             Some((CwdPromptAction::Fork, target_session))
         }

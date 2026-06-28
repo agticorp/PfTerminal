@@ -17,6 +17,7 @@ credentials, created automatically on login/startup and usable through
 | Vault/auth design | Active sprint spec defines automatic vault initialization, secure credential entry, labels, lock/unlock behavior, and provider-key use by label. | [Credential Store](authentication.md) |
 | GLM 5.2 tool compatibility | Current sprint logs and OpenCode source show GLM-class models should be routed to structured edit/write tools instead of forced through strict `apply_patch`. | [GLM 5.2 Tool Compatibility](glm-52-tool-compatibility.md) |
 | Hammer reduction | Current sprint study compares PFTerminal/Codex, OpenCode, Hermes Agent, Kilo Code, and Cline to reduce repeated large provider requests, 429 loops, and context bloat. | [Hammer Reduction Process](hammer-reduction-process.md) |
+| Native provider performance | Live benchmarks and patch notes for making native third-party provider turns competitive with wrapped Claude Code. | [Native Provider Performance](native-provider-performance.md) |
 | Tool-call runaway remedy | Live worker logs show malformed oversized `structured_write` calls looping through normal follow-up handling. The remedy is a non-retriable malformed-tool boundary plus bounded/chunked write mechanics. | [Tool Call Runaway Remedy](tool-call-runaway-remedy.md) |
 | Subagents | Current Codex supports explicit subagent workflows, but PFTerminal must make the tool exposure reliable and diagnosable across third-party provider sessions. | [PFTerminal Subagents](subagents.md) |
 | Spawn orchestration | Scope down `docs/nazgul_spec.md` into `/spawn`: a user-facing creation flow for Troll and Orc roles with explicit model, harness, parent/child status, and upward reporting to the Nazgul pane. | [Spawn Orchestration](spawn-orchestration.md) |
@@ -39,22 +40,25 @@ credentials, created automatically on login/startup and usable through
 5. Read [Hammer Reduction Process](hammer-reduction-process.md) for the current
    sprint plan to reduce provider hammering, context bloat, and repeated
    high-input retries.
-6. Read [Tool Call Runaway Remedy](tool-call-runaway-remedy.md) for the
+6. Read [Native Provider Performance](native-provider-performance.md) for the
+   current native-provider latency measurements, fixes, and remaining parity
+   work.
+7. Read [Tool Call Runaway Remedy](tool-call-runaway-remedy.md) for the
    structural fix needed before editing the runtime loop.
-7. Read [PFTerminal Subagents](subagents.md) for the plan to make basic
+8. Read [PFTerminal Subagents](subagents.md) for the plan to make basic
    subagent delegation visible, provider-compatible, and debuggable.
-8. Read [Spawn Orchestration](spawn-orchestration.md) for the scoped `/spawn`
+9. Read [Spawn Orchestration](spawn-orchestration.md) for the scoped `/spawn`
    plan that turns the Nazgul/Troll/Orc hierarchy into a concrete
    parent-aware workflow.
-9. Read [Spawn Orchestration Acceptance](spawn-orchestration-acceptance.md)
+10. Read [Spawn Orchestration Acceptance](spawn-orchestration-acceptance.md)
    for the actual done criteria before calling `/spawn` orchestration complete.
-10. Read [Agent Vault Access](agent-vault-access.md) for the proposal to let
+11. Read [Agent Vault Access](agent-vault-access.md) for the proposal to let
    agents use provider credentials without direct secret access.
-11. Read [Codex Account Login](codex-account-login.md) for the plan to
+12. Read [Codex Account Login](codex-account-login.md) for the plan to
    reintegrate OpenAI Codex account auth into `/providers` and Coding Plans.
-12. Read [Claude Headless Panes](claude-headless-panes.md) for the current
+13. Read [Claude Headless Panes](claude-headless-panes.md) for the current
    Ambient-backed `/panes` implementation.
-13. Read [Claude Code Completion Spec](claude-code-integration-completion-spec.md)
+14. Read [Claude Code Completion Spec](claude-code-integration-completion-spec.md)
    for the actual completion bar before calling the Claude Code integration
    done.
 

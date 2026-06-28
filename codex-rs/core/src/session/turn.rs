@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use crate::SkillInjections;
 use crate::StateDbHandle;
@@ -99,6 +100,7 @@ use codex_protocol::protocol::AgentReasoningSectionBreakEvent;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ModelResponseCompletedEvent;
 use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
@@ -142,6 +144,15 @@ const THIRD_PARTY_PREFLIGHT_WARNING_REQUEST_BYTES: i64 = 128 * 1024;
 const THIRD_PARTY_CACHE_HEALTH_MIN_INPUT_TOKENS: i64 = 8_000;
 const THIRD_PARTY_CACHE_HEALTHY_HIT_RATE: f64 = 0.70;
 
+fn trace_turn_timing(label: &str, start: Instant) {
+    if std::env::var_os("PFTERMINAL_TRACE_STREAM_TIMING").is_some() {
+        eprintln!(
+            "[pfterminal-turn] {label} elapsed_ms={}",
+            start.elapsed().as_millis()
+        );
+    }
+}
+
 /// Takes initial turn input and runs a loop where, at each sampling request,
 /// the model replies with either:
 ///
@@ -164,6 +175,8 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    let turn_started_at = Instant::now();
+    trace_turn_timing("run_turn_start", turn_started_at);
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.new_model_client_session());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
@@ -180,23 +193,28 @@ pub(crate) async fn run_turn(
         error!("Failed to run pre-sampling compact");
         return Ok(None);
     }
+    trace_turn_timing("after_pre_sampling_compact", turn_started_at);
 
     sess.record_context_updates_and_set_reference_context_item(turn_context.as_ref())
         .await;
+    trace_turn_timing("after_context_updates", turn_started_at);
 
     let Some((injection_items, explicitly_enabled_connectors)) =
         build_skills_and_plugins(&sess, turn_context.as_ref(), &input, &cancellation_token).await
     else {
         return Ok(None);
     };
+    trace_turn_timing("after_build_skills_and_plugins", turn_started_at);
 
     if run_pending_session_start_hooks(&sess, &turn_context).await {
         return Ok(None);
     }
+    trace_turn_timing("after_session_start_hooks", turn_started_at);
     let mut can_drain_pending_input = input.is_empty();
     if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
         return Ok(None);
     }
+    trace_turn_timing("after_input_hooks", turn_started_at);
 
     sess.merge_connector_selection(explicitly_enabled_connectors.clone())
         .await;
@@ -210,14 +228,17 @@ pub(crate) async fn run_turn(
         sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
             .await;
     }
+    trace_turn_timing("after_injection_items", turn_started_at);
 
     track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
+    trace_turn_timing("after_config_analytics", turn_started_at);
 
     let mut last_agent_message: Option<String> = None;
     let mut stop_hook_active = false;
     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
     // many turns, from the perspective of the user, it is a single turn.
     let display_roots = turn_diff_display_roots(turn_context.as_ref()).await;
+    trace_turn_timing("after_turn_diff_display_roots", turn_started_at);
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(
         TurnDiffTracker::with_environment_display_roots(display_roots),
     ));
@@ -267,6 +288,7 @@ pub(crate) async fn run_turn(
             }
             .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
             .await;
+            trace_turn_timing("after_prepare_sampling_request_input", turn_started_at);
 
             let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
                 sess.installation_id.clone(),
@@ -274,6 +296,7 @@ pub(crate) async fn run_turn(
                 CodexResponsesRequestKind::Turn,
             );
             let tokens_before_sampling = sess.get_total_token_usage().await;
+            trace_turn_timing("before_run_sampling_request", turn_started_at);
             let (sampling_request_output, sampling_request_input) = run_sampling_request(
                 Arc::clone(&sess),
                 Arc::clone(&turn_context),
@@ -1166,9 +1189,13 @@ async fn run_sampling_request(
     input: Vec<ResponseItem>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
+    let sampling_started_at = Instant::now();
+    trace_turn_timing("run_sampling_request_start", sampling_started_at);
     let router = built_tools(sess.as_ref(), turn_context.as_ref(), &cancellation_token).await?;
+    trace_turn_timing("after_built_tools", sampling_started_at);
 
     let base_instructions = sess.get_base_instructions().await;
+    trace_turn_timing("after_get_base_instructions", sampling_started_at);
 
     let tool_runtime = ToolCallRuntime::new(
         Arc::clone(&router),
@@ -1200,6 +1227,7 @@ async fn run_sampling_request(
             turn_context.as_ref(),
             base_instructions.clone(),
         );
+        trace_turn_timing("after_build_prompt", sampling_started_at);
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
@@ -1593,6 +1621,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::TurnStarted(_)
         | EventMsg::ThreadSettingsApplied(_)
         | EventMsg::TurnComplete(_)
+        | EventMsg::ModelResponseCompleted(_)
         | EventMsg::TokenCount(_)
         | EventMsg::UserMessage(_)
         | EventMsg::AgentReasoning(_)
@@ -1967,12 +1996,15 @@ async fn acquire_provider_request_lease(
     prompt: &Prompt,
     responses_metadata: &CodexResponsesMetadata,
 ) -> CodexResult<Option<ProviderRequestLease>> {
+    let preflight_started_at = Instant::now();
+    trace_turn_timing("provider_preflight_start", preflight_started_at);
     let Some(state_db) = sess.state_db() else {
         return Ok(None);
     };
 
     let key = provider_request_key(sess, turn_context);
     let token_info = sess.token_usage_info().await;
+    trace_turn_timing("provider_preflight_after_token_info", preflight_started_at);
     let last_token_usage = token_info
         .as_ref()
         .map(|info| info.last_token_usage.clone());
@@ -1987,6 +2019,10 @@ async fn acquire_provider_request_lease(
             .map(|info| info.total_token_usage.input_tokens)
             .unwrap_or_else(|| rough_prompt_token_estimate(prompt)),
     };
+    trace_turn_timing(
+        "provider_preflight_after_input_tokens",
+        preflight_started_at,
+    );
     let request_bytes = client_session
         .serialized_request_body_bytes(
             prompt,
@@ -2008,6 +2044,10 @@ async fn acquire_provider_request_lease(
             );
             0
         });
+    trace_turn_timing(
+        "provider_preflight_after_request_bytes",
+        preflight_started_at,
+    );
     let preflight = ProviderRequestPreflight {
         input_tokens,
         cached_input_tokens: last_cached_input_tokens,
@@ -2023,6 +2063,7 @@ async fn acquire_provider_request_lease(
         last_token_usage.as_ref(),
     )
     .await;
+    trace_turn_timing("provider_preflight_after_warning", preflight_started_at);
     let now_ms = now_unix_timestamp_ms();
     if !provider_request_active_lease_needed(turn_context, &preflight, last_token_usage.as_ref()) {
         if let Some(block) = state_db
@@ -2049,6 +2090,7 @@ async fn acquire_provider_request_lease(
                 &key, &block,
             )));
         }
+        trace_turn_timing("provider_preflight_no_lease_needed", preflight_started_at);
         return Ok(None);
     }
     let owner = format!(
@@ -2074,6 +2116,7 @@ async fn acquire_provider_request_lease(
 
     match decision {
         ProviderRequestLeaseDecision::Acquired(lease) => {
+            trace_turn_timing("provider_preflight_acquired_lease", preflight_started_at);
             info!(
                 turn_id = %turn_context.sub_id,
                 provider = %key.provider_id,
@@ -2310,13 +2353,10 @@ fn provider_request_key(sess: &Session, turn_context: &TurnContext) -> ProviderR
             .filter(|value| !value.trim().is_empty())
         {
             Some(secret) => format!("env:{env_key}:{}", secret_fingerprint(&secret)),
-            None => match sess.services.auth_manager.provider_api_key(env_key) {
-                Ok(Some(secret)) if !secret.trim().is_empty() => {
-                    format!("stored:{env_key}:{}", secret_fingerprint(&secret))
-                }
-                Ok(_) => format!("env:{env_key}:missing"),
-                Err(_) => format!("stored:{env_key}:unavailable"),
-            },
+            // Do not hit the vault on the hot path just to fingerprint throttle state.
+            // The actual request path still resolves the stored key and will fail
+            // normally if it is missing or invalid.
+            None => format!("stored:{env_key}"),
         }
     } else if provider.experimental_bearer_token.is_some() {
         "config:bearer-token".to_string()
@@ -2402,6 +2442,8 @@ async fn try_run_sampling_request(
     prompt: &Prompt,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
+    let try_started_at = Instant::now();
+    trace_turn_timing("try_run_sampling_request_start", try_started_at);
     feedback_tags!(
         model = turn_context.model_info.slug.clone(),
         approval_policy = turn_context.approval_policy.value(),
@@ -2423,9 +2465,11 @@ async fn try_run_sampling_request(
         responses_metadata,
     )
     .await?;
+    trace_turn_timing("after_provider_request_lease", try_started_at);
     let mut provider_request_lease_guard =
         ProviderRequestLeaseGuard::new(sess.as_ref(), provider_request_lease);
     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
+    trace_turn_timing("before_client_stream", try_started_at);
     let stream_result = client_session
         .stream(
             prompt,
@@ -2724,9 +2768,9 @@ async fn try_run_sampling_request(
                 sess.services.models_manager.refresh_if_new_etag(etag).await;
             }
             ResponseEvent::Completed {
+                response_id,
                 token_usage,
                 end_turn,
-                ..
             } => {
                 flush_assistant_text_segments_all(
                     &sess,
@@ -2735,6 +2779,18 @@ async fn try_run_sampling_request(
                     &mut assistant_message_stream_parsers,
                 )
                 .await;
+                if !response_id.is_empty() {
+                    sess.send_event(
+                        &turn_context,
+                        EventMsg::ModelResponseCompleted(ModelResponseCompletedEvent {
+                            turn_id: turn_context.sub_id.clone(),
+                            response_id: response_id.clone(),
+                            model: turn_context.model_info.slug.clone(),
+                            model_provider_id: turn_context.config.model_provider_id.clone(),
+                        }),
+                    )
+                    .await;
+                }
                 let budget_result = sess
                     .record_token_usage_info(&turn_context, token_usage.as_ref())
                     .await;

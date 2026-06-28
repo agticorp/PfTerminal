@@ -12,6 +12,15 @@ use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
 
+fn trace_thread_processor_timing(label: &str, start: std::time::Instant) {
+    if std::env::var_os("PFTERMINAL_TRACE_STREAM_TIMING").is_some() {
+        eprintln!(
+            "[pfterminal-thread-processor] {label} elapsed_ms={}",
+            start.elapsed().as_millis()
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 enum ThreadStartResponseKind {
     ThreadStart,
@@ -2647,6 +2656,9 @@ impl ThreadRequestProcessor {
         app_server_client_version: Option<String>,
         supports_openai_form_elicitation: bool,
     ) -> Result<(), JSONRPCErrorError> {
+        let resume_started_at = std::time::Instant::now();
+        trace_thread_processor_timing("thread_resume_start", resume_started_at);
+
         if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
             && self
                 .pending_thread_unloads
@@ -2684,6 +2696,7 @@ impl ThreadRequestProcessor {
                 return Ok(());
             }
         };
+        trace_thread_processor_timing("thread_resume_after_list_permit", resume_started_at);
         let stored_thread_from_running_probe = match self
             .resume_running_thread(
                 &request_id,
@@ -2700,6 +2713,7 @@ impl ThreadRequestProcessor {
                 return Ok(());
             }
         };
+        trace_thread_processor_timing("thread_resume_after_running_probe", resume_started_at);
 
         let ThreadResumeParams {
             thread_id,
@@ -2743,6 +2757,7 @@ impl ThreadRequestProcessor {
                 return Ok(());
             }
         };
+        trace_thread_processor_timing("thread_resume_after_history_load", resume_started_at);
 
         let history_cwd = thread_history.session_cwd();
         let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
@@ -2766,6 +2781,7 @@ impl ThreadRequestProcessor {
             &mut typesafe_overrides,
         )
         .await;
+        trace_thread_processor_timing("thread_resume_after_persisted_metadata", resume_started_at);
 
         // Derive a Config using the same logic as new conversation, honoring overrides if provided.
         let config = match self
@@ -2780,6 +2796,7 @@ impl ThreadRequestProcessor {
                 return Ok(());
             }
         };
+        trace_thread_processor_timing("thread_resume_after_config_load", resume_started_at);
 
         let response_history = thread_history.clone();
 
@@ -2800,6 +2817,10 @@ impl ThreadRequestProcessor {
                 session_configured,
                 ..
             }) => {
+                trace_thread_processor_timing(
+                    "thread_resume_after_resume_thread_with_history",
+                    resume_started_at,
+                );
                 if let Err(err) = Self::set_app_server_client_info(
                     codex_thread.as_ref(),
                     app_server_client_name,
@@ -2830,6 +2851,10 @@ impl ThreadRequestProcessor {
                     request_id.connection_id,
                     "thread",
                 );
+                trace_thread_processor_timing(
+                    "thread_resume_after_listener_attach",
+                    resume_started_at,
+                );
 
                 let mut thread = match self
                     .load_thread_from_resume_source_or_send_internal(
@@ -2850,6 +2875,10 @@ impl ThreadRequestProcessor {
                         return Ok(());
                     }
                 };
+                trace_thread_processor_timing(
+                    "thread_resume_after_response_thread_load",
+                    resume_started_at,
+                );
                 thread.thread_source = codex_thread
                     .config_snapshot()
                     .await
@@ -2859,6 +2888,10 @@ impl ThreadRequestProcessor {
                 self.thread_watch_manager
                     .upsert_thread(thread.clone())
                     .await;
+                trace_thread_processor_timing(
+                    "thread_resume_after_watch_upsert",
+                    resume_started_at,
+                );
 
                 let thread_status = self
                     .thread_watch_manager
@@ -2922,6 +2955,10 @@ impl ThreadRequestProcessor {
 
                 let connection_id = request_id.connection_id;
                 self.outgoing.send_response(request_id, response).await;
+                trace_thread_processor_timing(
+                    "thread_resume_after_send_response",
+                    resume_started_at,
+                );
                 // `excludeTurns` is explicitly the cheap resume path, so avoid
                 // rebuilding history only to attribute a replayed usage update.
                 if let Some(token_usage_thread) = token_usage_thread {

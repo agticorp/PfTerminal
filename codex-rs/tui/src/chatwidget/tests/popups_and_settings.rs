@@ -9,6 +9,7 @@ use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::PluginAvailability;
 use codex_features::Stage;
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
+use codex_model_provider_info::AMBIENT_KIMI_K2_7_CODE_MODEL;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 use codex_model_provider_info::BASETEN_DEFAULT_MODEL;
 use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
@@ -2646,7 +2647,7 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
         .try_list_models()
         .expect("model catalog should load");
     chat.open_all_models_popup(presets);
-    let popup = render_bottom_popup_with_height(&chat, /*width*/ 140, /*height*/ 28);
+    let popup = render_bottom_popup_with_height(&chat, /*width*/ 140, /*height*/ 36);
 
     assert!(
         popup.contains(AMBIENT_DEFAULT_MODEL),
@@ -2659,6 +2660,14 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
     assert!(
         popup.contains("Ambient's default GLM 5.2 coding model."),
         "expected Ambient model description in /model picker:\n{popup}"
+    );
+    assert!(
+        popup.contains(AMBIENT_KIMI_K2_7_CODE_MODEL),
+        "expected Ambient Kimi K2.7 Code in /model picker:\n{popup}"
+    );
+    assert!(
+        popup.contains("Ambient's Kimi K2.7 Code model."),
+        "expected Ambient Kimi description in /model picker:\n{popup}"
     );
     assert!(
         popup.contains(ZAI_DEFAULT_MODEL),
@@ -2684,13 +2693,25 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
         popup.contains("Baseten: GLM 5.2 - $1.50/M input, $0.30/M cached input, $4.50/M output."),
         "expected Baseten GLM price description in /model picker:\n{popup}"
     );
+    let (mut vercel_chat, _vercel_rx, _vercel_op_rx) =
+        make_chatwidget_manual(Some(VERCEL_DEFAULT_MODEL)).await;
+    vercel_chat.thread_id = Some(ThreadId::new());
+    let presets = vercel_chat
+        .model_catalog
+        .try_list_models()
+        .expect("model catalog should load");
+    vercel_chat.open_all_models_popup(presets);
+    let vercel_popup =
+        render_bottom_popup_with_height(&vercel_chat, /*width*/ 140, /*height*/ 28);
+
     assert!(
-        popup.contains(VERCEL_DEFAULT_MODEL),
-        "expected Vercel GLM 5.2 in /model picker:\n{popup}"
+        vercel_popup.contains(VERCEL_DEFAULT_MODEL),
+        "expected Vercel GLM 5.2 in /model picker:\n{vercel_popup}"
     );
     assert!(
-        popup.contains("Vercel: GLM 5.2 - $1.40/M input, $0.26/M cached input, $4.40/M output."),
-        "expected Vercel GLM price description in /model picker:\n{popup}"
+        vercel_popup
+            .contains("Vercel: GLM 5.2 - $1.40/M input, $0.26/M cached input, $4.40/M output."),
+        "expected Vercel GLM price description in /model picker:\n{vercel_popup}"
     );
 
     let (mut vercel_fast_chat, _vercel_fast_rx, _vercel_fast_op_rx) =
@@ -2783,7 +2804,7 @@ async fn model_picker_dismisses_after_selecting_openrouter_model_without_effort_
         .expect("model catalog should load");
     chat.open_all_models_popup(presets);
 
-    for _ in 0..5 {
+    for _ in 0..7 {
         chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     }
     let before = render_bottom_popup(&chat, /*width*/ 100);
@@ -2829,7 +2850,7 @@ async fn model_picker_opens_openrouter_reasoning_options_for_gemini() {
         .expect("model catalog should load");
     chat.open_all_models_popup(presets);
 
-    for _ in 0..9 {
+    for _ in 0..10 {
         chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     }
     let before = render_bottom_popup_with_height(&chat, /*width*/ 140, /*height*/ 32);

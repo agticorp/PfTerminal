@@ -3,6 +3,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use codex_api::Provider;
 use codex_api::SharedAuthProvider;
@@ -206,6 +207,7 @@ pub fn create_model_provider(
 struct ConfiguredModelProvider {
     info: ModelProviderInfo,
     auth_manager: Option<Arc<AuthManager>>,
+    cached_provider_env_auth: Arc<OnceLock<Option<CodexAuth>>>,
 }
 
 impl ConfiguredModelProvider {
@@ -214,7 +216,26 @@ impl ConfiguredModelProvider {
         Self {
             info: provider_info,
             auth_manager,
+            cached_provider_env_auth: Arc::new(OnceLock::new()),
         }
+    }
+
+    fn provider_env_auth(&self, provider_key_id: &str) -> Option<CodexAuth> {
+        if let Ok(api_key) = std::env::var(provider_key_id)
+            && !api_key.trim().is_empty()
+        {
+            return Some(CodexAuth::from_api_key(&api_key));
+        }
+
+        self.cached_provider_env_auth
+            .get_or_init(|| {
+                self.auth_manager
+                    .as_ref()
+                    .and_then(|auth_manager| auth_manager.provider_api_key(provider_key_id).ok())
+                    .flatten()
+                    .map(|api_key| CodexAuth::from_api_key(&api_key))
+            })
+            .clone()
     }
 }
 
@@ -305,11 +326,7 @@ impl ModelProvider for ConfiguredModelProvider {
             let auth_manager = self.auth_manager.as_ref()?;
 
             if let Some(provider_key_id) = self.info.env_key.as_deref() {
-                return auth_manager
-                    .provider_api_key(provider_key_id)
-                    .ok()
-                    .flatten()
-                    .map(|api_key| CodexAuth::from_api_key(&api_key));
+                return self.provider_env_auth(provider_key_id);
             }
 
             auth_manager.auth().await
@@ -399,7 +416,10 @@ impl ModelProvider for ConfiguredModelProvider {
 mod tests {
     use std::num::NonZeroU64;
 
+    use codex_login::AuthCredentialsStoreMode;
+    use codex_login::AuthKeyringBackendKind;
     use codex_login::auth::BedrockApiKeyAuth;
+    use codex_login::login_with_provider_api_key;
     use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
     use codex_model_provider_info::BASETEN_DEFAULT_MODEL;
     use codex_model_provider_info::ModelProviderAwsAuthInfo;
@@ -420,6 +440,30 @@ mod tests {
     use wiremock::matchers::path;
 
     use super::*;
+
+    struct EnvVarGuard {
+        key: String,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: impl Into<String>, value: &str) -> Self {
+            let key = key.into();
+            let previous = std::env::var(&key).ok();
+            // Tests use a unique variable name and restore it on drop.
+            unsafe { std::env::set_var(&key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(&self.key, value) },
+                None => unsafe { std::env::remove_var(&self.key) },
+            }
+        }
+    }
 
     fn provider_info_with_command_auth() -> ModelProviderInfo {
         ModelProviderInfo {
@@ -708,6 +752,45 @@ mod tests {
         );
 
         assert_eq!(provider.auth().await, Some(auth));
+    }
+
+    #[tokio::test]
+    async fn configured_provider_prefers_env_key_over_stored_provider_key() {
+        let env_key = format!("PFT_PROVIDER_ENV_PRECEDENCE_{}", std::process::id());
+        let codex_home = test_codex_home().join(&env_key);
+        std::fs::create_dir_all(&codex_home).expect("temp codex home should be created");
+        let _guard = EnvVarGuard::set(env_key.clone(), "env-provider-key");
+        login_with_provider_api_key(
+            &codex_home,
+            &env_key,
+            "stored-provider-key",
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )
+        .expect("stored provider key should be written");
+
+        let provider = create_model_provider(
+            ModelProviderInfo {
+                env_key: Some(env_key),
+                ..provider_for("https://example.test/v1".to_string())
+            },
+            Some(AuthManager::from_auth_for_testing_with_home(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+                codex_home,
+            )),
+        );
+
+        let auth = provider
+            .api_auth()
+            .await
+            .expect("provider auth should resolve");
+
+        assert_eq!(
+            auth.to_auth_headers()
+                .get(http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer env-provider-key")
+        );
     }
 
     #[test]

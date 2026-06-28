@@ -793,6 +793,8 @@ async fn skills_changed_notification_is_emitted_after_skill_change() -> Result<(
             ephemeral: None,
             session_start_source: None,
             thread_source: None,
+            spawn_agent_parent_thread_id: None,
+            spawn_agent_role: None,
             dynamic_tools: None,
             environments: None,
             selected_capability_roots: None,

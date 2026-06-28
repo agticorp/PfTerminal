@@ -1806,7 +1806,7 @@ async fn direct_six_orc_turn_reports_are_visible_to_claude_troll_context() {
         .spawn_context_for_user_pane(&troll_pane_id)
         .expect("Troll pane should receive spawn context");
     assert!(context.contains("Snaga [orc]; status=done"));
-    assert!(context.contains("Claude Code Ghash [orc] - Claude Plan; status=success"));
+    assert!(context.contains("Claude Code Ghash [orc] - Opus 4.8 Claude Plan; status=success"));
 }
 
 #[tokio::test]
@@ -2029,7 +2029,7 @@ async fn bound_claude_nazgul_context_auto_nests_orphans_under_single_claude_trol
         .spawn_context_for_user_pane("claude-nazgul")
         .expect("bound Claude pane should receive spawn context");
 
-    assert!(context.contains("Claude Code Burzum [troll] - Claude Plan; role=Troll"));
+    assert!(context.contains("Claude Code Burzum [troll] - Opus 4.8 Claude Plan; role=Troll"));
     assert!(context.contains("  - Snaga [orc]; status=idle"));
     assert!(!context.contains("Unassigned Orcs"));
 }
@@ -2088,7 +2088,7 @@ async fn claude_orc_completion_is_reported_to_parent_troll_context() {
         .spawn_context_for_user_pane(&troll_pane_id)
         .expect("Troll pane should receive spawn context");
     assert!(context.contains("Recent child reports delivered to this pane:"));
-    assert!(context.contains("Claude Code Snaga [orc] - Claude Plan; status=success"));
+    assert!(context.contains("Claude Code Snaga [orc] - Opus 4.8 Claude Plan; status=success"));
     assert!(context.contains("result=Implemented the mock website and npm run build passed."));
 }
 
@@ -2245,7 +2245,7 @@ async fn claude_orc_completion_is_reported_to_native_troll_context() {
 
     let context = app.spawn_agent_task_for_submission(troll_thread_id, "review child reports");
     assert!(context.contains("Recent child reports delivered to this pane:"));
-    assert!(context.contains("Claude Code Snaga [orc] - Claude Plan; status=success"));
+    assert!(context.contains("Claude Code Snaga [orc] - Opus 4.8 Claude Plan; status=success"));
     assert!(context.contains("result=Finished the latency benchmark table and saved the output."));
 }
 

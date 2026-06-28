@@ -7,6 +7,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -361,6 +362,7 @@ use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::McpServerRefreshConfig;
 use codex_protocol::protocol::ModelRerouteEvent;
 use codex_protocol::protocol::ModelRerouteReason;
+use codex_protocol::protocol::ModelResponseCompletedEvent;
 use codex_protocol::protocol::ModelVerification;
 use codex_protocol::protocol::ModelVerificationEvent;
 use codex_protocol::protocol::NetworkApprovalContext;
@@ -946,6 +948,15 @@ fn push_prompt_fragment(
 }
 
 impl Session {
+    fn trace_session_timing(label: &str, start: Instant) {
+        if std::env::var_os("PFTERMINAL_TRACE_STREAM_TIMING").is_some() {
+            eprintln!(
+                "[pfterminal-session] {label} elapsed_ms={}",
+                start.elapsed().as_millis()
+            );
+        }
+    }
+
     pub(crate) async fn app_server_client_metadata(&self) -> AppServerClientMetadata {
         let state = self.state.lock().await;
         AppServerClientMetadata {
@@ -1259,6 +1270,8 @@ impl Session {
     }
 
     async fn record_initial_history(&self, conversation_history: InitialHistory) {
+        let initial_history_started_at = Instant::now();
+        Self::trace_session_timing("record_initial_history_start", initial_history_started_at);
         let is_subagent = {
             let state = self.state.lock().await;
             state
@@ -1266,24 +1279,44 @@ impl Session {
                 .session_source
                 .is_non_root_agent()
         };
+        Self::trace_session_timing(
+            "record_initial_history_after_subagent_check",
+            initial_history_started_at,
+        );
         let has_prior_user_turns = initial_history_has_prior_user_turns(&conversation_history);
         {
             let mut state = self.state.lock().await;
             state.set_next_turn_is_first(!has_prior_user_turns);
         }
+        Self::trace_session_timing(
+            "record_initial_history_after_first_turn_state",
+            initial_history_started_at,
+        );
         match conversation_history {
             InitialHistory::New | InitialHistory::Cleared => {
                 // Defer initial context insertion until the first real turn starts so
                 // turn/start overrides can be merged before we write model-visible context.
                 self.set_previous_turn_settings(/*previous_turn_settings*/ None)
                     .await;
+                Self::trace_session_timing(
+                    "record_initial_history_new_done",
+                    initial_history_started_at,
+                );
             }
             InitialHistory::Resumed(resumed_history) => {
                 let turn_context = self.new_default_turn().await;
                 let rollout_items = resumed_history.history;
+                Self::trace_session_timing(
+                    "record_initial_history_resumed_after_default_turn",
+                    initial_history_started_at,
+                );
                 let previous_turn_settings = self
                     .apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
+                Self::trace_session_timing(
+                    "record_initial_history_resumed_after_reconstruction",
+                    initial_history_started_at,
+                );
 
                 // If resuming, warn when the last recorded model differs from the current one.
                 let curr: &str = turn_context.model_info.slug.as_str();
@@ -1305,23 +1338,45 @@ impl Session {
                     .await;
                 }
 
+                if let Some(event) =
+                    Self::last_model_response_completed_from_rollout(&rollout_items)
+                    && event.model == turn_context.model_info.slug.as_str()
+                    && event.model_provider_id == turn_context.config.model_provider_id.as_str()
+                {
+                    self.services
+                        .model_client()
+                        .seed_server_response_id(event.response_id);
+                }
+
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
                 if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
+                Self::trace_session_timing(
+                    "record_initial_history_resumed_after_token_seed",
+                    initial_history_started_at,
+                );
 
                 // Defer seeding the session's initial context until the first turn starts so
                 // turn/start overrides can be merged before we write to the rollout.
                 if !is_subagent {
                     let _ = self.flush_rollout().await;
                 }
+                Self::trace_session_timing(
+                    "record_initial_history_resumed_done",
+                    initial_history_started_at,
+                );
             }
             InitialHistory::Forked(rollout_items) => {
                 let turn_context = self.new_default_turn().await;
                 self.apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
+                Self::trace_session_timing(
+                    "record_initial_history_forked_after_reconstruction",
+                    initial_history_started_at,
+                );
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
@@ -1342,6 +1397,10 @@ impl Session {
                 if !is_subagent {
                     let _ = self.flush_rollout().await;
                 }
+                Self::trace_session_timing(
+                    "record_initial_history_forked_done",
+                    initial_history_started_at,
+                );
             }
         }
     }
@@ -1422,6 +1481,19 @@ impl Session {
     fn last_token_info_from_rollout(rollout_items: &[RolloutItem]) -> Option<TokenUsageInfo> {
         rollout_items.iter().rev().find_map(|item| match item {
             RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.info.clone(),
+            _ => None,
+        })
+    }
+
+    fn last_model_response_completed_from_rollout(
+        rollout_items: &[RolloutItem],
+    ) -> Option<ModelResponseCompletedEvent> {
+        rollout_items.iter().rev().find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ModelResponseCompleted(ev))
+                if !ev.response_id.is_empty() =>
+            {
+                Some(ev.clone())
+            }
             _ => None,
         })
     }

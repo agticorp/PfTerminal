@@ -120,6 +120,19 @@ wire_api = "chat"
 }
 
 #[test]
+fn test_deserialize_anthropic_wire_api() {
+    let provider_toml = r#"
+name = "Anthropic-compatible"
+base_url = "https://api.example.com/v1"
+env_key = "ANTHROPIC_API_KEY"
+wire_api = "anthropic"
+        "#;
+
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(provider.wire_api, WireApi::Anthropic);
+}
+
+#[test]
 fn test_deserialize_websocket_connect_timeout() {
     let provider_toml = r#"
 name = "OpenAI"
@@ -305,6 +318,7 @@ fn test_create_ambient_provider() {
         }
     );
     assert_eq!(AMBIENT_DEFAULT_MODEL, "zai-org/GLM-5.2-FP8");
+    assert_eq!(AMBIENT_KIMI_K2_7_CODE_MODEL, "moonshotai/kimi-k2.7-code");
 }
 
 #[test]
@@ -386,6 +400,22 @@ fn test_built_in_model_providers_include_zai() {
 }
 
 #[test]
+fn test_built_in_model_providers_include_zai_anthropic() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    let zai_anthropic = providers
+        .get(ZAI_ANTHROPIC_PROVIDER_ID)
+        .expect("Z.AI Anthropic provider should be built in");
+    assert_eq!(
+        zai_anthropic.base_url.as_deref(),
+        Some(ZAI_ANTHROPIC_BASE_URL)
+    );
+    assert_eq!(zai_anthropic.env_key.as_deref(), Some(ZAI_API_KEY_ENV_VAR));
+    assert_eq!(zai_anthropic.wire_api, WireApi::Anthropic);
+    assert!(!zai_anthropic.requires_openai_auth);
+}
+
+#[test]
 fn test_built_in_model_providers_include_openrouter() {
     let providers = built_in_model_providers(/*openai_base_url*/ None);
 
@@ -403,6 +433,25 @@ fn test_built_in_model_providers_include_openrouter() {
 }
 
 #[test]
+fn test_built_in_model_providers_include_openrouter_anthropic() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    let openrouter_anthropic = providers
+        .get(OPENROUTER_ANTHROPIC_PROVIDER_ID)
+        .expect("OpenRouter Anthropic provider should be built in");
+    assert_eq!(
+        openrouter_anthropic.base_url.as_deref(),
+        Some(OPENROUTER_BASE_URL)
+    );
+    assert_eq!(
+        openrouter_anthropic.env_key.as_deref(),
+        Some(OPENROUTER_API_KEY_ENV_VAR)
+    );
+    assert_eq!(openrouter_anthropic.wire_api, WireApi::Anthropic);
+    assert!(!openrouter_anthropic.requires_openai_auth);
+}
+
+#[test]
 fn test_built_in_model_providers_include_baseten() {
     let providers = built_in_model_providers(/*openai_base_url*/ None);
 
@@ -414,6 +463,25 @@ fn test_built_in_model_providers_include_baseten() {
     assert_eq!(baseten.env_key.as_deref(), Some(BASETEN_API_KEY_ENV_VAR));
     assert_eq!(baseten.wire_api, WireApi::Chat);
     assert!(!baseten.requires_openai_auth);
+}
+
+#[test]
+fn test_built_in_model_providers_include_baseten_anthropic() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    let baseten_anthropic = providers
+        .get(BASETEN_ANTHROPIC_PROVIDER_ID)
+        .expect("Baseten Anthropic provider should be built in");
+    assert_eq!(
+        baseten_anthropic.base_url.as_deref(),
+        Some(BASETEN_BASE_URL)
+    );
+    assert_eq!(
+        baseten_anthropic.env_key.as_deref(),
+        Some(BASETEN_API_KEY_ENV_VAR)
+    );
+    assert_eq!(baseten_anthropic.wire_api, WireApi::Anthropic);
+    assert!(!baseten_anthropic.requires_openai_auth);
 }
 
 #[test]
@@ -430,6 +498,27 @@ fn test_built_in_model_providers_include_vercel() {
     assert!(!vercel.requires_openai_auth);
     assert_eq!(VERCEL_DEFAULT_MODEL, "zai/glm-5.2");
     assert_eq!(VERCEL_GLM_5_2_FAST_MODEL, "zai/glm-5.2-fast");
+}
+
+#[test]
+fn test_built_in_model_providers_include_vercel_anthropic() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    for provider_id in [
+        VERCEL_ANTHROPIC_PROVIDER_ID,
+        VERCEL_ANTHROPIC_FAST_PROVIDER_ID,
+    ] {
+        let vercel_anthropic = providers
+            .get(provider_id)
+            .expect("Vercel Anthropic provider should be built in");
+        assert_eq!(vercel_anthropic.base_url.as_deref(), Some(VERCEL_BASE_URL));
+        assert_eq!(
+            vercel_anthropic.env_key.as_deref(),
+            Some(VERCEL_API_KEY_ENV_VAR)
+        );
+        assert_eq!(vercel_anthropic.wire_api, WireApi::Anthropic);
+        assert!(!vercel_anthropic.requires_openai_auth);
+    }
 }
 
 #[test]

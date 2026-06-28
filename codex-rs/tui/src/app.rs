@@ -514,7 +514,21 @@ fn resume_hint_for_resumable_thread(
     rollout_path: Option<&Path>,
 ) -> Option<String> {
     let thread = resumable_thread(thread_id, thread_name, rollout_path)?;
+    resume_hint_for_thread(&thread)
+}
+
+fn resume_hint_for_thread(thread: &ResumableThread) -> Option<String> {
     codex_utils_cli::resume_hint(thread.thread_name.as_deref(), Some(thread.thread_id))
+}
+
+fn resume_hint_for_pane_layout_thread(
+    codex_home: &Path,
+    thread_id: Option<ThreadId>,
+) -> Option<String> {
+    let thread_id = thread_id?;
+    let thread_id_text = thread_id.to_string();
+    crate::claude_panes::load_pane_layout(codex_home, Some(&thread_id_text))?;
+    codex_utils_cli::resume_hint(None, Some(thread_id))
 }
 
 fn rollout_path_is_resumable(rollout_path: &Path) -> bool {
@@ -773,6 +787,27 @@ fn active_turn_interrupt_race(error: &TypedRequestError) -> Option<String> {
 }
 
 impl App {
+    fn exit_resumable_thread(&self) -> Option<ResumableThread> {
+        let active_rollout_path = self.chat_widget.rollout_path();
+        if let Some(thread) = resumable_thread(
+            self.chat_widget.thread_id(),
+            self.chat_widget.thread_name(),
+            active_rollout_path.as_deref(),
+        ) {
+            return Some(thread);
+        }
+
+        let primary_session = self.primary_session_configured.as_ref()?;
+        if self.primary_thread_id != Some(primary_session.thread_id) {
+            return None;
+        }
+        resumable_thread(
+            Some(primary_session.thread_id),
+            primary_session.thread_name.clone(),
+            primary_session.rollout_path.as_deref(),
+        )
+    }
+
     pub fn chatwidget_init_for_forked_or_resumed_thread(
         &self,
         tui: &mut tui::Tui,
@@ -923,10 +958,21 @@ impl App {
         let thread_and_widget_started_at = Instant::now();
         let pending_startup_thread_start = matches!(
             &session_selection,
-            SessionSelection::StartFresh | SessionSelection::Exit
+            SessionSelection::StartFresh
+                | SessionSelection::ResumePanesOnly { .. }
+                | SessionSelection::Exit
         );
+        let restore_pane_layout_for_thread_id = match &session_selection {
+            SessionSelection::Resume(target_session) => Some(target_session.thread_id.to_string()),
+            SessionSelection::ResumePanesOnly { codex_thread_id } => Some(codex_thread_id.clone()),
+            SessionSelection::Fork(_) | SessionSelection::StartFresh | SessionSelection::Exit => {
+                None
+            }
+        };
         let (mut chat_widget, initial_started_thread) = match session_selection {
-            SessionSelection::StartFresh | SessionSelection::Exit => {
+            SessionSelection::StartFresh
+            | SessionSelection::ResumePanesOnly { .. }
+            | SessionSelection::Exit => {
                 spawn_startup_thread_start(&app_server, config.clone(), app_event_tx.clone());
                 // Count a startup tooltip once the initial chat widget can render it.
                 let startup_tooltip_override =
@@ -1053,6 +1099,40 @@ See the PFTerminal keymap documentation for supported actions and examples."
         #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
+        let restored_pane_layout =
+            restore_pane_layout_for_thread_id
+                .as_deref()
+                .and_then(|thread_id| {
+                    crate::claude_panes::load_pane_layout(
+                        config.codex_home.as_ref(),
+                        Some(thread_id),
+                    )
+                });
+        let restored_spawn_parent_by_node = restored_pane_layout
+            .as_ref()
+            .map(|layout| {
+                layout
+                    .spawn_parent_by_node
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let restored_claude_panes = crate::claude_panes::ClaudePaneRegistry::restore_from_disk(
+            config.codex_home.as_ref(),
+            restored_pane_layout.as_ref(),
+        );
+        let restored_spawn_nazgul_pane_id = restored_pane_layout
+            .as_ref()
+            .and_then(|layout| layout.spawn_nazgul_pane_id.clone())
+            .filter(|pane_id| {
+                pane_id == crate::claude_panes::CODEX_MAIN_PANE_ID
+                    || restored_claude_panes
+                        .panes()
+                        .iter()
+                        .any(|pane| pane.id == *pane_id)
+            });
+
         let mut app = Self {
             model_catalog,
             session_telemetry: session_telemetry.clone(),
@@ -1094,12 +1174,12 @@ See the PFTerminal keymap documentation for supported actions and examples."
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             spawn_parent_by_thread: HashMap::new(),
-            spawn_parent_by_node: HashMap::new(),
+            spawn_parent_by_node: restored_spawn_parent_by_node,
             spawn_status_by_thread: HashMap::new(),
             spawn_parent_reports_by_node: HashMap::new(),
-            spawn_nazgul_pane_id: None,
+            spawn_nazgul_pane_id: restored_spawn_nazgul_pane_id,
             side_threads: HashMap::new(),
-            claude_panes: crate::claude_panes::ClaudePaneRegistry::new(),
+            claude_panes: restored_claude_panes,
             active_thread_id: None,
             active_thread_rx: None,
             primary_thread_id: None,
@@ -1114,6 +1194,8 @@ See the PFTerminal keymap documentation for supported actions and examples."
         if let Some(entry) = startup_hooks_browser {
             app.chat_widget.open_hooks_browser(entry);
         }
+        app.seed_restored_claude_pane_transcripts();
+        app.show_restored_active_claude_pane();
         let initial_session_started_at = Instant::now();
         if let Some(started) = initial_started_thread {
             let thread_id = started.session.thread_id;
@@ -1314,12 +1396,17 @@ See the PFTerminal keymap documentation for supported actions and examples."
                 return Err(err);
             }
         };
-        let thread_id = app.chat_widget.thread_id().or(app.primary_thread_id);
-        let resume_hint = resume_hint_for_resumable_thread(
-            thread_id,
-            app.chat_widget.thread_name(),
-            app.chat_widget.rollout_path().as_deref(),
-        );
+        let exit_resumable_thread = app.exit_resumable_thread();
+        let thread_id = exit_resumable_thread
+            .as_ref()
+            .map(|thread| thread.thread_id)
+            .or_else(|| app.chat_widget.thread_id().or(app.primary_thread_id));
+        let resume_hint = exit_resumable_thread
+            .as_ref()
+            .and_then(resume_hint_for_thread)
+            .or_else(|| {
+                resume_hint_for_pane_layout_thread(app.config.codex_home.as_ref(), thread_id)
+            });
         Ok(AppExitInfo {
             token_usage: app.token_usage(),
             thread_id,

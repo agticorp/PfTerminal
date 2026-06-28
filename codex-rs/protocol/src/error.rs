@@ -196,7 +196,6 @@ impl CodexErr {
             CodexErr::Stream(..)
             | CodexErr::Timeout
             | CodexErr::RequestTimeout
-            | CodexErr::UnexpectedStatus(_)
             | CodexErr::ResponseStreamFailed(_)
             | CodexErr::ConnectionFailed(_)
             | CodexErr::InternalServerError
@@ -204,6 +203,7 @@ impl CodexErr {
             | CodexErr::Io(_)
             | CodexErr::Json(_)
             | CodexErr::TokioJoin(_) => true,
+            CodexErr::UnexpectedStatus(err) => is_retryable_http_status(err.status),
             #[cfg(target_os = "linux")]
             CodexErr::LandlockRuleset(_) | CodexErr::LandlockPathFd(_) => false,
         }
@@ -268,6 +268,14 @@ impl CodexErr {
         };
         http_status_code.as_ref().map(StatusCode::as_u16)
     }
+}
+
+fn is_retryable_http_status(status: StatusCode) -> bool {
+    status.is_server_error()
+        || matches!(
+            status,
+            StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+        )
 }
 
 #[derive(Debug)]

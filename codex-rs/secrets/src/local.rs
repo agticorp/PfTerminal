@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::compiler_fence;
 use std::time::SystemTime;
@@ -74,6 +75,7 @@ pub struct LocalSecretsBackend {
     codex_home: PathBuf,
     keyring_store: Arc<dyn KeyringStore>,
     namespace: LocalSecretsNamespace,
+    cached_file: Arc<Mutex<Option<SecretsFile>>>,
 }
 
 impl LocalSecretsBackend {
@@ -100,6 +102,7 @@ impl LocalSecretsBackend {
             codex_home,
             keyring_store,
             namespace,
+            cached_file: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -159,33 +162,47 @@ impl LocalSecretsBackend {
     }
 
     fn load_file(&self) -> Result<SecretsFile> {
-        let path = self.secrets_path();
-        if !path.exists() {
-            return Ok(SecretsFile::new_empty());
+        if let Ok(cache) = self.cached_file.lock()
+            && let Some(file) = cache.as_ref()
+            && file.version <= SECRETS_VERSION
+        {
+            return Ok(file.clone());
         }
-        set_private_file_permissions(&path)
-            .map_err(|err| anyhow::anyhow!(err.message()))
-            .with_context(|| format!("failed to harden permissions on {}", path.display()))?;
 
-        let ciphertext = fs::read(&path)
-            .with_context(|| format!("failed to read secrets file at {}", path.display()))?;
-        let passphrase = self.load_or_create_passphrase()?;
-        let plaintext = decrypt_with_passphrase(&ciphertext, &passphrase)?;
-        let mut parsed: SecretsFile = serde_json::from_slice(&plaintext).with_context(|| {
-            format!(
-                "failed to deserialize decrypted secrets file at {}",
-                path.display()
-            )
-        })?;
-        if parsed.version == 0 {
-            parsed.version = SECRETS_VERSION;
+        let path = self.secrets_path();
+        let parsed = if !path.exists() {
+            SecretsFile::new_empty()
+        } else {
+            set_private_file_permissions(&path)
+                .map_err(|err| anyhow::anyhow!(err.message()))
+                .with_context(|| format!("failed to harden permissions on {}", path.display()))?;
+
+            let ciphertext = fs::read(&path)
+                .with_context(|| format!("failed to read secrets file at {}", path.display()))?;
+            let passphrase = self.load_or_create_passphrase()?;
+            let plaintext = decrypt_with_passphrase(&ciphertext, &passphrase)?;
+            let mut parsed: SecretsFile =
+                serde_json::from_slice(&plaintext).with_context(|| {
+                    format!(
+                        "failed to deserialize decrypted secrets file at {}",
+                        path.display()
+                    )
+                })?;
+            if parsed.version == 0 {
+                parsed.version = SECRETS_VERSION;
+            }
+            anyhow::ensure!(
+                parsed.version <= SECRETS_VERSION,
+                "secrets file version {} is newer than supported version {}",
+                parsed.version,
+                SECRETS_VERSION
+            );
+            parsed
+        };
+
+        if let Ok(mut cache) = self.cached_file.lock() {
+            *cache = Some(parsed.clone());
         }
-        anyhow::ensure!(
-            parsed.version <= SECRETS_VERSION,
-            "secrets file version {} is newer than supported version {}",
-            parsed.version,
-            SECRETS_VERSION
-        );
         Ok(parsed)
     }
 
@@ -202,6 +219,11 @@ impl LocalSecretsBackend {
         let ciphertext = encrypt_with_passphrase(&plaintext, &passphrase)?;
         let path = self.secrets_path();
         write_file_atomically(&path, &ciphertext)?;
+        if file.version <= SECRETS_VERSION
+            && let Ok(mut cache) = self.cached_file.lock()
+        {
+            *cache = Some(file.clone());
+        }
         Ok(())
     }
 
@@ -313,9 +335,22 @@ impl LocalFallbackKeyringStore {
 
 impl KeyringStore for LocalFallbackKeyringStore {
     fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError> {
+        match self.load_fallback(service, account) {
+            Ok(Some(value)) => return Ok(Some(value)),
+            Ok(None) => {}
+            Err(err) => {
+                warn!(
+                    service,
+                    account,
+                    error = %err,
+                    "local file-backed keyring fallback unavailable; trying OS keyring"
+                );
+            }
+        }
+
         match self.primary.load(service, account) {
             Ok(Some(value)) => Ok(Some(value)),
-            Ok(None) => self.load_fallback(service, account),
+            Ok(None) => Ok(None),
             Err(err) => {
                 warn!(
                     service,

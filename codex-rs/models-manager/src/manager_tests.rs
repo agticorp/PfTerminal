@@ -460,6 +460,7 @@ async fn chatgpt_cache_does_not_evict_pfterminal_provider_models() {
 
     assert!(slugs.contains(&"gpt-5.5"));
     assert!(slugs.contains(&"zai-org/GLM-5.2-FP8"));
+    assert!(slugs.contains(&"moonshotai/kimi-k2.7-code"));
     assert!(slugs.contains(&"glm-5.2"));
     assert!(slugs.contains(&"z-ai/glm-5.2"));
     assert!(slugs.contains(&"zai-org/GLM-5.2"));
@@ -1025,6 +1026,35 @@ fn bundled_models_json_contains_ambient_models() {
             .contains("Never run recursive grep over a repo root")
     );
     assert!(!ambient_default.used_fallback_model_metadata);
+
+    let ambient_kimi = response
+        .models
+        .iter()
+        .find(|model| model.slug == "moonshotai/kimi-k2.7-code")
+        .expect("bundled models.json should include Ambient Kimi K2.7 Code");
+
+    assert_eq!(ambient_kimi.display_name, "Ambient Kimi K2.7 Code");
+    assert_eq!(ambient_kimi.context_window, Some(262_144));
+    assert_eq!(
+        ambient_kimi.default_reasoning_level,
+        Some(ReasoningEffort::Medium)
+    );
+    assert_eq!(
+        ambient_kimi
+            .supported_reasoning_levels
+            .iter()
+            .map(|level| level.effort.clone())
+            .collect::<Vec<_>>(),
+        vec![ReasoningEffort::Medium, ReasoningEffort::XHigh]
+    );
+    assert_eq!(ambient_kimi.visibility, ModelVisibility::List);
+    assert!(ambient_kimi.supports_parallel_tool_calls);
+    assert!(
+        ambient_kimi
+            .base_instructions
+            .contains("Never run recursive grep over a repo root")
+    );
+    assert!(!ambient_kimi.used_fallback_model_metadata);
 
     let ambient = response
         .models

@@ -537,6 +537,44 @@ fn unexpected_status_includes_identity_auth_details() {
 }
 
 #[test]
+fn unexpected_status_payment_required_is_not_retryable() {
+    let err = CodexErr::UnexpectedStatus(UnexpectedResponseError {
+        status: StatusCode::PAYMENT_REQUIRED,
+        body: "payment required".to_string(),
+        url: None,
+        cf_ray: None,
+        request_id: None,
+        identity_authorization_error: None,
+        identity_error_code: None,
+    });
+
+    assert!(!err.is_retryable());
+}
+
+#[test]
+fn unexpected_status_transient_statuses_are_retryable() {
+    for status in [
+        StatusCode::REQUEST_TIMEOUT,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::BAD_GATEWAY,
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::GATEWAY_TIMEOUT,
+    ] {
+        let err = CodexErr::UnexpectedStatus(UnexpectedResponseError {
+            status,
+            body: String::new(),
+            url: None,
+            cf_ray: None,
+            request_id: None,
+            identity_authorization_error: None,
+            identity_error_code: None,
+        });
+
+        assert!(err.is_retryable(), "{status} should be retryable");
+    }
+}
+
+#[test]
 fn usage_limit_reached_includes_hours_and_minutes() {
     let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resets_at = base + ChronoDuration::hours(3) + ChronoDuration::minutes(32);

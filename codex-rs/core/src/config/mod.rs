@@ -77,16 +77,23 @@ use codex_mcp::McpServerRegistration;
 use codex_mcp::ResolvedMcpCatalog;
 use codex_memories_read::memory_root;
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
+use codex_model_provider_info::AMBIENT_KIMI_K2_7_CODE_MODEL;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
+use codex_model_provider_info::BASETEN_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::BASETEN_DEFAULT_MODEL;
 use codex_model_provider_info::BASETEN_PROVIDER_ID;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
+use codex_model_provider_info::OPENROUTER_ANTHROPIC_PROVIDER_ID;
+use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
 use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_ANTHROPIC_FAST_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::VERCEL_DEFAULT_MODEL;
 use codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL;
 use codex_model_provider_info::VERCEL_PROVIDER_ID;
+use codex_model_provider_info::ZAI_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
@@ -2445,6 +2452,7 @@ fn resolve_model_for_provider(model: Option<String>, model_provider_id: &str) ->
         AMBIENT_PROVIDER_ID => match model {
             Some(model)
                 if model.trim().starts_with("ambient/")
+                    || model.trim() == AMBIENT_KIMI_K2_7_CODE_MODEL
                     || (model.trim().starts_with("zai-org/")
                         && model.trim() != BASETEN_DEFAULT_MODEL) =>
             {
@@ -2452,15 +2460,19 @@ fn resolve_model_for_provider(model: Option<String>, model_provider_id: &str) ->
             }
             _ => Some(AMBIENT_DEFAULT_MODEL.to_string()),
         },
-        ZAI_PROVIDER_ID => match model {
+        ZAI_PROVIDER_ID | ZAI_ANTHROPIC_PROVIDER_ID => match model {
             Some(model) if model.trim().starts_with("glm-") => Some(model),
             _ => Some(ZAI_DEFAULT_MODEL.to_string()),
         },
-        BASETEN_PROVIDER_ID => match model {
+        OPENROUTER_PROVIDER_ID | OPENROUTER_ANTHROPIC_PROVIDER_ID => match model {
+            Some(model) if model.trim().starts_with("z-ai/") => Some(model),
+            _ => Some(OPENROUTER_DEFAULT_MODEL.to_string()),
+        },
+        BASETEN_PROVIDER_ID | BASETEN_ANTHROPIC_PROVIDER_ID => match model {
             Some(model) if model.trim() == BASETEN_DEFAULT_MODEL => Some(model),
             _ => Some(BASETEN_DEFAULT_MODEL.to_string()),
         },
-        VERCEL_PROVIDER_ID => match model {
+        VERCEL_PROVIDER_ID | VERCEL_ANTHROPIC_PROVIDER_ID => match model {
             Some(model)
                 if matches!(
                     model.trim(),
@@ -2470,6 +2482,17 @@ fn resolve_model_for_provider(model: Option<String>, model_provider_id: &str) ->
                 Some(model)
             }
             _ => Some(VERCEL_DEFAULT_MODEL.to_string()),
+        },
+        VERCEL_ANTHROPIC_FAST_PROVIDER_ID => match model {
+            Some(model)
+                if matches!(
+                    model.trim(),
+                    VERCEL_DEFAULT_MODEL | VERCEL_GLM_5_2_FAST_MODEL
+                ) =>
+            {
+                Some(model)
+            }
+            _ => Some(VERCEL_GLM_5_2_FAST_MODEL.to_string()),
         },
         _ => model,
     }
@@ -2484,7 +2507,7 @@ fn normalize_ambient_reasoning_effort(effort: ReasoningEffort) -> ReasoningEffor
                 "deep" | "max" | "xhigh" | "extra_high" | "extra-high"
             ) =>
         {
-            ReasoningEffort::XHigh
+            ReasoningEffort::Custom(value)
         }
         _ => ReasoningEffort::Medium,
     }
@@ -3516,10 +3539,19 @@ impl Config {
             .filter(|values| !values.is_empty());
 
         let ambient_provider_selected = model_provider_id == AMBIENT_PROVIDER_ID;
-        let baseten_provider_selected = model_provider_id == BASETEN_PROVIDER_ID;
-        let openrouter_provider_selected = model_provider_id == OPENROUTER_PROVIDER_ID;
-        let vercel_provider_selected = model_provider_id == VERCEL_PROVIDER_ID;
-        let zai_provider_selected = model_provider_id == ZAI_PROVIDER_ID;
+        let baseten_provider_selected =
+            matches!(model_provider_id.as_str(), BASETEN_PROVIDER_ID | BASETEN_ANTHROPIC_PROVIDER_ID);
+        let openrouter_provider_selected = matches!(
+            model_provider_id.as_str(),
+            OPENROUTER_PROVIDER_ID | OPENROUTER_ANTHROPIC_PROVIDER_ID
+        );
+        let vercel_provider_selected = matches!(
+            model_provider_id.as_str(),
+            VERCEL_PROVIDER_ID | VERCEL_ANTHROPIC_PROVIDER_ID | VERCEL_ANTHROPIC_FAST_PROVIDER_ID
+        );
+        let zai_chat_provider_selected = model_provider_id == ZAI_PROVIDER_ID;
+        let zai_provider_selected =
+            matches!(model_provider_id.as_str(), ZAI_PROVIDER_ID | ZAI_ANTHROPIC_PROVIDER_ID);
         let forced_login_method = cfg
             .forced_login_method
             .or_else(|| {
@@ -3532,7 +3564,7 @@ impl Config {
             });
 
         let model = resolve_model_for_provider(model.or(cfg.model), &model_provider_id);
-        let model_reasoning_effort = if ambient_provider_selected || zai_provider_selected {
+        let model_reasoning_effort = if ambient_provider_selected || zai_chat_provider_selected {
             cfg.model_reasoning_effort
                 .map(normalize_ambient_reasoning_effort)
         } else {

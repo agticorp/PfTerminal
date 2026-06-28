@@ -97,6 +97,7 @@ impl SessionTarget {
 pub enum SessionSelection {
     StartFresh,
     Resume(SessionTarget),
+    ResumePanesOnly { codex_thread_id: String },
     Fork(SessionTarget),
     Exit,
 }

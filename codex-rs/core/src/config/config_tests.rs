@@ -66,17 +66,23 @@ use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
 use codex_features::FeaturesToml;
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
+use codex_model_provider_info::AMBIENT_KIMI_K2_7_CODE_MODEL;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
+use codex_model_provider_info::BASETEN_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::BASETEN_DEFAULT_MODEL;
 use codex_model_provider_info::BASETEN_PROVIDER_ID;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
+use codex_model_provider_info::OPENROUTER_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
 use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_ANTHROPIC_FAST_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::VERCEL_DEFAULT_MODEL;
 use codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL;
 use codex_model_provider_info::VERCEL_PROVIDER_ID;
 use codex_model_provider_info::WireApi;
+use codex_model_provider_info::ZAI_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_models_manager::bundled_models_response;
@@ -774,6 +780,31 @@ model = "z-ai/glm-5.2"
 }
 
 #[tokio::test]
+async fn load_config_openrouter_anthropic_provider_uses_api_login() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "openrouter-anthropic"
+model = "gpt-5.5"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, OPENROUTER_ANTHROPIC_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(OPENROUTER_DEFAULT_MODEL));
+    assert_eq!(config.model_provider.wire_api, WireApi::Anthropic);
+    assert_eq!(config.forced_login_method, Some(ForcedLoginMethod::Api));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_baseten_provider_uses_api_login() -> std::io::Result<()> {
     let cfg = toml::from_str::<ConfigToml>(
         r#"
@@ -799,6 +830,31 @@ model = "zai-org/GLM-5.2"
 }
 
 #[tokio::test]
+async fn load_config_baseten_anthropic_provider_uses_api_login() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "baseten-anthropic"
+model = "zai-org/GLM-5.2"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, BASETEN_ANTHROPIC_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(BASETEN_DEFAULT_MODEL));
+    assert_eq!(config.model_provider.wire_api, WireApi::Anthropic);
+    assert_eq!(config.forced_login_method, Some(ForcedLoginMethod::Api));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_vercel_provider_uses_api_login() -> std::io::Result<()> {
     let cfg = toml::from_str::<ConfigToml>(
         r#"
@@ -818,6 +874,56 @@ model = "zai/glm-5.2-fast"
     assert_eq!(config.model_provider_id, VERCEL_PROVIDER_ID);
     assert_eq!(config.model.as_deref(), Some(VERCEL_GLM_5_2_FAST_MODEL));
     assert_eq!(config.model_provider.wire_api, WireApi::Responses);
+    assert_eq!(config.forced_login_method, Some(ForcedLoginMethod::Api));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_vercel_anthropic_provider_uses_api_login() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "vercel-anthropic"
+model = "zai/glm-5.2-fast"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, VERCEL_ANTHROPIC_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(VERCEL_GLM_5_2_FAST_MODEL));
+    assert_eq!(config.model_provider.wire_api, WireApi::Anthropic);
+    assert_eq!(config.forced_login_method, Some(ForcedLoginMethod::Api));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_vercel_anthropic_fast_defaults_to_fast_model() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "vercel-anthropic-fast"
+model = "gpt-5.5"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, VERCEL_ANTHROPIC_FAST_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(VERCEL_GLM_5_2_FAST_MODEL));
+    assert_eq!(config.model_provider.wire_api, WireApi::Anthropic);
     assert_eq!(config.forced_login_method, Some(ForcedLoginMethod::Api));
 
     Ok(())
@@ -874,6 +980,31 @@ model = "glm-5.2"
 }
 
 #[tokio::test]
+async fn load_config_zai_anthropic_provider_uses_api_login() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "zai-anthropic"
+model = "glm-5.2"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, ZAI_ANTHROPIC_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(ZAI_DEFAULT_MODEL));
+    assert_eq!(config.model_provider.wire_api, WireApi::Anthropic);
+    assert_eq!(config.forced_login_method, Some(ForcedLoginMethod::Api));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_ambient_provider_replaces_stale_openai_model() -> std::io::Result<()> {
     let cfg = toml::from_str::<ConfigToml>(
         r#"
@@ -892,6 +1023,30 @@ model = "gpt-5.5"
 
     assert_eq!(config.model_provider_id, AMBIENT_PROVIDER_ID);
     assert_eq!(config.model.as_deref(), Some(AMBIENT_DEFAULT_MODEL));
+    assert_eq!(config.model_provider.wire_api, WireApi::Chat);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_ambient_provider_keeps_kimi_code_model() -> std::io::Result<()> {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "ambient"
+model = "moonshotai/kimi-k2.7-code"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, AMBIENT_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(AMBIENT_KIMI_K2_7_CODE_MODEL));
     assert_eq!(config.model_provider.wire_api, WireApi::Chat);
 
     Ok(())
@@ -963,6 +1118,33 @@ model_reasoning_effort = "xhigh"
 
     assert_eq!(config.model_provider_id, AMBIENT_PROVIDER_ID);
     assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::XHigh));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_ambient_provider_preserves_custom_max_reasoning_effort() -> std::io::Result<()>
+{
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "ambient"
+model_reasoning_effort = "max"
+"#,
+    )
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, AMBIENT_PROVIDER_ID);
+    assert_eq!(
+        config.model_reasoning_effort,
+        Some(ReasoningEffort::Custom("max".to_string()))
+    );
 
     Ok(())
 }

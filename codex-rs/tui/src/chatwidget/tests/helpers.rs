@@ -148,6 +148,7 @@ fn set_config_provider_for_test_model(config: &mut Config, model: &str) {
             codex_model_provider_info::ModelProviderInfo::create_baseten_provider(),
         ))
     } else if trimmed == codex_model_provider_info::AMBIENT_DEFAULT_MODEL
+        || trimmed == codex_model_provider_info::AMBIENT_KIMI_K2_7_CODE_MODEL
         || trimmed.starts_with("ambient/")
         || trimmed.starts_with("zai-org/")
     {

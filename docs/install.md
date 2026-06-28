@@ -70,6 +70,7 @@ The workflow builds and smoke-tests these package archives:
 ```text
 pfterminal-package-aarch64-apple-darwin.tar.gz
 pfterminal-package-x86_64-apple-darwin.tar.gz
+pfterminal-package-aarch64-unknown-linux-musl.tar.gz
 pfterminal-package-x86_64-unknown-linux-gnu.tar.gz
 pfterminal-package_SHA256SUMS
 ```

@@ -38,6 +38,7 @@ use tracing::instrument;
 use tracing::trace;
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
+const SERIALIZED_TOOL_TEXT_PROBE_CHARS: usize = 96;
 
 pub struct ChatCompletionsClient<T: HttpTransport> {
     session: EndpointSession<T>,
@@ -595,12 +596,20 @@ fn is_potential_serialized_tool_text(text: &str) -> bool {
         return false;
     }
 
-    let probe: String = trimmed.chars().take(256).collect();
+    let probe: String = trimmed
+        .chars()
+        .take(SERIALIZED_TOOL_TEXT_PROBE_CHARS)
+        .collect();
     if probe.contains("\"function_call\"") || probe.contains("\"custom_tool_call\"") {
         return true;
     }
+    if probe.contains("\"call_id\"")
+        || (probe.contains("\"arguments\"") && probe.contains("\"name\""))
+    {
+        return true;
+    }
 
-    probe.len() < 256
+    probe.len() < SERIALIZED_TOOL_TEXT_PROBE_CHARS
 }
 
 fn parse_serialized_function_call_text(text: &str) -> Result<Option<ResponseItem>, String> {
@@ -973,6 +982,33 @@ mod tests {
             Ok(ResponseEvent::Completed { response_id, .. }) if response_id == "chatcmpl-serialized"
         );
         assert_eq!(events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn flushes_ordinary_json_text_after_short_probe() {
+        let content = format!(
+            "{{\"status\":\"{}\",\"message\":\"not a serialized tool call\"}}",
+            "a".repeat(SERIALIZED_TOOL_TEXT_PROBE_CHARS)
+        );
+        let event = content_event("chatcmpl-json-text", &content);
+
+        let events = collect_events(&[event.as_slice(), b"data: [DONE]\n\n"]).await;
+
+        assert_matches!(
+            &events[0],
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { .. }))
+        );
+        assert_matches!(&events[1], Ok(ResponseEvent::OutputTextDelta(delta)) if delta == &content);
+        assert_matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { content: final_content, .. }))
+                if final_content == &vec![ContentItem::OutputText { text: content }]
+        );
+        assert_matches!(
+            &events[3],
+            Ok(ResponseEvent::Completed { response_id, .. }) if response_id == "chatcmpl-json-text"
+        );
+        assert_eq!(events.len(), 4);
     }
 
     #[tokio::test]

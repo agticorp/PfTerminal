@@ -192,6 +192,7 @@ impl From<VerbosityConfig> for OpenAiVerbosity {
 pub struct ResponsesApiRequest {
     pub model: String,
     pub instructions: String,
+    pub previous_response_id: Option<String>,
     pub input: Vec<ResponseItem>,
     pub tools: Vec<serde_json::Value>,
     pub tool_choice: String,
@@ -226,6 +227,7 @@ impl Serialize for ResponsesApiRequest {
     {
         let mut field_count = 8;
         field_count += usize::from(!self.instructions.is_empty());
+        field_count += usize::from(self.previous_response_id.is_some());
         field_count += usize::from(self.reasoning.is_some());
         field_count += usize::from(self.service_tier.is_some());
         field_count += usize::from(self.prompt_cache_key.is_some());
@@ -240,6 +242,9 @@ impl Serialize for ResponsesApiRequest {
         state.serialize_field("model", &self.model)?;
         if !self.instructions.is_empty() {
             state.serialize_field("instructions", &self.instructions)?;
+        }
+        if let Some(previous_response_id) = &self.previous_response_id {
+            state.serialize_field("previous_response_id", previous_response_id)?;
         }
         if self.uses_ambient_input_format() {
             state.serialize_field("input", &ambient_input_from_response_items(&self.input))?;
@@ -396,6 +401,8 @@ pub struct ChatCompletionsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emit_usage: Option<bool>,
@@ -413,14 +420,80 @@ pub struct ChatStreamOptions {
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct AnthropicMessagesRequest {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system: Vec<Value>,
+    pub messages: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
+    pub stream: bool,
+    pub max_tokens: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Value>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct ChatMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<ChatMessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ChatToolCall>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum ChatMessageContent {
+    Text(String),
+    Parts(Vec<ChatContentPart>),
+}
+
+impl ChatMessageContent {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text(text.into())
+    }
+
+    pub fn cache_control_text(text: impl Into<String>) -> Self {
+        Self::Parts(vec![ChatContentPart::cache_control_text(text)])
+    }
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ChatContentPart {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<ChatCacheControl>,
+}
+
+impl ChatContentPart {
+    pub fn cache_control_text(text: impl Into<String>) -> Self {
+        Self {
+            kind: "text".to_string(),
+            text: text.into(),
+            cache_control: Some(ChatCacheControl::ephemeral()),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ChatCacheControl {
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+impl ChatCacheControl {
+    pub fn ephemeral() -> Self {
+        Self {
+            kind: "ephemeral".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -442,7 +515,7 @@ impl From<&ResponsesApiRequest> for ResponseCreateWsRequest {
         Self {
             model: request.model.clone(),
             instructions: request.instructions.clone(),
-            previous_response_id: None,
+            previous_response_id: request.previous_response_id.clone(),
             input: request.input.clone(),
             tools: request.tools.clone(),
             tool_choice: request.tool_choice.clone(),

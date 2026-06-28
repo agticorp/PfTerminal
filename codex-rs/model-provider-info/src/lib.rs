@@ -39,25 +39,37 @@ const AMBIENT_PROVIDER_NAME: &str = "Ambient";
 pub const AMBIENT_PROVIDER_ID: &str = "ambient";
 pub const AMBIENT_BASE_URL: &str = "https://api.ambient.xyz/v1";
 pub const AMBIENT_DEFAULT_MODEL: &str = "zai-org/GLM-5.2-FP8";
+pub const AMBIENT_KIMI_K2_7_CODE_MODEL: &str = "moonshotai/kimi-k2.7-code";
 pub const AMBIENT_API_KEY_ENV_VAR: &str = "AMBIENT_API_KEY";
 const ZAI_PROVIDER_NAME: &str = "Z.AI";
 pub const ZAI_PROVIDER_ID: &str = "zai";
 pub const ZAI_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
+const ZAI_ANTHROPIC_PROVIDER_NAME: &str = "Z.AI Anthropic";
+pub const ZAI_ANTHROPIC_PROVIDER_ID: &str = "zai-anthropic";
+pub const ZAI_ANTHROPIC_BASE_URL: &str = "https://api.z.ai/api/anthropic/v1";
 pub const ZAI_DEFAULT_MODEL: &str = "glm-5.2";
 pub const ZAI_API_KEY_ENV_VAR: &str = "ZAI_API_KEY";
 const OPENROUTER_PROVIDER_NAME: &str = "OpenRouter";
 pub const OPENROUTER_PROVIDER_ID: &str = "openrouter";
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+const OPENROUTER_ANTHROPIC_PROVIDER_NAME: &str = "OpenRouter Anthropic";
+pub const OPENROUTER_ANTHROPIC_PROVIDER_ID: &str = "openrouter-anthropic";
 pub const OPENROUTER_DEFAULT_MODEL: &str = "z-ai/glm-5.2";
 pub const OPENROUTER_API_KEY_ENV_VAR: &str = "OPENROUTER_API_KEY";
 const BASETEN_PROVIDER_NAME: &str = "Baseten";
 pub const BASETEN_PROVIDER_ID: &str = "baseten";
 pub const BASETEN_BASE_URL: &str = "https://inference.baseten.co/v1";
+const BASETEN_ANTHROPIC_PROVIDER_NAME: &str = "Baseten Anthropic";
+pub const BASETEN_ANTHROPIC_PROVIDER_ID: &str = "baseten-anthropic";
 pub const BASETEN_DEFAULT_MODEL: &str = "zai-org/GLM-5.2";
 pub const BASETEN_API_KEY_ENV_VAR: &str = "BASETEN_API_KEY";
 const VERCEL_PROVIDER_NAME: &str = "Vercel";
 pub const VERCEL_PROVIDER_ID: &str = "vercel";
 pub const VERCEL_BASE_URL: &str = "https://ai-gateway.vercel.sh/v1";
+const VERCEL_ANTHROPIC_PROVIDER_NAME: &str = "Vercel Anthropic";
+pub const VERCEL_ANTHROPIC_PROVIDER_ID: &str = "vercel-anthropic";
+const VERCEL_ANTHROPIC_FAST_PROVIDER_NAME: &str = "Vercel Anthropic Fast";
+pub const VERCEL_ANTHROPIC_FAST_PROVIDER_ID: &str = "vercel-anthropic-fast";
 pub const VERCEL_DEFAULT_MODEL: &str = "zai/glm-5.2";
 pub const VERCEL_GLM_5_2_FAST_MODEL: &str = "zai/glm-5.2-fast";
 pub const VERCEL_API_KEY_ENV_VAR: &str = "AI_GATEWAY_API_KEY";
@@ -90,13 +102,17 @@ const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_VALUE: &str = "codex";
 pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 const OSS_PROVIDER_NAME: &str = "gpt-oss";
-pub const BUILT_IN_MODEL_PROVIDER_NAMES: [&str; 8] = [
+pub const BUILT_IN_MODEL_PROVIDER_NAMES: [&str; 12] = [
     OPENAI_PROVIDER_NAME,
     AMBIENT_PROVIDER_NAME,
     ZAI_PROVIDER_NAME,
+    ZAI_ANTHROPIC_PROVIDER_NAME,
     OPENROUTER_PROVIDER_NAME,
     BASETEN_PROVIDER_NAME,
+    BASETEN_ANTHROPIC_PROVIDER_NAME,
     VERCEL_PROVIDER_NAME,
+    VERCEL_ANTHROPIC_PROVIDER_NAME,
+    VERCEL_ANTHROPIC_FAST_PROVIDER_NAME,
     AMAZON_BEDROCK_PROVIDER_NAME,
     OSS_PROVIDER_NAME,
 ];
@@ -110,6 +126,8 @@ pub enum WireApi {
     Responses,
     /// The OpenAI-compatible Chat Completions API exposed at `/v1/chat/completions`.
     Chat,
+    /// The Anthropic-compatible Messages API exposed at `/v1/messages`.
+    Anthropic,
 }
 
 impl fmt::Display for WireApi {
@@ -117,6 +135,7 @@ impl fmt::Display for WireApi {
         let value = match self {
             Self::Responses => "responses",
             Self::Chat => "chat",
+            Self::Anthropic => "anthropic",
         };
         f.write_str(value)
     }
@@ -131,9 +150,10 @@ impl<'de> Deserialize<'de> for WireApi {
         match value.as_str() {
             "responses" => Ok(Self::Responses),
             "chat" => Ok(Self::Chat),
+            "anthropic" | "anthropic_messages" | "anthropic-messages" => Ok(Self::Anthropic),
             _ => Err(serde::de::Error::unknown_variant(
                 &value,
-                &["responses", "chat"],
+                &["responses", "chat", "anthropic"],
             )),
         }
     }
@@ -462,6 +482,28 @@ impl ModelProviderInfo {
         }
     }
 
+    pub fn create_zai_anthropic_provider() -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: ZAI_ANTHROPIC_PROVIDER_NAME.into(),
+            base_url: Some(ZAI_ANTHROPIC_BASE_URL.into()),
+            env_key: Some(ZAI_API_KEY_ENV_VAR.into()),
+            env_key_instructions: Some(provider_api_key_vault_instructions()),
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Anthropic,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    }
+
     pub fn create_openrouter_provider() -> ModelProviderInfo {
         ModelProviderInfo {
             name: OPENROUTER_PROVIDER_NAME.into(),
@@ -472,6 +514,28 @@ impl ModelProviderInfo {
             auth: None,
             aws: None,
             wire_api: WireApi::Chat,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    }
+
+    pub fn create_openrouter_anthropic_provider() -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: OPENROUTER_ANTHROPIC_PROVIDER_NAME.into(),
+            base_url: Some(OPENROUTER_BASE_URL.into()),
+            env_key: Some(OPENROUTER_API_KEY_ENV_VAR.into()),
+            env_key_instructions: Some(provider_api_key_vault_instructions()),
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Anthropic,
             query_params: None,
             http_headers: None,
             env_http_headers: None,
@@ -506,6 +570,28 @@ impl ModelProviderInfo {
         }
     }
 
+    pub fn create_baseten_anthropic_provider() -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: BASETEN_ANTHROPIC_PROVIDER_NAME.into(),
+            base_url: Some(BASETEN_BASE_URL.into()),
+            env_key: Some(BASETEN_API_KEY_ENV_VAR.into()),
+            env_key_instructions: Some(provider_api_key_vault_instructions()),
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Anthropic,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    }
+
     pub fn create_vercel_provider() -> ModelProviderInfo {
         ModelProviderInfo {
             name: VERCEL_PROVIDER_NAME.into(),
@@ -516,6 +602,50 @@ impl ModelProviderInfo {
             auth: None,
             aws: None,
             wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    }
+
+    pub fn create_vercel_anthropic_provider() -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: VERCEL_ANTHROPIC_PROVIDER_NAME.into(),
+            base_url: Some(VERCEL_BASE_URL.into()),
+            env_key: Some(VERCEL_API_KEY_ENV_VAR.into()),
+            env_key_instructions: Some(provider_api_key_vault_instructions()),
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Anthropic,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    }
+
+    pub fn create_vercel_anthropic_fast_provider() -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: VERCEL_ANTHROPIC_FAST_PROVIDER_NAME.into(),
+            base_url: Some(VERCEL_BASE_URL.into()),
+            env_key: Some(VERCEL_API_KEY_ENV_VAR.into()),
+            env_key_instructions: Some(provider_api_key_vault_instructions()),
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Anthropic,
             query_params: None,
             http_headers: None,
             env_http_headers: None,
@@ -609,9 +739,14 @@ pub fn built_in_model_providers(
     let openai_provider = P::create_openai_provider(openai_base_url);
     let ambient_provider = P::create_ambient_provider();
     let zai_provider = P::create_zai_provider();
+    let zai_anthropic_provider = P::create_zai_anthropic_provider();
     let openrouter_provider = P::create_openrouter_provider();
+    let openrouter_anthropic_provider = P::create_openrouter_anthropic_provider();
     let baseten_provider = P::create_baseten_provider();
+    let baseten_anthropic_provider = P::create_baseten_anthropic_provider();
     let vercel_provider = P::create_vercel_provider();
+    let vercel_anthropic_provider = P::create_vercel_anthropic_provider();
+    let vercel_anthropic_fast_provider = P::create_vercel_anthropic_fast_provider();
     let amazon_bedrock_provider = P::create_amazon_bedrock_provider(/*aws*/ None);
 
     // PFTerminal bundles the first-party OpenAI provider, the local OSS
@@ -620,9 +755,20 @@ pub fn built_in_model_providers(
     [
         (AMBIENT_PROVIDER_ID, ambient_provider),
         (ZAI_PROVIDER_ID, zai_provider),
+        (ZAI_ANTHROPIC_PROVIDER_ID, zai_anthropic_provider),
         (OPENROUTER_PROVIDER_ID, openrouter_provider),
+        (
+            OPENROUTER_ANTHROPIC_PROVIDER_ID,
+            openrouter_anthropic_provider,
+        ),
         (BASETEN_PROVIDER_ID, baseten_provider),
+        (BASETEN_ANTHROPIC_PROVIDER_ID, baseten_anthropic_provider),
         (VERCEL_PROVIDER_ID, vercel_provider),
+        (VERCEL_ANTHROPIC_PROVIDER_ID, vercel_anthropic_provider),
+        (
+            VERCEL_ANTHROPIC_FAST_PROVIDER_ID,
+            vercel_anthropic_fast_provider,
+        ),
         (OPENAI_PROVIDER_ID, openai_provider),
         (AMAZON_BEDROCK_PROVIDER_ID, amazon_bedrock_provider),
         (

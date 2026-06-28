@@ -16,9 +16,10 @@ red status noise without testing the code.
 
 ## Disabled Until Runners Exist
 
-- macOS Rust and Bazel checks.
+- macOS Rust and Bazel checks outside the manual release builder.
 - Windows Rust and Bazel checks.
-- Linux ARM64 Rust, Bazel, and V8 checks.
+- Linux ARM64 Rust, Bazel, and V8 push/PR checks outside the manual release
+  builder.
 - Self-hosted runner jobs using labels such as `PFTerminal-linux-x64`,
   `PFTerminal-linux-arm64`, `PFTerminal-windows-x64`, or
   `PFTerminal-windows-arm64`.
@@ -38,3 +39,8 @@ Before re-enabling platform checks:
 
 Until then, CI should stay green and honest rather than displaying checks that
 never run.
+
+Manual release builds are separate from push/PR CI. The PFTerminal release
+workflow uses GitHub-hosted macOS runners and the hosted `ubuntu-24.04-arm`
+runner for the Linux ARM64 release artifact, so it does not depend on the
+disabled self-hosted runner labels above.

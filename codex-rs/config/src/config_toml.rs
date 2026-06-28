@@ -30,6 +30,7 @@ use crate::types::WindowsToml;
 use codex_features::FeaturesToml;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
+use codex_model_provider_info::BASETEN_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::BASETEN_PROVIDER_ID;
 use codex_model_provider_info::BUILT_IN_MODEL_PROVIDER_NAMES;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
@@ -39,7 +40,10 @@ use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_ANTHROPIC_FAST_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::VERCEL_PROVIDER_ID;
+use codex_model_provider_info::ZAI_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::ForcedLoginMethod;
@@ -64,15 +68,19 @@ use serde::Serialize;
 use serde::de::Error as SerdeError;
 use serde_json::Value as JsonValue;
 
-const RESERVED_MODEL_PROVIDER_IDS: [&str; 9] = [
+const RESERVED_MODEL_PROVIDER_IDS: [&str; 13] = [
     AMBIENT_PROVIDER_ID,
     AMAZON_BEDROCK_PROVIDER_ID,
+    BASETEN_ANTHROPIC_PROVIDER_ID,
     BASETEN_PROVIDER_ID,
     OPENAI_PROVIDER_ID,
     OPENROUTER_PROVIDER_ID,
     OLLAMA_OSS_PROVIDER_ID,
     LMSTUDIO_OSS_PROVIDER_ID,
+    VERCEL_ANTHROPIC_PROVIDER_ID,
+    VERCEL_ANTHROPIC_FAST_PROVIDER_ID,
     VERCEL_PROVIDER_ID,
+    ZAI_ANTHROPIC_PROVIDER_ID,
     ZAI_PROVIDER_ID,
 ];
 
@@ -910,6 +918,7 @@ pub fn validate_reserved_model_provider_ids(
         .keys()
         .filter(|key| {
             key.as_str() != AMAZON_BEDROCK_PROVIDER_ID
+                && key.as_str() != AMBIENT_PROVIDER_ID
                 && RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str())
         })
         .map(|key| format!("`{key}`"))
@@ -933,6 +942,7 @@ pub fn validate_reserved_model_provider_names(
         .iter()
         .filter(|(key, provider)| {
             key.as_str() != AMAZON_BEDROCK_PROVIDER_ID
+                && key.as_str() != AMBIENT_PROVIDER_ID
                 && BUILT_IN_MODEL_PROVIDER_NAMES
                     .iter()
                     .any(|reserved_name| provider.name.trim().eq_ignore_ascii_case(reserved_name))

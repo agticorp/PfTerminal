@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""Run a two-turn native-provider benchmark through the real PFTerminal TUI."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pty
+import re
+import select
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_BINARY = REPO_ROOT / "codex-rs" / "target" / "debug" / "pfterminal"
+ANSI_RE = re.compile(
+    r"(?:\x1b\][^\x07]*(?:\x07|\x1b\\))|(?:\x1b\[[0-?]*[ -/]*[@-~])|(?:\x1b[=>][0-9;]*[a-zA-Z])"
+)
+STREAM_OK_RE = re.compile(r"\[pfterminal-stream\] (?:anthropic|chat|responses)_http_stream_request_ok elapsed_ms=(\d+)")
+STREAM_DONE_RE = re.compile(r"\[pfterminal-stream\] response_stream_completed elapsed_ms=(\d+)")
+CLIENT_SETUP_RE = re.compile(r"\[pfterminal-stream\] (?:anthropic|chat|responses)_http_after_client_setup elapsed_ms=(\d+)")
+TOKEN_USAGE_RE = re.compile(
+    r"Token usage: total=(?P<total>[\d,]+) input=(?P<input>[\d,]+) "
+    r"\(\+ (?P<cached>[\d,]+) cached\) output=(?P<output>[\d,]+)"
+)
+
+
+def strip_ansi(value: str) -> str:
+    return ANSI_RE.sub("", value)
+
+
+def parse_numbers(pattern: re.Pattern[str], text: str) -> list[int]:
+    return [int(match.group(1)) for match in pattern.finditer(text)]
+
+
+def parse_token_usage(text: str) -> dict[str, int] | None:
+    matches = list(TOKEN_USAGE_RE.finditer(text))
+    if not matches:
+        return None
+    match = matches[-1]
+    return {
+        key: int(value.replace(",", ""))
+        for key, value in match.groupdict().items()
+    }
+
+
+def provider_key_from_vault(binary: Path, vault_label: str) -> str:
+    result = subprocess.run(
+        [str(binary), "vault", "auth-helper", vault_label],
+        cwd=REPO_ROOT / "codex-rs",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    key = result.stdout.strip()
+    if not key:
+        raise RuntimeError(f"vault helper returned an empty key for {vault_label}")
+    return key
+
+
+def read_available(master_fd: int) -> str:
+    chunks: list[bytes] = []
+    while True:
+        ready, _, _ = select.select([master_fd], [], [], 0)
+        if not ready:
+            break
+        try:
+            chunk = os.read(master_fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
+    binary = Path(args.binary).resolve()
+    if args.key_env not in os.environ:
+        os.environ[args.key_env] = provider_key_from_vault(binary, args.vault_label)
+
+    env = os.environ.copy()
+    env["PFTERMINAL_TRACE_STREAM_TIMING"] = "1"
+    if args.dump_request:
+        dump_api = args.dump_request_api
+        if dump_api == "auto":
+            dump_api = "anthropic" if "anthropic" in args.provider else "chat"
+        dump_env_var = {
+            "anthropic": "PFTERMINAL_DUMP_ANTHROPIC_REQUEST",
+            "chat": "PFTERMINAL_DUMP_CHAT_REQUEST",
+            "responses": "PFTERMINAL_DUMP_RESPONSES_REQUEST",
+        }[dump_api]
+        env[dump_env_var] = args.dump_request
+
+    cmd = [
+        str(binary),
+        "--yolo",
+        "--no-alt-screen",
+        "-c",
+        f'model_provider="{args.provider}"',
+        "-m",
+        args.model,
+        args.turn1,
+    ]
+
+    master_fd, slave_fd = pty.openpty()
+    started_at = time.monotonic()
+    proc = subprocess.Popen(
+        cmd,
+        cwd=REPO_ROOT / "codex-rs",
+        env=env,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        text=False,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+
+    raw_output = ""
+    second_prompt_written = False
+    second_enter_sent = False
+    second_prompt_at = 0.0
+    first_completion_at: float | None = None
+    deadline = started_at + args.timeout
+    completed_turns = 0
+    benchmark_complete = False
+
+    try:
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master_fd], [], [], 0.25)
+            if ready:
+                raw_output += read_available(master_fd)
+
+            clean = strip_ansi(raw_output)
+            stream_done = parse_numbers(STREAM_DONE_RE, clean)
+            completed_turns = len(stream_done)
+            if first_completion_at is None and completed_turns >= 1:
+                first_completion_at = time.monotonic()
+
+            if (
+                not second_prompt_written
+                and first_completion_at is not None
+                and time.monotonic() - first_completion_at >= 0.75
+            ):
+                os.write(master_fd, args.turn2.encode())
+                second_prompt_written = True
+                second_prompt_at = time.monotonic()
+
+            if (
+                second_prompt_written
+                and not second_enter_sent
+                and time.monotonic() - second_prompt_at >= 0.25
+            ):
+                os.write(master_fd, b"\r")
+                second_enter_sent = True
+
+            if second_enter_sent and completed_turns >= 2:
+                benchmark_complete = True
+                break
+
+            if proc.poll() is not None:
+                break
+
+        if proc.poll() is None:
+            if benchmark_complete:
+                time.sleep(0.75)
+                raw_output += read_available(master_fd)
+            os.write(master_fd, b"\x03")
+            time.sleep(1.0)
+            raw_output += read_available(master_fd)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.write(master_fd, b"\x03")
+                time.sleep(1.0)
+                raw_output += read_available(master_fd)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+    finally:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+
+    clean = strip_ansi(raw_output)
+    return {
+        "provider": args.provider,
+        "model": args.model,
+        "turns_completed": completed_turns,
+        "rendered_ok_count": clean.count("• OK"),
+        "second_prompt_submitted": second_enter_sent,
+        "exit_code": proc.returncode,
+        "wall_ms": int((time.monotonic() - started_at) * 1000),
+        "client_setup_ms": parse_numbers(CLIENT_SETUP_RE, clean),
+        "stream_request_ok_ms": parse_numbers(STREAM_OK_RE, clean),
+        "stream_completed_ms": parse_numbers(STREAM_DONE_RE, clean),
+        "token_usage": parse_token_usage(clean),
+        "resume_hint": next(
+            (line for line in clean.splitlines() if line.startswith("To continue this session,")),
+            None,
+        ),
+        "success": second_enter_sent and completed_turns >= 2,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--binary", default=str(DEFAULT_BINARY))
+    parser.add_argument("--provider", default="vercel-anthropic-fast")
+    parser.add_argument("--model", default="zai/glm-5.2-fast")
+    parser.add_argument("--key-env", default="AI_GATEWAY_API_KEY")
+    parser.add_argument("--vault-label", default="provider/ai_gateway_api_key")
+    parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument("--dump-request")
+    parser.add_argument(
+        "--dump-request-api",
+        choices=["auto", "anthropic", "chat", "responses"],
+        default="auto",
+    )
+    parser.add_argument("--turn1", default="PFT_TUI_NATIVE_ANTHROPIC_BENCH_1 Reply with exactly OK.")
+    parser.add_argument("--turn2", default="PFT_TUI_NATIVE_ANTHROPIC_BENCH_2 Reply with exactly OK.")
+    parser.add_argument("--output")
+    args = parser.parse_args()
+
+    result = run_benchmark(args)
+    encoded = json.dumps(result, indent=2, sort_keys=True)
+    if args.output:
+        Path(args.output).write_text(encoded + "\n")
+    print(encoded)
+    return 0 if result["success"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

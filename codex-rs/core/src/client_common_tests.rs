@@ -109,6 +109,7 @@ fn serializes_text_verbosity_when_set() {
     let req = ResponsesApiRequest {
         model: "gpt-5.4".to_string(),
         instructions: "i".to_string(),
+        previous_response_id: None,
         input,
         tools,
         tool_choice: "auto".to_string(),
@@ -160,6 +161,7 @@ fn serializes_text_schema_with_strict_format() {
     let req = ResponsesApiRequest {
         model: "gpt-5.4".to_string(),
         instructions: "i".to_string(),
+        previous_response_id: None,
         input,
         tools,
         tool_choice: "auto".to_string(),
@@ -225,6 +227,7 @@ fn omits_text_when_not_set() {
     let req = ResponsesApiRequest {
         model: "gpt-5.4".to_string(),
         instructions: "i".to_string(),
+        previous_response_id: None,
         input,
         tools,
         tool_choice: "auto".to_string(),
@@ -252,6 +255,7 @@ fn ambient_fast_request_serializes_plain_string_input() {
     let req = ResponsesApiRequest {
         model: "zai-org/GLM-5.2-FP8".to_string(),
         instructions: String::new(),
+        previous_response_id: None,
         input: vec![ResponseItem::Message {
             id: Some("msg_1".to_string()),
             role: "user".to_string(),
@@ -298,6 +302,7 @@ fn serializes_flex_service_tier_when_set() {
     let req = ResponsesApiRequest {
         model: "gpt-5.4".to_string(),
         instructions: "i".to_string(),
+        previous_response_id: None,
         input: vec![],
         tools: vec![],
         tool_choice: "auto".to_string(),

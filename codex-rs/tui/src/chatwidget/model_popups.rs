@@ -8,12 +8,15 @@ use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
+use codex_model_provider_info::AMBIENT_KIMI_K2_7_CODE_MODEL;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 use codex_model_provider_info::BASETEN_DEFAULT_MODEL;
 use codex_model_provider_info::BASETEN_PROVIDER_ID;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_model_provider_info::OPENROUTER_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
 use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_ANTHROPIC_FAST_PROVIDER_ID;
 use codex_model_provider_info::VERCEL_DEFAULT_MODEL;
 use codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL;
 use codex_model_provider_info::VERCEL_PROVIDER_ID;
@@ -188,6 +191,7 @@ impl ChatWidget {
             return Some(BASETEN_PROVIDER_ID.to_string());
         }
         if trimmed == AMBIENT_DEFAULT_MODEL
+            || trimmed == AMBIENT_KIMI_K2_7_CODE_MODEL
             || trimmed.starts_with("ambient/")
             || trimmed.starts_with("zai-org/")
         {
@@ -196,8 +200,14 @@ impl ChatWidget {
         if trimmed == ZAI_DEFAULT_MODEL || trimmed.starts_with("glm-") {
             return Some(ZAI_PROVIDER_ID.to_string());
         }
+        if trimmed == OPENROUTER_DEFAULT_MODEL {
+            return Some(OPENROUTER_ANTHROPIC_PROVIDER_ID.to_string());
+        }
         if Self::is_openrouter_model(trimmed) {
             return Some(OPENROUTER_PROVIDER_ID.to_string());
+        }
+        if trimmed == VERCEL_GLM_5_2_FAST_MODEL {
+            return Some(VERCEL_ANTHROPIC_FAST_PROVIDER_ID.to_string());
         }
         if Self::is_vercel_model(trimmed) {
             return Some(VERCEL_PROVIDER_ID.to_string());
@@ -259,9 +269,13 @@ impl ChatWidget {
             match provider.as_deref() {
                 Some(AMBIENT_PROVIDER_ID | ZAI_PROVIDER_ID) => coding_plan_items.push(item),
                 Some(OPENAI_PROVIDER_ID) => coding_plan_items.push(item),
-                Some(BASETEN_PROVIDER_ID | OPENROUTER_PROVIDER_ID | VERCEL_PROVIDER_ID) => {
-                    pay_per_api_call_items.push(item)
-                }
+                Some(
+                    BASETEN_PROVIDER_ID
+                    | OPENROUTER_PROVIDER_ID
+                    | OPENROUTER_ANTHROPIC_PROVIDER_ID
+                    | VERCEL_PROVIDER_ID
+                    | VERCEL_ANTHROPIC_FAST_PROVIDER_ID,
+                ) => pay_per_api_call_items.push(item),
                 _ => {}
             }
         }
@@ -341,7 +355,9 @@ impl ChatWidget {
                 | ZAI_PROVIDER_ID
                 | BASETEN_PROVIDER_ID
                 | OPENROUTER_PROVIDER_ID
-                | VERCEL_PROVIDER_ID,
+                | OPENROUTER_ANTHROPIC_PROVIDER_ID
+                | VERCEL_PROVIDER_ID
+                | VERCEL_ANTHROPIC_FAST_PROVIDER_ID,
             ) => true,
             _ => false,
         }
@@ -681,6 +697,7 @@ impl ChatWidget {
         matches!(
             model,
             AMBIENT_DEFAULT_MODEL
+                | AMBIENT_KIMI_K2_7_CODE_MODEL
                 | ZAI_DEFAULT_MODEL
                 | VERCEL_DEFAULT_MODEL
                 | VERCEL_GLM_5_2_FAST_MODEL
@@ -740,6 +757,10 @@ mod tests {
             Some(AMBIENT_PROVIDER_ID)
         );
         assert_eq!(
+            ChatWidget::model_provider_for_selection(AMBIENT_KIMI_K2_7_CODE_MODEL).as_deref(),
+            Some(AMBIENT_PROVIDER_ID)
+        );
+        assert_eq!(
             ChatWidget::model_provider_for_selection(ZAI_DEFAULT_MODEL).as_deref(),
             Some(ZAI_PROVIDER_ID)
         );
@@ -749,7 +770,7 @@ mod tests {
         );
         assert_eq!(
             ChatWidget::model_provider_for_selection(OPENROUTER_DEFAULT_MODEL).as_deref(),
-            Some(OPENROUTER_PROVIDER_ID)
+            Some(OPENROUTER_ANTHROPIC_PROVIDER_ID)
         );
         assert_eq!(
             ChatWidget::model_provider_for_selection(VERCEL_DEFAULT_MODEL).as_deref(),
@@ -757,7 +778,7 @@ mod tests {
         );
         assert_eq!(
             ChatWidget::model_provider_for_selection(VERCEL_GLM_5_2_FAST_MODEL).as_deref(),
-            Some(VERCEL_PROVIDER_ID)
+            Some(VERCEL_ANTHROPIC_FAST_PROVIDER_ID)
         );
         assert_eq!(
             ChatWidget::model_provider_for_selection("minimax/minimax-m3").as_deref(),
@@ -771,10 +792,28 @@ mod tests {
             ChatWidget::model_provider_for_selection(AMAZON_BEDROCK_GPT_5_5_MODEL_ID).as_deref(),
             Some(AMAZON_BEDROCK_PROVIDER_ID)
         );
+        assert_eq!(
+            ChatWidget::reasoning_effort_label_for_model(
+                AMBIENT_KIMI_K2_7_CODE_MODEL,
+                &ReasoningEffortConfig::Medium,
+            ),
+            "Standard"
+        );
+        assert_eq!(
+            ChatWidget::reasoning_effort_label_for_model(
+                AMBIENT_KIMI_K2_7_CODE_MODEL,
+                &ReasoningEffortConfig::XHigh,
+            ),
+            "Deep"
+        );
     }
 
     #[test]
     fn pfterminal_picker_allows_only_gpt_5_5_for_openai() {
+        assert!(ChatWidget::show_in_pfterminal_model_picker(&preset(
+            AMBIENT_KIMI_K2_7_CODE_MODEL,
+            true
+        )));
         assert!(ChatWidget::show_in_pfterminal_model_picker(&preset(
             "gpt-5.5", true
         )));

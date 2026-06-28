@@ -30,6 +30,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::WebSearchContextSize;
 use codex_protocol::models::AgentMessageInputContent;
+use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
@@ -236,6 +237,14 @@ fn test_openrouter_gemini_model_info() -> ModelInfo {
         "experimental_supported_tools": []
     }))
     .expect("deserialize OpenRouter Gemini test model info")
+}
+
+fn test_openrouter_anthropic_model_info() -> ModelInfo {
+    let mut model_info = test_openrouter_gemini_model_info();
+    model_info.slug = "anthropic/claude-sonnet-4.6".to_string();
+    model_info.display_name = "OpenRouter Claude Sonnet 4.6".to_string();
+    model_info.description = Some("OpenRouter Claude Sonnet 4.6".to_string());
+    model_info
 }
 
 fn test_session_telemetry() -> SessionTelemetry {
@@ -472,7 +481,10 @@ fn chat_completions_omits_agent_messages_from_history() {
 
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].role, "assistant");
-    assert_eq!(messages[0].content.as_deref(), Some("real assistant text"));
+    assert_eq!(
+        messages[0].content,
+        Some(codex_api::ChatMessageContent::text("real assistant text"))
+    );
 }
 
 #[test]
@@ -540,7 +552,7 @@ fn chat_completions_skips_malformed_historical_tool_calls() {
 }
 
 #[test]
-fn ambient_responses_request_uses_zai_reasoning_fields() {
+fn ambient_responses_request_disables_thinking_unless_deep_reasoning_is_explicit() {
     let provider_info = ModelProviderInfo::create_ambient_provider();
     let api_provider = provider_info
         .to_api_provider(Some(AuthMode::ApiKey))
@@ -591,8 +603,9 @@ fn ambient_responses_request_uses_zai_reasoning_fields() {
         .expect("standard Ambient request");
     assert_eq!(standard.reasoning, None);
     assert_eq!(standard.thinking_budget, None);
-    assert_eq!(standard.enable_thinking, Some(true));
-    assert_eq!(standard.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(standard.emit_usage, Some(true));
+    assert_eq!(standard.enable_thinking, Some(false));
+    assert_eq!(standard.reasoning_effort, None);
 
     let deep = client
         .build_responses_request(
@@ -607,12 +620,28 @@ fn ambient_responses_request_uses_zai_reasoning_fields() {
         .expect("deep Ambient request");
     assert_eq!(deep.reasoning, None);
     assert_eq!(deep.thinking_budget, None);
-    assert_eq!(deep.enable_thinking, Some(true));
-    assert_eq!(deep.reasoning_effort.as_deref(), Some("max"));
+    assert_eq!(deep.emit_usage, Some(true));
+    assert_eq!(deep.enable_thinking, Some(false));
+    assert_eq!(deep.reasoning_effort, None);
+
+    let max = client
+        .build_responses_request(
+            &api_provider,
+            &prompt,
+            &model_info,
+            Some(ReasoningEffortConfig::Custom("max".to_string())),
+            ReasoningSummaryConfig::None,
+            None,
+            &responses_metadata,
+        )
+        .expect("max Ambient request");
+    assert_eq!(max.emit_usage, Some(true));
+    assert_eq!(max.enable_thinking, Some(true));
+    assert_eq!(max.reasoning_effort.as_deref(), Some("max"));
 }
 
 #[test]
-fn ambient_chat_completions_request_uses_zai_reasoning_fields() {
+fn ambient_chat_completions_request_disables_thinking_unless_deep_reasoning_is_explicit() {
     let provider_info = ModelProviderInfo::create_ambient_provider();
     let client = ModelClient::new(
         /*auth_manager*/ None,
@@ -643,16 +672,28 @@ fn ambient_chat_completions_request_uses_zai_reasoning_fields() {
     let standard = client
         .build_chat_completions_request(&prompt, &model_info, Some(ReasoningEffortConfig::Medium))
         .expect("standard Ambient chat request");
-    assert_eq!(standard.enable_thinking, Some(true));
     assert_eq!(standard.emit_usage, Some(true));
-    assert_eq!(standard.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(standard.enable_thinking, Some(false));
+    assert_eq!(standard.reasoning_effort, None);
 
     let deep = client
         .build_chat_completions_request(&prompt, &model_info, Some(ReasoningEffortConfig::XHigh))
         .expect("deep Ambient chat request");
-    assert_eq!(deep.enable_thinking, Some(true));
     assert_eq!(deep.emit_usage, Some(true));
-    assert_eq!(deep.reasoning_effort.as_deref(), Some("max"));
+    assert_eq!(deep.enable_thinking, Some(false));
+    assert_eq!(deep.reasoning_effort, None);
+    assert_eq!(deep.prompt_cache_key, None);
+
+    let max = client
+        .build_chat_completions_request(
+            &prompt,
+            &model_info,
+            Some(ReasoningEffortConfig::Custom("max".to_string())),
+        )
+        .expect("max Ambient chat request");
+    assert_eq!(max.emit_usage, Some(true));
+    assert_eq!(max.enable_thinking, Some(true));
+    assert_eq!(max.reasoning_effort.as_deref(), Some("max"));
 }
 
 #[test]
@@ -691,6 +732,17 @@ fn openrouter_chat_completions_request_uses_reasoning_object() {
     assert_eq!(default_request.emit_usage, None);
     assert_eq!(default_request.reasoning_effort, None);
     assert_eq!(default_request.reasoning, None);
+    assert!(
+        default_request.prompt_cache_key.is_some(),
+        "OpenRouter Chat requests should carry a stable prompt_cache_key"
+    );
+    assert!(
+        !serde_json::to_value(&default_request)
+            .expect("serialize request")
+            .to_string()
+            .contains("cache_control"),
+        "Gemini should not receive explicit cache_control blocks"
+    );
 
     let minimal_request = client
         .build_chat_completions_request(&prompt, &model_info, Some(ReasoningEffortConfig::Minimal))
@@ -714,6 +766,220 @@ fn openrouter_chat_completions_request_uses_reasoning_object() {
             .and_then(|reasoning| reasoning.get("effort"))
             .and_then(|effort| effort.as_str()),
         Some("high")
+    );
+}
+
+#[test]
+fn openrouter_anthropic_chat_request_adds_cache_control_markers() {
+    let provider_info = ModelProviderInfo::create_openrouter_provider();
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        provider_info,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*item_ids_enabled*/ false,
+        /*attestation_provider*/ None,
+    );
+    let prompt = super::Prompt {
+        input: vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "first user".to_string(),
+                }],
+                phase: None,
+                metadata: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "second user".to_string(),
+                }],
+                phase: None,
+                metadata: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "third user".to_string(),
+                }],
+                phase: None,
+                metadata: None,
+            },
+        ],
+        ..Default::default()
+    };
+    let model_info = test_openrouter_anthropic_model_info();
+
+    let request = client
+        .build_chat_completions_request(&prompt, &model_info, None)
+        .expect("OpenRouter Anthropic chat request");
+    assert!(
+        request.prompt_cache_key.is_some(),
+        "OpenRouter Chat requests should carry a stable prompt_cache_key"
+    );
+
+    let body = serde_json::to_value(&request).expect("serialize request");
+    let messages = body
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .expect("messages array");
+    assert_eq!(
+        messages[0].pointer("/content/0/cache_control/type"),
+        Some(&json!("ephemeral")),
+        "system message should be cache marked"
+    );
+    assert!(
+        messages[1]
+            .get("content")
+            .is_some_and(serde_json::Value::is_string),
+        "oldest user message should keep the normal string shape"
+    );
+    assert_eq!(
+        messages[2].pointer("/content/0/cache_control/type"),
+        Some(&json!("ephemeral")),
+        "second-to-last user message should be cache marked"
+    );
+    assert_eq!(
+        messages[3].pointer("/content/0/cache_control/type"),
+        Some(&json!("ephemeral")),
+        "latest user message should be cache marked"
+    );
+}
+
+#[test]
+fn anthropic_messages_request_adds_cache_control_and_replays_tools() {
+    let mut provider_info = ModelProviderInfo::create_zai_provider();
+    provider_info.wire_api = WireApi::Anthropic;
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        provider_info,
+        SessionSource::Cli,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*item_ids_enabled*/ false,
+        /*attestation_provider*/ None,
+    );
+    let prompt = super::Prompt {
+        base_instructions: BaseInstructions {
+            text: "system instructions".to_string(),
+        },
+        input: vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "first user".to_string(),
+                }],
+                phase: None,
+                metadata: None,
+            },
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "exec_command".to_string(),
+                namespace: None,
+                arguments: r#"{"cmd":"date"}"#.to_string(),
+                call_id: "toolu_1".to_string(),
+                metadata: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: "toolu_1".to_string(),
+                output: FunctionCallOutputPayload::from_text("Mon".to_string()),
+                metadata: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "second user".to_string(),
+                }],
+                phase: None,
+                metadata: None,
+            },
+        ],
+        tools: vec![ToolSpec::Function(ResponsesApiTool {
+            name: "exec_command".to_string(),
+            description: "Run a command.".to_string(),
+            strict: true,
+            defer_loading: None,
+            parameters: JsonSchema::object(
+                BTreeMap::from([(
+                    "cmd".to_string(),
+                    JsonSchema::string(Some("Command to run.".to_string())),
+                )]),
+                Some(vec!["cmd".to_string()]),
+                Some(false.into()),
+            ),
+            output_schema: None,
+        })],
+        ..Default::default()
+    };
+    let model_info = test_ambient_model_info();
+
+    let request = client
+        .build_anthropic_messages_request(&prompt, &model_info, Some(ReasoningEffortConfig::XHigh))
+        .expect("Anthropic messages request");
+    assert_eq!(request.thinking, None);
+
+    let body = serde_json::to_value(&request).expect("serialize request");
+    assert_eq!(
+        body.pointer("/system/0/cache_control/type"),
+        Some(&json!("ephemeral"))
+    );
+    assert_eq!(
+        body.pointer("/tools/0/cache_control/type"),
+        Some(&json!("ephemeral"))
+    );
+    assert_eq!(
+        body.pointer("/tools/0/input_schema/properties/cmd/type"),
+        Some(&json!("string"))
+    );
+    assert_eq!(
+        body.pointer("/messages/0/content/0/cache_control/type"),
+        Some(&json!("ephemeral"))
+    );
+    assert_eq!(
+        body.pointer("/messages/1/content/0/type"),
+        Some(&json!("tool_use"))
+    );
+    assert_eq!(
+        body.pointer("/messages/1/content/0/input/cmd"),
+        Some(&json!("date"))
+    );
+    assert_eq!(
+        body.pointer("/messages/2/content/0/type"),
+        Some(&json!("tool_result"))
+    );
+    assert_eq!(
+        body.pointer("/messages/2/content/1/cache_control/type"),
+        Some(&json!("ephemeral"))
+    );
+
+    let max_request = client
+        .build_anthropic_messages_request(
+            &prompt,
+            &model_info,
+            Some(ReasoningEffortConfig::Custom("max".to_string())),
+        )
+        .expect("Anthropic max request");
+    assert_eq!(
+        max_request
+            .thinking
+            .as_ref()
+            .and_then(|thinking| thinking.get("type"))
+            .and_then(serde_json::Value::as_str),
+        Some("enabled")
     );
 }
 
@@ -774,6 +1040,7 @@ fn openrouter_chat_completions_request_preserves_function_tools_with_web_search(
     let request = client
         .build_chat_completions_request(&prompt, &model_info, None)
         .expect("OpenRouter chat request");
+    assert!(request.prompt_cache_key.is_some());
 
     assert_eq!(
         request
@@ -848,6 +1115,14 @@ fn baseten_chat_completions_strips_strict_without_zai_reasoning_fields() {
     assert_eq!(request.emit_usage, None);
     assert_eq!(request.reasoning_effort, None);
     assert_eq!(request.reasoning, None);
+    assert_eq!(request.prompt_cache_key, None);
+    assert!(
+        !serde_json::to_value(&request)
+            .expect("serialize request")
+            .to_string()
+            .contains("cache_control"),
+        "Baseten should not receive raw cache_control blocks without explicit support"
+    );
     assert_eq!(
         request.tools[0]
             .pointer("/function/strict")
@@ -1316,6 +1591,7 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         api_stream,
         test_session_telemetry(),
         attempt,
+        None,
     );
 
     let observed = stream
@@ -1365,6 +1641,7 @@ async fn response_stream_records_last_model_feedback_ids() {
         api_stream,
         test_session_telemetry(),
         InferenceTraceAttempt::disabled(),
+        None,
     );
 
     while stream.next().await.is_some() {}
@@ -1406,6 +1683,7 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         api_stream,
         test_session_telemetry(),
         attempt,
+        None,
     );
 
     // Fill the mapper channel with non-terminal events, then yield one output

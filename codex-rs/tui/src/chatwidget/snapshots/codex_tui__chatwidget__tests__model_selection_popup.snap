@@ -6,7 +6,18 @@ expression: popup
   Select Model and Effort
   Access hidden models by running pfterminal -m <model_name> or in your config
 
+      Coding Plans                  OpenAI Codex, Ambient, and Z.AI plan-
+                                    backed models
 › 1. zai-org/GLM-5.2-FP8 (current)  Ambient's default GLM 5.2 coding model.
-  2. glm-5.2                        GLM 5.2 through the Z.AI coding plan API.
+  2. moonshotai/kimi-k2.7-code      Ambient's Kimi K2.7 Code model.
+  3. glm-5.2                        GLM 5.2 through the Z.AI coding plan API.
+  4. gpt-5.5                        Frontier model for complex coding,
+                                    research, and real-world work.
+      Pay Per API Call              OpenRouter, Baseten, and Vercel metered
+                                    models
+  5. z-ai/glm-5.2                   OpenRouter: GLM 5.2 - $0.98/M input,
+                                    $3.08/M output.
+  6. zai-org/GLM-5.2                Baseten: GLM 5.2 - $1.50/M input, $0.30/M
+                                    cached input, $4.50/M output.
 
   Press enter to confirm or esc to go back
