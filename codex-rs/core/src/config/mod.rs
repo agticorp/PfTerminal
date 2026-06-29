@@ -273,7 +273,13 @@ fn default_multi_agent_v2_usage_hint_text(usage_hint_text: &str, max_concurrency
 pub(crate) const HARD_MIN_MULTI_AGENT_V2_TIMEOUT_MS: i64 = 0;
 pub(crate) const HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS: i64 =
     DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS;
-pub(crate) const DEFAULT_AGENT_MAX_DEPTH: i32 = 2;
+/// Default maximum nesting depth for spawned agent threads.
+///
+/// Root sessions start at depth 0. The PFTerminal standard crew is Nazgul -> Troll -> Orc, where
+/// the Nazgul is itself a spawned child of Codex Main, so the Orcs land at depth 3. A ceiling of
+/// 4 accommodates that full hierarchy plus one level of rework-spawn headroom. Lower values (the
+/// historical 2) reject the Orc spawns with "spawn depth 3 exceeds configured agents.max_depth 2".
+pub(crate) const DEFAULT_AGENT_MAX_DEPTH: i32 = 4;
 pub(crate) const DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS: Option<u64> = None;
 const LOCAL_DEV_BUILD_VERSION: &str = "0.0.0";
 

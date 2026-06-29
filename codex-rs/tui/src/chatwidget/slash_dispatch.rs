@@ -728,7 +728,7 @@ impl ChatWidget {
                 match action.as_str() {
                     "" => self.app_event_tx.send(AppEvent::OpenSpawnRolePicker),
                     "status" => self.app_event_tx.send(AppEvent::OpenSpawnStatus),
-                    "nazgul" => self.app_event_tx.send(AppEvent::OpenSpawnNazgulPanePicker),
+                    "nazgul" => self.app_event_tx.send(AppEvent::OpenSpawnNazgulPicker),
                     "troll" => self.app_event_tx.send(AppEvent::OpenSpawnParentPicker {
                         role: crate::spawn_orchestration::SpawnRole::Troll,
                     }),

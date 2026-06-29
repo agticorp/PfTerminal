@@ -466,6 +466,7 @@ impl AppServerSession {
         model: String,
         model_provider: Option<String>,
         reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+        base_instructions: Option<String>,
     ) -> Result<AppServerStartedThread> {
         let request_id = self.next_request_id();
         let mut session_config = self.session_config_with_effective_service_tier(config);
@@ -480,6 +481,9 @@ impl AppServerSession {
         thread.model_provider = model_provider.or(thread.model_provider);
         thread.thread_source = Some(ThreadSource::Subagent);
         thread.multi_agent_mode = Some(MultiAgentMode::Proactive);
+        if let Some(base_instructions) = base_instructions {
+            thread.base_instructions = Some(base_instructions);
+        }
         let response: ThreadSpawnAgentResponse = self
             .client
             .request_typed(ClientRequest::ThreadSpawnAgent {
@@ -801,6 +805,9 @@ impl AppServerSession {
         collaboration_mode: Option<codex_protocol::config_types::CollaborationMode>,
         personality: Option<codex_protocol::config_types::Personality>,
         output_schema: Option<serde_json::Value>,
+        additional_context: Option<
+            HashMap<String, codex_app_server_protocol::AdditionalContextEntry>,
+        >,
     ) -> Result<TurnStartResponse> {
         let request_id = self.next_request_id();
         let (sandbox_policy, permissions) =
@@ -813,7 +820,7 @@ impl AppServerSession {
                     client_user_message_id: None,
                     input: items,
                     responsesapi_client_metadata: None,
-                    additional_context: None,
+                    additional_context,
                     environments: None,
                     cwd: Some(cwd),
                     runtime_workspace_roots: Some(workspace_roots.to_vec()),
@@ -1329,6 +1336,14 @@ fn config_request_overrides_from_config(
     if config.bypass_hook_trust {
         overrides.insert("bypass_hook_trust".to_string(), true.into());
     }
+    // `thread/spawnAgent` reloads config inside the app-server before enforcing spawn depth.
+    // Forward the effective TUI value so native spawned panes honor `native_spawn_agent_config()`
+    // (including the standard crew's minimum depth) instead of falling back to the app-server's
+    // on-disk/default value.
+    overrides.insert(
+        "agents.max_depth".to_string(),
+        serde_json::json!(config.agent_max_depth),
+    );
     Some(overrides)
 }
 
@@ -2216,6 +2231,7 @@ mod tests {
             .set(WebSearchMode::Disabled)
             .expect("test web search mode should be allowed");
         config.bypass_hook_trust = true;
+        config.agent_max_depth = 7;
         config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
         let thread_id = ThreadId::new();
 
@@ -2250,6 +2266,7 @@ mod tests {
             ("personality".to_string(), string("pragmatic")),
             ("web_search".to_string(), string("disabled")),
             ("bypass_hook_trust".to_string(), true.into()),
+            ("agents.max_depth".to_string(), serde_json::json!(7)),
         ]);
         assert_eq!(start.config, Some(expected_config.clone()));
         assert_eq!(resume.config, Some(expected_config.clone()));

@@ -179,6 +179,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::Path;
@@ -630,6 +631,15 @@ pub(crate) struct App {
     pub(crate) spawn_status_by_thread:
         HashMap<ThreadId, codex_app_server_protocol::CollabAgentState>,
     pub(crate) spawn_parent_reports_by_node: HashMap<String, VecDeque<String>>,
+    /// Child reports delivered to a native Codex parent thread that could not be turned into a
+    /// parent turn immediately because the parent was mid-turn. These are flushed (each turned
+    /// into a parent processing turn) when the parent goes idle. Keyed by parent thread id so a
+    /// flush only fires for the pane that actually became idle.
+    pub(crate) spawn_pending_reports_by_thread: HashMap<ThreadId, VecDeque<String>>,
+    /// Native Codex turn ids whose pfterminal_send_task blocks have already been routed. The same
+    /// app-server notification can be observed during enqueue and active replay, so dispatch blocks
+    /// must be consumed exactly once.
+    pub(crate) spawn_processed_dispatch_turns: HashSet<(ThreadId, String)>,
     pub(crate) spawn_nazgul_pane_id: Option<String>,
     side_threads: HashMap<ThreadId, SideThreadState>,
     pub(crate) claude_panes: crate::claude_panes::ClaudePaneRegistry,
@@ -1126,11 +1136,18 @@ See the PFTerminal keymap documentation for supported actions and examples."
             .as_ref()
             .and_then(|layout| layout.spawn_nazgul_pane_id.clone())
             .filter(|pane_id| {
-                pane_id == crate::claude_panes::CODEX_MAIN_PANE_ID
-                    || restored_claude_panes
-                        .panes()
-                        .iter()
-                        .any(|pane| pane.id == *pane_id)
+                // `codex-main`, any restored Claude pane, or a native Codex agent thread node id
+                // (`thread:<uuid>`) are all valid Nazgul root bindings.
+                if pane_id == crate::claude_panes::CODEX_MAIN_PANE_ID {
+                    return true;
+                }
+                if crate::spawn_orchestration::node_id_thread(pane_id).is_some() {
+                    return true;
+                }
+                restored_claude_panes
+                    .panes()
+                    .iter()
+                    .any(|pane| pane.id == *pane_id)
             });
 
         let mut app = Self {
@@ -1177,6 +1194,8 @@ See the PFTerminal keymap documentation for supported actions and examples."
             spawn_parent_by_node: restored_spawn_parent_by_node,
             spawn_status_by_thread: HashMap::new(),
             spawn_parent_reports_by_node: HashMap::new(),
+            spawn_pending_reports_by_thread: HashMap::new(),
+            spawn_processed_dispatch_turns: HashSet::new(),
             spawn_nazgul_pane_id: restored_spawn_nazgul_pane_id,
             side_threads: HashMap::new(),
             claude_panes: restored_claude_panes,

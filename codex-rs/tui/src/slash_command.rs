@@ -192,8 +192,6 @@ impl SlashCommand {
                 | SlashCommand::Usage
                 | SlashCommand::Ide
                 | SlashCommand::Providers
-                | SlashCommand::Panes
-                | SlashCommand::Spawn
                 | SlashCommand::Vault
         )
     }

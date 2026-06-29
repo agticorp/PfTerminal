@@ -151,6 +151,8 @@ pub(crate) enum AppEvent {
     OpenSpawnRolePicker,
     /// Open the `/spawn` Nazgul pane-binding picker.
     OpenSpawnNazgulPanePicker,
+    /// Open the `/spawn` Nazgul role picker (create a new Nazgul pane or bind an existing one).
+    OpenSpawnNazgulPicker,
     /// Bind an existing user pane as the Nazgul/root orchestration pane.
     BindSpawnNazgulPane {
         pane_id: String,
@@ -183,8 +185,8 @@ pub(crate) enum AppEvent {
         provider: Option<String>,
         effort: Option<ReasoningEffort>,
     },
-    /// Create the default persistent demo crew: one Troll and two Orc children.
-    CreateSpawnDemoCrew,
+    /// Create the standard persistent crew: Nazgul (root) -> Troll -> 2 Orcs. No task is started.
+    CreateSpawnStandardCrew,
     /// Open a prompt that sends work to an existing spawned-agent pane.
     OpenSpawnAgentTaskPrompt {
         thread_id: codex_protocol::ThreadId,
@@ -202,10 +204,6 @@ pub(crate) enum AppEvent {
     SubmitSpawnClaudePaneTask {
         pane_id: String,
         task: String,
-    },
-    /// Send the built-in two-Orc demo orchestration task to a Troll pane.
-    RunSpawnDemoTask {
-        troll_thread_id: codex_protocol::ThreadId,
     },
     /// Show the current orchestration tree.
     OpenSpawnStatus,

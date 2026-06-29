@@ -691,6 +691,7 @@ impl App {
                             collaboration_mode.clone(),
                             *personality,
                             final_output_json_schema.clone(),
+                            self.spawn_additional_context_for_thread(thread_id),
                         )
                         .await?;
                 }
@@ -1544,6 +1545,7 @@ impl App {
                 let Ok(thread_id) = ThreadId::from_string(&notification.thread_id) else {
                     return;
                 };
+                self.dispatch_native_spawn_task_blocks_from_turn(thread_id, &notification.turn);
                 let status = match notification.turn.status {
                     TurnStatus::Completed => {
                         codex_app_server_protocol::CollabAgentStatus::Completed
@@ -1587,6 +1589,9 @@ impl App {
         }
         if !is_running {
             self.record_spawn_child_report_for_thread(thread_id, status, report_message);
+            // This thread just went idle. If child reports arrived while it was mid-turn, flush them
+            // now into a real processing turn so no report is silently dropped (the multi-turn race).
+            self.flush_pending_reports_for_thread(thread_id);
         }
     }
 

@@ -10,16 +10,25 @@ use crate::claude_panes::CODEX_MAIN_PANE_ID;
 use crate::claude_panes::ClaudeProviderProfileKind;
 use crate::multi_agents::agent_picker_status_dot_spans;
 use crate::multi_agents::format_agent_picker_item_name;
+use codex_app_server_protocol::AdditionalContextEntry;
+use codex_app_server_protocol::AdditionalContextKind;
 use codex_features::Feature;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_ANTHROPIC_FAST_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL;
+use codex_model_provider_info::ZAI_DEFAULT_MODEL;
+use codex_model_provider_info::ZAI_PROVIDER_ID;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::eyre;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+const NAZGUL_ROLE_NAME: &str = "nazgul";
 const TROLL_ROLE: &str = "troll";
 const ORC_ROLE: &str = "orc";
 const SEND_TASK_FENCE_OPEN: &str = "```pfterminal-send-task";
@@ -27,6 +36,8 @@ const SEND_TASK_FENCE_CLOSE: &str = "```";
 const SEND_TASK_OPEN: &str = "<pfterminal_send_task";
 const SEND_TASK_CLOSE: &str = "</pfterminal_send_task>";
 const SPAWN_PARENT_REPORT_LIMIT: usize = 12;
+const SPAWN_PROCESSED_DISPATCH_TURN_LIMIT: usize = 1024;
+const SPAWN_PROCESSED_DISPATCH_TURN_RETAIN: usize = SPAWN_PROCESSED_DISPATCH_TURN_LIMIT / 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SpawnTaskDispatch {
@@ -57,7 +68,7 @@ impl SpawnRole {
 
     pub(crate) fn agent_type(self) -> Option<&'static str> {
         match self {
-            Self::Nazgul => None,
+            Self::Nazgul => Some(NAZGUL_ROLE_NAME),
             Self::Troll => Some(TROLL_ROLE),
             Self::Orc => Some(ORC_ROLE),
         }
@@ -81,13 +92,13 @@ impl App {
         let items = vec![
             section_item("Quick start"),
             SelectionItem {
-                name: "Create demo crew: Troll + 2 Orcs".to_string(),
+                name: "Create standard crew: Nazgul + Troll + 2 Orcs".to_string(),
                 description: Some(
-                    "Create persistent named panes for the animated website + crypto formula exercise."
+                    "Create persistent named panes (Nazgul GLM 5.2 Z.AI xhigh, Troll Z.AI Vercel Fast, 2x Codex gpt-5.5 xhigh). No task is started."
                         .to_string(),
                 ),
                 actions: vec![Box::new(|tx| {
-                    tx.send(AppEvent::CreateSpawnDemoCrew);
+                    tx.send(AppEvent::CreateSpawnStandardCrew);
                 })],
                 dismiss_on_select: true,
                 ..Default::default()
@@ -136,6 +147,15 @@ impl App {
             ));
         }
 
+        // Native Codex agent panes (threads) are also eligible Nazgul roots. A Codex pane is a
+        // user-controllable thread that is not itself a spawn supervisor/executor role, i.e. the
+        // primary Codex Main thread plus any additional Codex threads without a Troll/Orc role.
+        let codex_panes = self.nazgul_codex_pane_picker_items();
+        if !codex_panes.is_empty() {
+            items.push(section_item("Codex Agent Panes"));
+            items.extend(codex_panes);
+        }
+
         self.chat_widget.show_selection_view(SelectionViewParams {
             title: Some("Bind Nazgul Pane".to_string()),
             subtitle: Some("Select an existing user pane to act as the visible root.".to_string()),
@@ -147,14 +167,56 @@ impl App {
         });
     }
 
+    /// Build Nazgul-binding picker rows for native Codex agent panes (threads).
+    ///
+    /// Only threads that can plausibly act as the root orchestration pane are listed: the primary
+    /// Codex Main thread (when known) and any additional Codex threads that are not Troll/Orc
+    /// workers. Troll and Orc threads are spawn children and cannot be the root, so they are
+    /// excluded. `codex-main` is already offered as a user pane above and is not duplicated here.
+    pub(crate) fn nazgul_codex_pane_picker_items(&self) -> Vec<SelectionItem> {
+        let mut items = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (thread_id, entry) in self.agent_navigation.ordered_threads() {
+            // Skip Troll/Orc workers; they are spawn children, not roots.
+            if entry
+                .agent_role
+                .as_deref()
+                .is_some_and(|role| role == TROLL_ROLE || role == ORC_ROLE)
+            {
+                continue;
+            }
+            let node_id = thread_node_id(thread_id);
+            if !seen.insert(node_id.clone()) {
+                continue;
+            }
+            let is_primary = self.primary_thread_id == Some(thread_id);
+            let name = format_agent_picker_item_name(
+                entry.agent_nickname.as_deref(),
+                entry.agent_role.as_deref(),
+                is_primary,
+            );
+            let description = if is_primary {
+                "Primary Codex Main thread".to_string()
+            } else {
+                "Codex agent pane".to_string()
+            };
+            items.push(self.nazgul_pane_item(node_id, name, description));
+        }
+        items
+    }
+
+    pub(crate) fn set_spawn_nazgul_pane_binding(&mut self, pane_id: String) {
+        self.spawn_nazgul_pane_id = Some(pane_id);
+        self.persist_pane_state();
+    }
+
     pub(crate) fn bind_spawn_nazgul_pane(&mut self, pane_id: String) {
-        self.spawn_nazgul_pane_id = Some(pane_id.clone());
-        let title = self.user_pane_title(&pane_id);
+        let title = self.nazgul_bound_display_title(&pane_id);
+        self.set_spawn_nazgul_pane_binding(pane_id);
         self.chat_widget.add_info_message(
             format!("Bound {title} as Nazgul root."),
             Some("No worker was spawned.".to_string()),
         );
-        self.persist_pane_state();
     }
 
     pub(crate) fn spawn_context_for_user_pane(&self, pane_id: &str) -> Option<String> {
@@ -175,6 +237,119 @@ impl App {
             };
         }
         Some(self.render_nazgul_spawn_context(bound_pane_id))
+    }
+
+    /// Render the live spawn-orchestration context for a native Codex thread (a spawned
+    /// Nazgul/Troll/Orc pane). Unlike `base_instructions` injected at spawn time, this is computed
+    /// fresh on every turn so the pane sees the CURRENT Troll/Orc hierarchy — e.g. a Nazgul learns
+    /// that a Troll and two Orcs now exist even though none were present when it was spawned.
+    pub(crate) fn spawn_context_for_thread(&self, thread_id: ThreadId) -> Option<String> {
+        let role = self
+            .agent_navigation
+            .get(&thread_id)
+            .and_then(|entry| entry.agent_role.as_deref())?;
+        let label = format_agent_picker_item_name(
+            self.agent_navigation
+                .get(&thread_id)
+                .and_then(|entry| entry.agent_nickname.as_deref()),
+            Some(role),
+            self.primary_thread_id == Some(thread_id),
+        );
+        match role {
+            NAZGUL_ROLE_NAME => Some(self.render_nazgul_spawn_context_with_title(label)),
+            TROLL_ROLE => Some(self.render_troll_spawn_context_for_thread(thread_id, label)),
+            ORC_ROLE => Some(self.render_orc_spawn_context_for_thread(thread_id, label)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn spawn_additional_context_for_thread(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<HashMap<String, AdditionalContextEntry>> {
+        if !self.is_spawn_orchestration_thread(thread_id) {
+            return None;
+        }
+        self.spawn_context_for_thread(thread_id).map(|context| {
+            let mut map = HashMap::new();
+            map.insert(
+                "pfterminal_spawn_context".to_string(),
+                AdditionalContextEntry {
+                    value: context,
+                    kind: AdditionalContextKind::Application,
+                },
+            );
+            map
+        })
+    }
+
+    fn render_troll_spawn_context_for_thread(&self, thread_id: ThreadId, label: String) -> String {
+        let troll_node_id = thread_node_id(thread_id);
+        let mut context = String::new();
+        let _ = writeln!(context, "<pfterminal_spawn_context>");
+        let _ = writeln!(context, "You are the PFTerminal Troll pane: {label}.");
+        let _ = writeln!(
+            context,
+            "You are an engineering manager / VP-of-engineering style supervisor. You report to the Nazgul, the effective CTO. Orcs are IC executors who report to you."
+        );
+        let _ = writeln!(
+            context,
+            "Prefer delegation, review, coordination, and enforcement over implementation. Be blunt, adversarial, and demanding about weak work; reject shortcuts and force rework when evidence is not good enough."
+        );
+        let _ = writeln!(
+            context,
+            "Work against spec docs, ensure shipped work is documented, and send bugs found in review back to the responsible Orc."
+        );
+        write_spawn_product_contract(&mut context);
+        write_spawn_dispatch_contract(&mut context);
+        let _ = writeln!(context, "Orcs assigned to you:");
+        let (orcs, claude_orcs) = self.spawn_orc_children_for_node(&troll_node_id);
+        if orcs.is_empty() && claude_orcs.is_empty() {
+            let _ = writeln!(context, "- none assigned yet.");
+        } else {
+            for (orc_thread_id, orc_entry) in orcs {
+                self.write_spawn_context_agent(
+                    &mut context,
+                    "- ",
+                    orc_thread_id,
+                    orc_entry,
+                    Some(ORC_ROLE),
+                );
+            }
+            for pane in claude_orcs {
+                self.write_spawn_context_claude_pane(&mut context, "- ", pane, SpawnRole::Orc);
+            }
+        }
+        self.write_spawn_parent_reports(&mut context, &troll_node_id);
+        let _ = writeln!(context, "</pfterminal_spawn_context>");
+        context
+    }
+
+    fn render_orc_spawn_context_for_thread(&self, thread_id: ThreadId, label: String) -> String {
+        let mut context = String::new();
+        let _ = writeln!(context, "<pfterminal_spawn_context>");
+        let _ = writeln!(context, "You are the PFTerminal Orc pane: {label}.");
+        let _ = writeln!(
+            context,
+            "You are an IC executor. Chain of command: Orc -> Troll engineering manager -> Nazgul CTO -> Sauron/the human CEO."
+        );
+        let _ = writeln!(
+            context,
+            "Do exactly what your Troll tells you. Do not expand scope. Execute directly and provide evidence."
+        );
+        write_spawn_product_contract(&mut context);
+        if let Some(parent_node_id) = self.logical_parent_node_for_thread(thread_id)
+            && let Some(parent_title) = self.spawn_node_title(&parent_node_id)
+        {
+            let _ = writeln!(context, "You report to: {parent_title}.");
+        } else {
+            let _ = writeln!(
+                context,
+                "You do not currently have an assigned Troll supervisor."
+            );
+        }
+        let _ = writeln!(context, "</pfterminal_spawn_context>");
+        context
     }
 
     pub(crate) fn next_spawn_agent_nickname(&self, role: SpawnRole) -> Option<String> {
@@ -506,8 +681,15 @@ impl App {
         source_pane_id: &str,
         dispatches: Vec<SpawnTaskDispatch>,
     ) {
-        let source_is_active = self.claude_panes.active_user_pane_id() == source_pane_id;
-        let source_title = self.user_pane_title(source_pane_id);
+        let source_thread_id = node_id_thread(source_pane_id);
+        let source_is_active = self.claude_panes.active_user_pane_id() == source_pane_id
+            || source_thread_id.is_some_and(|thread_id| {
+                self.active_thread_id == Some(thread_id)
+                    && self.claude_panes.active_user_pane_id() == CODEX_MAIN_PANE_ID
+            });
+        let source_title = self
+            .spawn_node_title(source_pane_id)
+            .unwrap_or_else(|| self.user_pane_title(source_pane_id));
         for dispatch in dispatches {
             if dispatch.task.trim().is_empty() {
                 self.record_spawn_dispatch_error(
@@ -557,6 +739,72 @@ impl App {
                     self.record_spawn_dispatch_error(source_pane_id, source_is_active, err);
                 }
             }
+        }
+    }
+
+    pub(crate) fn dispatch_native_spawn_task_blocks_from_turn(
+        &mut self,
+        source_thread_id: ThreadId,
+        turn: &codex_app_server_protocol::Turn,
+    ) {
+        if !self.is_spawn_orchestration_thread(source_thread_id) {
+            return;
+        }
+        if turn.status == codex_app_server_protocol::TurnStatus::InProgress {
+            return;
+        }
+        let dispatch_turn = (source_thread_id, turn.id.clone());
+        if !self
+            .spawn_processed_dispatch_turns
+            .insert(dispatch_turn.clone())
+        {
+            return;
+        }
+        self.evict_spawn_processed_dispatch_turns_if_needed(&dispatch_turn);
+        let mut assistant_text = String::new();
+        for item in &turn.items {
+            if let codex_app_server_protocol::ThreadItem::AgentMessage { text, .. } = item {
+                if !assistant_text.is_empty() {
+                    assistant_text.push('\n');
+                }
+                assistant_text.push_str(text);
+            }
+        }
+        if assistant_text.trim().is_empty() {
+            return;
+        }
+        let (_visible, dispatches) = extract_spawn_task_dispatches(&assistant_text);
+        if dispatches.is_empty() {
+            return;
+        }
+        self.dispatch_spawn_task_blocks(&thread_node_id(source_thread_id), dispatches);
+    }
+
+    fn evict_spawn_processed_dispatch_turns_if_needed(
+        &mut self,
+        protected_turn: &(ThreadId, String),
+    ) {
+        let live_threads: HashSet<ThreadId> = self
+            .agent_navigation
+            .ordered_threads()
+            .into_iter()
+            .map(|(thread_id, _)| thread_id)
+            .collect();
+        let live_thread_count = live_threads.len();
+        if let Some((before_len, after_len)) = evict_spawn_processed_dispatch_turns(
+            &mut self.spawn_processed_dispatch_turns,
+            &live_threads,
+            protected_turn,
+        ) {
+            tracing::debug!(
+                before_len,
+                after_len,
+                limit = SPAWN_PROCESSED_DISPATCH_TURN_LIMIT,
+                live_thread_count,
+                protected_thread_id = %protected_turn.0,
+                protected_turn_id = protected_turn.1.as_str(),
+                "evicted processed native spawn dispatch turns"
+            );
         }
     }
 
@@ -634,7 +882,12 @@ impl App {
     fn notify_spawn_parent_report(&mut self, parent_node_id: &str, report: &str) {
         let summary = "Child report delivered.".to_string();
         let hint = Some(report.to_string());
-        if let Some(parent_pane_id) = node_id_pane(parent_node_id) {
+        // `codex-main` is the native primary Codex thread, not a Claude pane. Route it through the
+        // native-thread path below instead of the Claude-pane path, otherwise dispatch errors with
+        // "Claude pane `codex-main` does not exist".
+        if let Some(parent_pane_id) = node_id_pane(parent_node_id)
+            && parent_pane_id != CODEX_MAIN_PANE_ID
+        {
             if self.claude_panes.active_user_pane_id() == parent_pane_id {
                 self.chat_widget.add_info_message(summary, hint);
             } else {
@@ -644,9 +897,7 @@ impl App {
                 );
             }
             if !self.claude_panes.claude_pane_is_running(parent_pane_id) {
-                let trigger_prompt = format!(
-                    "A child pane has reported back. Review the child report below and act on it immediately — triage, dispatch follow-up work, or acknowledge. Do not wait for Sauron to prompt you.\n\n{report}"
-                );
+                let trigger_prompt = child_report_processing_prompt(report);
                 self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
                     pane_id: parent_pane_id.to_string(),
                     task: trigger_prompt,
@@ -654,27 +905,96 @@ impl App {
             }
             return;
         }
-        if let Some(parent_thread_id) = node_id_thread(parent_node_id) {
+        // Native Codex parent thread (a spawned Nazgul/Troll) or `codex-main` (the primary thread).
+        let parent_thread_id = if parent_node_id == pane_node_id(CODEX_MAIN_PANE_ID) {
+            self.primary_thread_id
+        } else {
+            node_id_thread(parent_node_id)
+        };
+        if let Some(parent_thread_id) = parent_thread_id {
             if self.active_thread_id == Some(parent_thread_id)
                 && self.claude_panes.active_user_pane_id() == CODEX_MAIN_PANE_ID
             {
                 self.chat_widget.add_info_message(summary, hint);
             }
+            // Deliver the report as a real parent processing turn when the parent is idle. When the
+            // parent is mid-turn, enqueue the report instead of dropping it; it is flushed into a
+            // processing turn when the parent next goes idle (see flush_pending_reports_for_thread).
             let is_running = self
                 .agent_navigation
                 .get(&parent_thread_id)
                 .map(|e| e.is_running)
                 .unwrap_or(false);
-            if !is_running {
-                let trigger_prompt = format!(
-                    "A child pane has reported back. Review the child report below and act on it immediately — triage, dispatch follow-up work, or acknowledge. Do not wait for Sauron to prompt you.\n\n{report}"
-                );
+            if is_running {
+                self.enqueue_pending_report(parent_thread_id, report);
+            } else {
+                let trigger_prompt = child_report_processing_prompt(report);
                 self.app_event_tx.send(AppEvent::SubmitSpawnAgentTask {
                     thread_id: parent_thread_id,
                     task: trigger_prompt,
                 });
             }
         }
+    }
+
+    /// Queue a child report for a native Codex parent thread that is currently mid-turn. The queued
+    /// report is turned into a parent processing turn when the parent goes idle.
+    fn enqueue_pending_report(&mut self, parent_thread_id: ThreadId, report: &str) {
+        let queue = self
+            .spawn_pending_reports_by_thread
+            .entry(parent_thread_id)
+            .or_default();
+        // Deduplicate against the most recent queued report so a repeated identical result does not
+        // spawn redundant turns.
+        if queue.back() == Some(&report.to_string()) {
+            return;
+        }
+        queue.push_back(report.to_string());
+        tracing::info!(
+            thread_id = %parent_thread_id,
+            queue_len = queue.len(),
+            "queued child report for busy parent; will flush on parent idle"
+        );
+    }
+
+    /// Drain pending child reports for a native Codex parent thread that has just gone idle, turning
+    /// each into a parent processing turn. Returns true if any report was flushed.
+    ///
+    /// This is the fix for the multi-turn race: a report that arrived while the parent was mid-turn
+    /// is no longer dropped; it is processed as soon as the parent becomes idle, like a user query.
+    pub(crate) fn flush_pending_reports_for_thread(&mut self, parent_thread_id: ThreadId) -> bool {
+        let Some(queue) = self
+            .spawn_pending_reports_by_thread
+            .get_mut(&parent_thread_id)
+        else {
+            return false;
+        };
+        if queue.is_empty() {
+            return false;
+        }
+        // Drain the queue into a single combined processing turn so the parent reviews every pending
+        // report at once rather than starting one turn per report. This keeps the parent's attention
+        // on the full set of outstanding child results and avoids interleaving many short turns.
+        let reports: Vec<String> = queue.drain(..).collect();
+        let body = if reports.len() == 1 {
+            reports.into_iter().next().expect("non-empty")
+        } else {
+            let mut combined = String::from(
+                "Multiple child panes have reported back while you were busy. Review every report "
+                    .to_string()
+                    + "below, triage each, dispatch follow-up work or acknowledge, and do not skip any of them.\n\n",
+            );
+            for (index, report) in reports.into_iter().enumerate() {
+                let _ = writeln!(combined, "## Child report {index}\n{report}\n");
+            }
+            combined
+        };
+        let trigger_prompt = child_report_processing_prompt(&body);
+        self.app_event_tx.send(AppEvent::SubmitSpawnAgentTask {
+            thread_id: parent_thread_id,
+            task: trigger_prompt,
+        });
+        true
     }
 
     fn record_spawn_dispatch_queued(
@@ -826,44 +1146,98 @@ impl App {
             .or_else(|| self.chat_widget.current_reasoning_effort())
     }
 
-    pub(crate) async fn create_spawn_demo_crew(
+    /// Standard crew model/effort mapping (all Codex-native):
+    ///   Nazgul: glm-5.2 (Z.AI) @ xhigh
+    ///   Troll:  zai/glm-5.2-fast (Vercel) @ default
+    ///   Orc 1/2: gpt-5.5 (OpenAI) @ xhigh
+    pub(crate) const STANDARD_NAZGUL_MODEL: &'static str = ZAI_DEFAULT_MODEL;
+    pub(crate) const STANDARD_TROLL_MODEL: &'static str = VERCEL_GLM_5_2_FAST_MODEL;
+    pub(crate) const STANDARD_ORC_MODEL: &'static str = "gpt-5.5";
+
+    pub(crate) fn ensure_standard_crew_providers_ready(&self) -> Result<()> {
+        // Preflight every provider before creating the root Nazgul. Without this, a missing Troll
+        // or Orc credential leaves a half-created crew with only the already-bound Nazgul pane.
+        for provider_id in [
+            ZAI_PROVIDER_ID,
+            VERCEL_ANTHROPIC_FAST_PROVIDER_ID,
+            OPENAI_PROVIDER_ID,
+        ] {
+            self.ensure_native_spawn_provider_ready(Some(provider_id))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn create_spawn_standard_crew(
         &mut self,
         app_server: &mut AppServerSession,
-    ) -> Result<ThreadId> {
+    ) -> Result<(ThreadId, ThreadId)> {
         let root_thread_id = self
             .primary_thread_id
             .or(self.active_thread_id)
-            .ok_or_else(|| eyre!("Cannot create demo crew before Codex Main has started."))?;
-        let model = self.native_spawn_default_model();
-        let provider = ChatWidget::model_provider_for_selection(&model);
-        self.ensure_native_spawn_provider_ready(provider.as_deref())?;
-        let troll_effort = self.native_spawn_effort_for_model(SpawnRole::Troll, &model);
-        let orc_effort = self.native_spawn_effort_for_model(SpawnRole::Orc, &model);
+            .ok_or_else(|| eyre!("Cannot create standard crew before Codex Main has started."))?;
         let spawn_config = self.native_spawn_agent_config()?;
+        self.ensure_standard_crew_providers_ready()?;
 
+        // Nazgul — glm-5.2 (Z.AI) @ xhigh, root, preloaded with Nazgul instructions.
+        let nazgul_nickname = self.next_spawn_agent_nickname(SpawnRole::Nazgul);
+        let nazgul_base_instructions =
+            self.nazgul_native_base_instructions(nazgul_nickname.as_deref());
+        let nazgul = app_server
+            .spawn_agent_thread(
+                &spawn_config,
+                root_thread_id,
+                NAZGUL_ROLE_NAME.to_string(),
+                nazgul_nickname.clone(),
+                Self::STANDARD_NAZGUL_MODEL.to_string(),
+                Some(ZAI_PROVIDER_ID.to_string()),
+                Some(ReasoningEffort::XHigh),
+                Some(nazgul_base_instructions),
+            )
+            .await?;
+        let nazgul_thread_id = nazgul.session.thread_id;
+        self.register_spawn_agent_pane(
+            nazgul_thread_id,
+            root_thread_id,
+            // The Nazgul is the root; its logical parent is the current root node (codex-main or a
+            // prior binding). It will be auto-bound below.
+            self.spawn_root_node_id(),
+            nazgul_nickname,
+            NAZGUL_ROLE_NAME,
+            nazgul,
+        )
+        .await;
+        // Bind the freshly spawned Nazgul as the visible root so Troll spawns and "Nazgul"
+        // dispatches route to it.
+        self.set_spawn_nazgul_pane_binding(thread_node_id(nazgul_thread_id));
+
+        // Troll — zai/glm-5.2-fast (Vercel) under the Nazgul.
         let troll_nickname = self.next_spawn_agent_nickname(SpawnRole::Troll);
         let troll = app_server
             .spawn_agent_thread(
                 &spawn_config,
-                root_thread_id,
+                nazgul_thread_id,
                 TROLL_ROLE.to_string(),
                 troll_nickname.clone(),
-                model.clone(),
-                provider.clone(),
-                troll_effort.clone(),
+                Self::STANDARD_TROLL_MODEL.to_string(),
+                Some(VERCEL_ANTHROPIC_FAST_PROVIDER_ID.to_string()),
+                // Vercel-fast GLM does not take a reasoning effort override.
+                /*effort*/
+                None,
+                /*base_instructions*/ None,
             )
             .await?;
         let troll_thread_id = troll.session.thread_id;
         self.register_spawn_agent_pane(
             troll_thread_id,
-            root_thread_id,
-            self.spawn_root_node_id(),
+            nazgul_thread_id,
+            thread_node_id(nazgul_thread_id),
             troll_nickname,
             TROLL_ROLE,
             troll,
         )
         .await;
 
+        // Two Orcs — gpt-5.5 (OpenAI) @ xhigh under the Troll.
         for _ in 0..2 {
             let orc_nickname = self.next_spawn_agent_nickname(SpawnRole::Orc);
             let orc = app_server
@@ -872,9 +1246,10 @@ impl App {
                     troll_thread_id,
                     ORC_ROLE.to_string(),
                     orc_nickname.clone(),
-                    model.clone(),
-                    provider.clone(),
-                    orc_effort.clone(),
+                    Self::STANDARD_ORC_MODEL.to_string(),
+                    Some(OPENAI_PROVIDER_ID.to_string()),
+                    Some(ReasoningEffort::XHigh),
+                    /*base_instructions*/ None,
                 )
                 .await?;
             let orc_thread_id = orc.session.thread_id;
@@ -889,9 +1264,8 @@ impl App {
             .await;
         }
 
-        Ok(troll_thread_id)
+        Ok((nazgul_thread_id, troll_thread_id))
     }
-
     pub(crate) fn native_spawn_agent_config(&self) -> Result<crate::legacy_core::config::Config> {
         let mut spawn_config = self.config.clone();
         spawn_config.service_tier = self.chat_widget.configured_service_tier();
@@ -903,6 +1277,12 @@ impl App {
             .features
             .enable(Feature::MultiAgentMode)
             .map_err(|err| eyre!("Cannot enable native spawn orchestration mode: {err}"))?;
+        // The standard crew is Nazgul -> Troll -> Orc, i.e. depth 3 when the Nazgul is itself a
+        // spawned child of Codex Main. Keep native TUI spawns at a ceiling that accommodates the
+        // full hierarchy plus one level of rework headroom.
+        if spawn_config.agent_max_depth < 4 {
+            spawn_config.agent_max_depth = 4;
+        }
         Ok(spawn_config)
     }
 
@@ -1007,22 +1387,37 @@ impl App {
     pub(crate) fn spawn_tree_items(&self, show_task_actions: bool) -> Vec<SelectionItem> {
         let mut items = Vec::new();
         items.push(section_item("Nazgul"));
-        let bound_pane_id = self
-            .spawn_nazgul_pane_id
-            .as_deref()
-            .unwrap_or(CODEX_MAIN_PANE_ID);
-        items.push(SelectionItem {
-            name: format!("Nazgul: {}", self.user_pane_title(bound_pane_id)),
-            description: Some("Bound root pane; no worker thread.".to_string()),
-            is_current: self.claude_panes.active_user_pane_id() == bound_pane_id,
-            actions: vec![Box::new({
-                let pane_id = bound_pane_id.to_string();
-                move |tx| {
+        let bound_target = self.spawn_nazgul_bound_target().to_string();
+        let nazgul_title = self.nazgul_bound_display_title(&bound_target);
+        let is_current = if let Some(thread_id) = node_id_thread(&bound_target) {
+            self.active_thread_id == Some(thread_id)
+                && self.claude_panes.active_user_pane_id() == CODEX_MAIN_PANE_ID
+        } else {
+            self.claude_panes.active_user_pane_id() == bound_target
+        };
+        let actions = if let Some(thread_id) = node_id_thread(&bound_target) {
+            vec![
+                Box::new(move |tx: &crate::app_event_sender::AppEventSender| {
+                    tx.send(AppEvent::SelectAgentThread(thread_id));
+                })
+                    as Box<dyn Fn(&crate::app_event_sender::AppEventSender) + Send + Sync>,
+            ]
+        } else {
+            let pane_id = bound_target.clone();
+            vec![
+                Box::new(move |tx: &crate::app_event_sender::AppEventSender| {
                     tx.send(AppEvent::SelectUserPane {
                         pane_id: pane_id.clone(),
                     });
-                }
-            })],
+                })
+                    as Box<dyn Fn(&crate::app_event_sender::AppEventSender) + Send + Sync>,
+            ]
+        };
+        items.push(SelectionItem {
+            name: format!("Nazgul: {nazgul_title}"),
+            description: Some("Bound root pane; no worker thread.".to_string()),
+            is_current,
+            actions,
             dismiss_on_select: true,
             ..Default::default()
         });
@@ -1040,9 +1435,6 @@ impl App {
             }
             let troll_node_id = thread_node_id(troll_thread_id);
             let (orcs, claude_orcs) = self.spawn_orc_children_for_node(&troll_node_id);
-            if show_task_actions && orcs.len() + claude_orcs.len() >= 2 {
-                items.push(self.spawn_demo_task_item(troll_thread_id, 2));
-            }
             if orcs.is_empty() && claude_orcs.is_empty() {
                 items.push(disabled_item("  No Orcs for this Troll yet"));
             }
@@ -1109,7 +1501,9 @@ impl App {
         SelectionItem {
             name: role.label().to_string(),
             description: Some(match role {
-                SpawnRole::Nazgul => "Bind root pane.".to_string(),
+                SpawnRole::Nazgul => {
+                    "Create a Nazgul root pane or bind an existing pane.".to_string()
+                }
                 SpawnRole::Troll => "Create a persistent supervisor agent pane.".to_string(),
                 SpawnRole::Orc => "Create a persistent executor agent pane.".to_string(),
             }),
@@ -1119,7 +1513,7 @@ impl App {
                 Vec::new()
             } else if role == SpawnRole::Nazgul {
                 vec![Box::new(|tx| {
-                    tx.send(AppEvent::OpenSpawnNazgulPanePicker);
+                    tx.send(AppEvent::OpenSpawnNazgulPicker);
                 })]
             } else {
                 vec![Box::new(move |tx| {
@@ -1129,6 +1523,52 @@ impl App {
             dismiss_on_select: true,
             ..Default::default()
         }
+    }
+
+    /// Picker shown when the user selects the Nazgul role from `/spawn`. Offers to create a fresh
+    /// Nazgul pane (preloaded with Nazgul instructions) or to bind an existing user pane as the
+    /// Nazgul root.
+    pub(crate) fn open_spawn_nazgul_picker(&mut self) {
+        let items = vec![
+            section_item("Create"),
+            SelectionItem {
+                name: "Create Nazgul pane".to_string(),
+                description: Some(
+                    "Spawn a new Codex-native pane loaded with the Nazgul root instructions and bind it as the root."
+                        .to_string(),
+                ),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::OpenSpawnModelPicker {
+                        role: SpawnRole::Nazgul,
+                        parent_node_id: None,
+                    });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            section_item("Bind"),
+            SelectionItem {
+                name: "Bind existing pane".to_string(),
+                description: Some(
+                    "Bind an existing user pane (Codex Main, a Codex agent pane, or a Claude pane) as the Nazgul root."
+                        .to_string(),
+                ),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::OpenSpawnNazgulPanePicker);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+        ];
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            title: Some("Nazgul".to_string()),
+            subtitle: Some("Create a root pane or bind an existing one.".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            is_searchable: true,
+            search_placeholder: Some("Search Nazgul options".to_string()),
+            ..Default::default()
+        });
     }
 
     fn spawn_role_disabled_reason(&self, role: SpawnRole) -> Option<String> {
@@ -1145,11 +1585,14 @@ impl App {
                 .spawn_parent_by_thread
                 .values()
                 .any(|parent| *parent == thread_id)
+            || self.nazgul_bound_thread_id() == Some(thread_id)
             || self
                 .agent_navigation
                 .get(&thread_id)
                 .and_then(|entry| entry.agent_role.as_deref())
-                .is_some_and(|role| role == TROLL_ROLE || role == ORC_ROLE)
+                .is_some_and(|role| {
+                    role == NAZGUL_ROLE_NAME || role == TROLL_ROLE || role == ORC_ROLE
+                })
     }
 
     fn nazgul_pane_item(
@@ -1185,12 +1628,47 @@ impl App {
             .unwrap_or_else(|| pane_id.to_string())
     }
 
+    /// Human-readable title for the bound Nazgul root, covering user panes and native Codex
+    /// agent threads. A thread binding is rendered with the thread's picker label so the status
+    /// tree stays readable instead of showing a raw `thread:<uuid>` node id.
+    fn nazgul_bound_display_title(&self, target: &str) -> String {
+        if let Some(thread_id) = node_id_thread(target) {
+            let entry_label = self.agent_navigation.get(&thread_id).map(|entry| {
+                format_agent_picker_item_name(
+                    entry.agent_nickname.as_deref(),
+                    entry.agent_role.as_deref(),
+                    self.primary_thread_id == Some(thread_id),
+                )
+            });
+            return entry_label.unwrap_or_else(|| target.to_string());
+        }
+        self.user_pane_title(target)
+    }
+
     fn spawn_root_node_id(&self) -> String {
-        pane_node_id(
-            self.spawn_nazgul_pane_id
-                .as_deref()
-                .unwrap_or(CODEX_MAIN_PANE_ID),
-        )
+        let target = self.spawn_nazgul_bound_target();
+        if node_id_thread(target).is_some() {
+            return target.to_string();
+        }
+        pane_node_id(target)
+    }
+
+    /// The bound Nazgul root target id, or `codex-main` when no binding is set.
+    ///
+    /// The returned value is either a user pane id (`codex-main` or a Claude pane id) or a native
+    /// Codex agent thread node id of the form `thread:<uuid>` when the Nazgul root has been bound
+    /// to a Codex agent pane. Callers that need to act on the binding should prefer
+    /// [`nazgul_bound_thread_id`](Self::nazgul_bound_thread_id) rather than parsing this string.
+    fn spawn_nazgul_bound_target(&self) -> &str {
+        self.spawn_nazgul_pane_id
+            .as_deref()
+            .unwrap_or(CODEX_MAIN_PANE_ID)
+    }
+
+    /// The native Codex thread bound as the Nazgul root, when the binding targets a Codex agent
+    /// pane rather than a user pane.
+    fn nazgul_bound_thread_id(&self) -> Option<ThreadId> {
+        node_id_thread(self.spawn_nazgul_bound_target())
     }
 
     fn spawn_troll_node_items(&self) -> Vec<SelectionItem> {
@@ -1298,6 +1776,16 @@ impl App {
 
     fn logical_parent_node_for_thread(&self, thread_id: ThreadId) -> Option<String> {
         let thread_node = thread_node_id(thread_id);
+        let role = self
+            .agent_navigation
+            .get(&thread_id)
+            .and_then(|entry| entry.agent_role.as_deref());
+        // The Nazgul root pane is the top of the hierarchy. It must not report up to a parent —
+        // otherwise a spawned Nazgul's own turns get echoed back to the primary pane as a "child
+        // report from the Nazgul", which is noise the user sees as a self-report.
+        if role == Some(NAZGUL_ROLE_NAME) {
+            return None;
+        }
         let explicit = self
             .spawn_parent_by_node
             .get(&thread_node)
@@ -1307,10 +1795,6 @@ impl App {
                     .get(&thread_id)
                     .map(|parent| thread_node_id(*parent))
             });
-        let role = self
-            .agent_navigation
-            .get(&thread_id)
-            .and_then(|entry| entry.agent_role.as_deref());
         if role == Some(ORC_ROLE)
             && !explicit
                 .as_deref()
@@ -1382,10 +1866,16 @@ impl App {
         }
 
         if is_nazgul_dispatch_target(target) {
-            let bound_pane_id = self
-                .spawn_nazgul_pane_id
-                .as_deref()
-                .unwrap_or(CODEX_MAIN_PANE_ID);
+            if let Some(bound_thread_id) = self.nazgul_bound_thread_id() {
+                if self.agent_navigation.get(&bound_thread_id).is_some() {
+                    return Ok(SpawnTaskTarget::Native(bound_thread_id));
+                }
+                let bound_pane_id = self.spawn_nazgul_bound_target().to_string();
+                return Err(format!(
+                    "Cannot dispatch to Nazgul; bound Codex pane `{bound_pane_id}` is not loaded."
+                ));
+            }
+            let bound_pane_id = self.spawn_nazgul_bound_target();
             if bound_pane_id == CODEX_MAIN_PANE_ID {
                 return self
                     .primary_thread_id
@@ -1662,49 +2152,6 @@ impl App {
             ..Default::default()
         }
     }
-
-    fn spawn_demo_task_item(&self, troll_thread_id: ThreadId, indent: usize) -> SelectionItem {
-        let prefix = " ".repeat(indent);
-        SelectionItem {
-            name: format!("{prefix}Demo task: animated website + crypto formulas"),
-            description: Some("Send the Troll a two-Orc coordination/review exercise.".to_string()),
-            actions: vec![Box::new(move |tx| {
-                tx.send(AppEvent::RunSpawnDemoTask { troll_thread_id });
-            })],
-            dismiss_on_select: true,
-            search_value: Some(format!("demo task website crypto {troll_thread_id}")),
-            ..Default::default()
-        }
-    }
-
-    pub(crate) fn spawn_demo_task_for_troll(
-        &self,
-        troll_thread_id: ThreadId,
-    ) -> Result<String, String> {
-        let orcs = self.spawn_orc_children(troll_thread_id);
-        if orcs.len() < 2 {
-            return Err("Demo task needs at least two Orc panes under this Troll.".to_string());
-        }
-        let (first_orc_id, first_orc) = orcs[0];
-        let (second_orc_id, second_orc) = orcs[1];
-        let first_name = format_agent_picker_item_name(
-            first_orc.agent_nickname.as_deref(),
-            first_orc.agent_role.as_deref().or(Some(ORC_ROLE)),
-            false,
-        );
-        let second_name = format_agent_picker_item_name(
-            second_orc.agent_nickname.as_deref(),
-            second_orc.agent_role.as_deref().or(Some(ORC_ROLE)),
-            false,
-        );
-        Ok(spawn_demo_task_prompt(
-            &first_name,
-            first_orc_id,
-            &second_name,
-            second_orc_id,
-        ))
-    }
-
     fn render_troll_spawn_context(&self, pane: &crate::claude_panes::ClaudePane) -> String {
         let mut context = String::new();
         let troll_node_id = pane_node_id(&pane.id);
@@ -1779,12 +2226,26 @@ impl App {
     }
 
     fn render_nazgul_spawn_context(&self, bound_pane_id: &str) -> String {
+        self.render_nazgul_spawn_context_with_title(self.user_pane_title(bound_pane_id))
+    }
+
+    /// Render the Nazgul root instructions for injection into a freshly spawned native Nazgul
+    /// pane's base instructions. The display title is the pane's nickname or role label so the
+    /// instructions read naturally instead of referencing a pane id that does not exist yet.
+    pub(crate) fn nazgul_native_base_instructions(&self, nickname: Option<&str>) -> String {
+        let title = match nickname {
+            Some(name) => format!("Nazgul {name}"),
+            None => "Nazgul".to_string(),
+        };
+        self.render_nazgul_spawn_context_with_title(title)
+    }
+
+    fn render_nazgul_spawn_context_with_title(&self, root_pane_title: String) -> String {
         let mut context = String::new();
         let _ = writeln!(context, "<pfterminal_spawn_context>");
         let _ = writeln!(
             context,
-            "You are the PFTerminal Nazgul/root pane: {}.",
-            self.user_pane_title(bound_pane_id)
+            "You are the PFTerminal Nazgul/root pane: {root_pane_title}.",
         );
         let _ = writeln!(
             context,
@@ -1999,17 +2460,6 @@ impl App {
     }
 }
 
-fn spawn_demo_task_prompt(
-    first_name: &str,
-    first_orc_id: ThreadId,
-    second_name: &str,
-    second_orc_id: ThreadId,
-) -> String {
-    format!(
-        "You are supervising two Orc panes for a coordination exercise.\n\nOrcs:\n- {first_name}: {first_orc_id}\n- {second_name}: {second_orc_id}\n\nUse the available agent messaging tools to manage the Orcs; do not do their work yourself. Send both Orcs work in parallel: prefer followup_task when available; otherwise use send_input. Target the Orcs by their shown names or thread ids. Then use wait_agent to wait for completion and call list_agents to inspect each Orc's last_task_message and last_result_message before reviewing.\n\nTask: produce a small mock website concept that combines smooth front-end animation with visible cryptographic formula explanations.\n\nAssign {first_name} to build the animated website structure and interaction plan. Assign {second_name} to produce the cryptographic formulas, validation copy, and adversarial review checklist. After both finish, review their outputs critically. If either output is shallow, send that named Orc one targeted followup_task for improvement, wait again, then call list_agents again. Give the Nazgul a final report with: Orcs used, what each did, evidence from each Orc's result preview, remaining risk, and what you forced them to improve."
-    )
-}
-
 fn write_spawn_product_contract(context: &mut String) {
     let _ = writeln!(
         context,
@@ -2040,6 +2490,14 @@ fn write_spawn_dispatch_contract(context: &mut String) {
     );
     let _ = writeln!(
         context,
+        "The listed Troll/Orc panes already exist and are routable through these host dispatch blocks. Do not say they are missing from your tool surface or unavailable."
+    );
+    let _ = writeln!(
+        context,
+        "Do not spawn fresh panes just to route work to existing listed panes; use the listed panes unless Sauron explicitly asks you to create more."
+    );
+    let _ = writeln!(
+        context,
         "Dispatch blocks are plain assistant text, not Claude tools. Use only the pfterminal_send_task host tags; do not use <invoke>, <arg_key>, <arg_value>, or tool-call syntax for dispatch."
     );
     let _ = writeln!(
@@ -2065,7 +2523,7 @@ fn spawn_parent_thread_for_new_agent(
     troll_thread_ids: &[ThreadId],
 ) -> Option<ThreadId> {
     match role {
-        SpawnRole::Nazgul => None,
+        SpawnRole::Nazgul => primary_thread_id.or(active_thread_id),
         SpawnRole::Troll => {
             if active_claude_pane {
                 primary_thread_id
@@ -2093,7 +2551,7 @@ pub(crate) fn pane_node_id(pane_id: &str) -> String {
     format!("pane:{pane_id}")
 }
 
-fn node_id_thread(node_id: &str) -> Option<ThreadId> {
+pub(crate) fn node_id_thread(node_id: &str) -> Option<ThreadId> {
     node_id
         .strip_prefix("thread:")
         .and_then(|value| ThreadId::from_string(value).ok())
@@ -2389,6 +2847,44 @@ fn spawn_child_report(child_title: &str, status: &str, result: Option<&str>) -> 
     report
 }
 
+/// The prompt that turns a delivered child report into a real parent processing turn, so a manager
+/// treats a direct report like a user query (triage, dispatch follow-up work, or acknowledge) rather
+/// than letting it sit as a passive transcript line.
+fn child_report_processing_prompt(report: &str) -> String {
+    format!(
+        "A child pane has reported back. Review the child report below and act on it immediately — triage, dispatch follow-up work, or acknowledge. Do not wait for Sauron to prompt you.\n\n{report}"
+    )
+}
+
+fn evict_spawn_processed_dispatch_turns(
+    processed_turns: &mut HashSet<(ThreadId, String)>,
+    live_threads: &HashSet<ThreadId>,
+    protected_turn: &(ThreadId, String),
+) -> Option<(usize, usize)> {
+    if processed_turns.len() <= SPAWN_PROCESSED_DISPATCH_TURN_LIMIT {
+        return None;
+    }
+
+    let before_len = processed_turns.len();
+    let protected_budget = usize::from(processed_turns.contains(protected_turn));
+    let retain_budget = SPAWN_PROCESSED_DISPATCH_TURN_RETAIN.saturating_sub(protected_budget);
+    let mut retained = 0usize;
+    processed_turns.retain(|turn| {
+        if turn == protected_turn {
+            return true;
+        }
+        if retained >= retain_budget {
+            return false;
+        }
+        if live_threads.contains(&turn.0) {
+            retained += 1;
+            return true;
+        }
+        false
+    });
+    Some((before_len, processed_turns.len()))
+}
+
 fn next_spawn_agent_nickname_from_used<'candidate, 'used>(
     candidates: impl IntoIterator<Item = &'candidate str>,
     used_nicknames: impl IntoIterator<Item = &'used str>,
@@ -2451,29 +2947,6 @@ mod tests {
             next_spawn_agent_nickname_from_used(candidates, used_troll_names),
             Some("Durbat the 2nd".to_string())
         );
-    }
-
-    #[test]
-    fn spawn_demo_task_prompt_instructs_two_orc_management_loop() {
-        let first_orc_id =
-            ThreadId::from_string("00000000-0000-0000-0000-000000000111").expect("valid id");
-        let second_orc_id =
-            ThreadId::from_string("00000000-0000-0000-0000-000000000222").expect("valid id");
-
-        let prompt =
-            spawn_demo_task_prompt("Snaga [orc]", first_orc_id, "Ghash [orc]", second_orc_id);
-
-        assert!(prompt.contains("Snaga [orc]"));
-        assert!(prompt.contains("Ghash [orc]"));
-        assert!(prompt.contains(&first_orc_id.to_string()));
-        assert!(prompt.contains(&second_orc_id.to_string()));
-        assert!(prompt.contains("Send both Orcs work in parallel"));
-        assert!(prompt.contains("followup_task"));
-        assert!(prompt.contains("wait_agent"));
-        assert!(prompt.contains("list_agents"));
-        assert!(prompt.contains("last_task_message"));
-        assert!(prompt.contains("last_result_message"));
-        assert!(prompt.contains("evidence from each Orc's result preview"));
     }
 
     #[test]
@@ -2636,10 +3109,45 @@ Done."#;
         assert!(context.contains("<pfterminal_send_task target=\"Burzum\">"));
         assert!(context.contains("Do not claim you sent a task unless you emit a dispatch block"));
         assert!(context.contains("Dispatch blocks are plain assistant text"));
+        assert!(context.contains("already exist and are routable"));
+        assert!(context.contains("Do not spawn fresh panes"));
         assert!(context.contains("tool-call syntax"));
         assert!(context.contains("<invoke>"));
         assert!(context.contains("one complete pfterminal_send_task block per target"));
         assert!(context.contains("Do not wrap dispatch payloads in markdown fences"));
+    }
+
+    #[test]
+    fn processed_native_dispatch_turn_eviction_stays_bounded_and_allows_evicted_turn_as_new() {
+        let live_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000601").expect("valid id");
+        let stale_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000602").expect("valid id");
+        let protected_turn = (live_thread_id, "turn-live".to_string());
+        let evicted_turn = (stale_thread_id, "turn-0".to_string());
+        let mut processed_turns = HashSet::new();
+        let mut live_threads = HashSet::new();
+        live_threads.insert(live_thread_id);
+
+        processed_turns.insert(evicted_turn.clone());
+        for index in 1..=SPAWN_PROCESSED_DISPATCH_TURN_LIMIT {
+            processed_turns.insert((stale_thread_id, format!("turn-{index}")));
+        }
+        processed_turns.insert(protected_turn.clone());
+        assert!(processed_turns.len() > SPAWN_PROCESSED_DISPATCH_TURN_LIMIT);
+
+        let eviction = evict_spawn_processed_dispatch_turns(
+            &mut processed_turns,
+            &live_threads,
+            &protected_turn,
+        );
+
+        assert_eq!(eviction, Some((SPAWN_PROCESSED_DISPATCH_TURN_LIMIT + 2, 1)));
+        assert!(processed_turns.len() <= SPAWN_PROCESSED_DISPATCH_TURN_LIMIT);
+        assert!(processed_turns.contains(&protected_turn));
+        assert!(!processed_turns.contains(&evicted_turn));
+        assert!(processed_turns.insert(evicted_turn));
+        assert!(processed_turns.len() <= SPAWN_PROCESSED_DISPATCH_TURN_LIMIT);
     }
 
     #[test]
@@ -2648,6 +3156,13 @@ Done."#;
         assert!(is_nazgul_dispatch_target("nazgul"));
         assert!(is_nazgul_dispatch_target("root"));
         assert!(!is_nazgul_dispatch_target("Burzum"));
+    }
+
+    #[test]
+    fn nazgul_role_has_agent_type_so_it_can_be_spawned_as_a_pane() {
+        assert_eq!(SpawnRole::Nazgul.agent_type(), Some("nazgul"));
+        assert_eq!(SpawnRole::Troll.agent_type(), Some("troll"));
+        assert_eq!(SpawnRole::Orc.agent_type(), Some("orc"));
     }
 
     #[test]

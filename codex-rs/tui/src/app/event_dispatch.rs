@@ -1944,6 +1944,9 @@ impl App {
             AppEvent::OpenSpawnNazgulPanePicker => {
                 self.open_spawn_nazgul_pane_picker();
             }
+            AppEvent::OpenSpawnNazgulPicker => {
+                self.open_spawn_nazgul_picker();
+            }
             AppEvent::BindSpawnNazgulPane { pane_id } => {
                 self.bind_spawn_nazgul_pane(pane_id);
             }
@@ -1998,13 +2001,25 @@ impl App {
                     self.chat_widget.add_error_message(err.to_string());
                     return Ok(AppRunControl::Continue);
                 }
-                let spawn_config = match self.native_spawn_agent_config() {
+                let mut spawn_config = match self.native_spawn_agent_config() {
                     Ok(config) => config,
                     Err(err) => {
                         self.chat_widget.add_error_message(err.to_string());
                         return Ok(AppRunControl::Continue);
                     }
                 };
+                // A freshly spawned Nazgul pane is always loaded with the Nazgul root
+                // instructions so it knows its CTO/orchestrator role and the spawn hierarchy from
+                // its first turn. Troll/Orc panes keep the default base instructions; their role
+                // context is supplied by the app-server role layer.
+                let base_instructions = if role == crate::spawn_orchestration::SpawnRole::Nazgul {
+                    Some(self.nazgul_native_base_instructions(agent_nickname.as_deref()))
+                } else {
+                    None
+                };
+                // Keep the spawn config's persisted base instructions from clobbering the role
+                // payload we just built; the per-thread base_instructions override below wins.
+                spawn_config.base_instructions = base_instructions.clone();
                 match app_server
                     .spawn_agent_thread(
                         &spawn_config,
@@ -2014,6 +2029,7 @@ impl App {
                         model.clone(),
                         provider.clone(),
                         effort.clone(),
+                        base_instructions,
                     )
                     .await
                 {
@@ -2028,11 +2044,24 @@ impl App {
                             started,
                         )
                         .await;
+                        // When spawning a Nazgul pane, bind it as the visible root so subsequent
+                        // Troll spawns and "Nazgul" dispatches route to this pane.
+                        let bound_as_nazgul = role == crate::spawn_orchestration::SpawnRole::Nazgul;
+                        if bound_as_nazgul {
+                            self.set_spawn_nazgul_pane_binding(
+                                crate::spawn_orchestration::thread_node_id(thread_id),
+                            );
+                        }
                         self.select_agent_thread_and_discard_side(tui, app_server, thread_id)
                             .await?;
+                        let binding_suffix = if bound_as_nazgul {
+                            " and bound it as the Nazgul root"
+                        } else {
+                            ""
+                        };
                         self.chat_widget.add_info_message(
                             format!(
-                                "Spawned Codex {} pane{}.",
+                                "Spawned Codex {} pane{}{binding_suffix}.",
                                 role.label(),
                                 agent_nickname
                                     .as_deref()
@@ -2050,21 +2079,23 @@ impl App {
                     }
                 }
             }
-            AppEvent::CreateSpawnDemoCrew => match self.create_spawn_demo_crew(app_server).await {
-                Ok(troll_thread_id) => {
-                    self.open_spawn_status();
-                    self.chat_widget.add_info_message(
-                        "Created demo crew: Troll + 2 Orcs.".to_string(),
-                        Some(format!(
-                            "Troll: {troll_thread_id}. Run the demo task from /spawn status."
-                        )),
-                    );
+            AppEvent::CreateSpawnStandardCrew => {
+                match self.create_spawn_standard_crew(app_server).await {
+                    Ok((nazgul_thread_id, troll_thread_id)) => {
+                        self.open_spawn_status();
+                        self.chat_widget.add_info_message(
+                            "Created standard crew: Nazgul + Troll + 2 Orcs.".to_string(),
+                            Some(format!(
+                                "Nazgul: {nazgul_thread_id}. Troll: {troll_thread_id}. No task was started. Send work explicitly from /spawn status or by dispatch block."
+                            )),
+                        );
+                    }
+                    Err(err) => {
+                        self.chat_widget
+                            .add_error_message(format!("Failed to create standard crew: {err:#}"));
+                    }
                 }
-                Err(err) => {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to create demo crew: {err}"));
-                }
-            },
+            }
             AppEvent::OpenSpawnAgentTaskPrompt { thread_id } => {
                 self.open_spawn_agent_task_prompt(thread_id);
             }
@@ -2102,6 +2133,11 @@ impl App {
                         .add_error_message(format!("Cannot send task to {label}: {message}"));
                     return Ok(AppRunControl::Continue);
                 }
+                // Inject the live spawn hierarchy as additional context so native spawn panes
+                // (Nazgul/Troll/Orc) see the CURRENT tree on every turn, not the frozen spawn-time
+                // base_instructions. Without this a Nazgul created before its Troll/Orcs would
+                // forever answer "none spawned yet" even after the TUI shows them in the status tree.
+                let additional_context = self.spawn_additional_context_for_thread(thread_id);
                 match app_server
                     .turn_start(
                         thread_id,
@@ -2124,6 +2160,7 @@ impl App {
                             .map(|mode| (**mode).clone()),
                         session.personality,
                         /*output_schema*/ None,
+                        additional_context,
                     )
                     .await
                 {
@@ -2147,19 +2184,6 @@ impl App {
             }
             AppEvent::SubmitSpawnClaudePaneTask { pane_id, task } => {
                 self.submit_claude_pane_task(pane_id, task);
-            }
-            AppEvent::RunSpawnDemoTask { troll_thread_id } => {
-                match self.spawn_demo_task_for_troll(troll_thread_id) {
-                    Ok(task) => {
-                        self.app_event_tx.send(AppEvent::SubmitSpawnAgentTask {
-                            thread_id: troll_thread_id,
-                            task,
-                        });
-                    }
-                    Err(err) => {
-                        self.chat_widget.add_error_message(err);
-                    }
-                }
             }
             AppEvent::OpenSpawnStatus => {
                 self.open_spawn_status();
@@ -2201,6 +2225,7 @@ impl App {
                         model.clone(),
                         provider.clone(),
                         effort.clone(),
+                        /*base_instructions*/ None,
                     )
                     .await
                 {

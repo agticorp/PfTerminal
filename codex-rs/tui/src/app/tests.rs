@@ -79,6 +79,7 @@ use codex_app_server_protocol::UserInput;
 use codex_app_server_protocol::UserInput as AppServerUserInput;
 use codex_app_server_protocol::WarningNotification;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_ANTHROPIC_FAST_PROVIDER_ID;
 use codex_model_provider_info::VERCEL_API_KEY_ENV_VAR;
 use codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL;
 use codex_model_provider_info::VERCEL_PROVIDER_ID;
@@ -1372,6 +1373,295 @@ async fn pane_spawn_tree_hides_task_actions() {
 }
 
 #[tokio::test]
+async fn nazgul_can_be_bound_to_a_codex_agent_pane() {
+    let mut app = make_test_app().await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000301").expect("valid thread id");
+    // A second Codex agent pane (no Troll/Orc role) that should be bindable as the Nazgul root.
+    let codex_pane_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000302").expect("valid thread id");
+
+    app.primary_thread_id = Some(main_thread_id);
+    app.upsert_agent_picker_thread(
+        codex_pane_thread_id,
+        Some("Mordor".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+
+    // The Nazgul picker should offer the Codex agent pane as a bindable target.
+    let picker_items = app.nazgul_codex_pane_picker_items();
+    assert!(
+        picker_items.iter().any(|item| item.name.contains("Mordor")),
+        "Codex agent pane should appear in the Nazgul binding picker"
+    );
+
+    // Bind the Codex agent pane as the Nazgul root.
+    let node_id = crate::spawn_orchestration::thread_node_id(codex_pane_thread_id);
+    app.bind_spawn_nazgul_pane(node_id.clone());
+    assert_eq!(app.spawn_nazgul_pane_id.as_deref(), Some(node_id.as_str()));
+
+    // The spawn status tree should render the bound Codex pane by name, not as a raw node id.
+    let items = app.spawn_tree_items(/*show_task_actions*/ false);
+    let nazgul_item = items
+        .iter()
+        .find(|item| item.name.starts_with("Nazgul:"))
+        .expect("status tree has a Nazgul row");
+    assert!(
+        nazgul_item.name.contains("Mordor"),
+        "bound Codex pane should render by name, got: {}",
+        nazgul_item.name
+    );
+    assert!(
+        !nazgul_item.name.contains("thread:"),
+        "bound Codex pane should not leak the raw thread node id: {}",
+        nazgul_item.name
+    );
+
+    // When the bound Codex pane is the active thread (and the user pane is Codex Main), the
+    // Nazgul row should be marked current.
+    app.active_thread_id = Some(codex_pane_thread_id);
+    let items = app.spawn_tree_items(/*show_task_actions*/ false);
+    let nazgul_item = items
+        .iter()
+        .find(|item| item.name.starts_with("Nazgul:"))
+        .expect("status tree has a Nazgul row");
+    assert!(
+        nazgul_item.is_current,
+        "Nazgul row should be current when the bound Codex pane is active"
+    );
+}
+
+/// Drains app events looking for a `SubmitSpawnAgentTask` for `thread_id`. Returns its task text.
+fn drain_spawn_agent_task_for(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    thread_id: ThreadId,
+) -> Option<String> {
+    let mut matched = None;
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::SubmitSpawnAgentTask { thread_id: t, task } = event {
+            if t == thread_id {
+                matched = Some(task);
+            }
+        }
+    }
+    matched
+}
+
+#[tokio::test]
+async fn child_report_to_idle_parent_triggers_a_processing_turn() {
+    let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+    let troll_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000401").expect("valid thread id");
+    let orc_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000402").expect("valid thread id");
+
+    app.upsert_agent_picker_thread(
+        troll_thread_id,
+        Some("Burzum".to_string()),
+        Some("troll".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        orc_thread_id,
+        Some("Snaga".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.spawn_parent_by_thread
+        .insert(orc_thread_id, troll_thread_id);
+    // Parent is idle.
+    assert!(
+        !app.agent_navigation
+            .get(&troll_thread_id)
+            .expect("troll entry")
+            .is_running
+    );
+
+    app.record_spawn_child_report_for_thread(
+        orc_thread_id,
+        codex_app_server_protocol::CollabAgentStatus::Completed,
+        Some("stars.js done".to_string()),
+    );
+
+    let task = drain_spawn_agent_task_for(&mut rx, troll_thread_id)
+        .expect("idle parent should immediately start a processing turn for the child report");
+    assert!(task.contains("A child pane has reported back"));
+    assert!(task.contains("Snaga"));
+    assert!(
+        app.spawn_pending_reports_by_thread
+            .get(&troll_thread_id)
+            .map_or(true, |q| q.is_empty())
+    );
+}
+
+#[tokio::test]
+async fn child_report_to_busy_parent_is_queued_not_dropped_then_flushed_on_idle() {
+    let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+    let troll_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000411").expect("valid thread id");
+    let orc_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000412").expect("valid thread id");
+
+    app.upsert_agent_picker_thread(
+        troll_thread_id,
+        Some("Burzum".to_string()),
+        Some("troll".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        orc_thread_id,
+        Some("Snaga".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.spawn_parent_by_thread
+        .insert(orc_thread_id, troll_thread_id);
+    // Parent is mid-turn (busy) — the multi-turn race.
+    app.agent_navigation.set_running(troll_thread_id, true);
+
+    app.record_spawn_child_report_for_thread(
+        orc_thread_id,
+        codex_app_server_protocol::CollabAgentStatus::Completed,
+        Some("dossier.js done".to_string()),
+    );
+
+    // No immediate turn should be triggered while the parent is busy.
+    rx.try_recv()
+        .expect_err("busy parent should not get an immediate SubmitSpawnAgentTask");
+    let queue = app
+        .spawn_pending_reports_by_thread
+        .get(&troll_thread_id)
+        .expect("report should be queued for the busy parent");
+    assert_eq!(queue.len(), 1);
+    assert!(queue.front().expect("queued report").contains("Snaga"));
+
+    // Parent goes idle. Flushing must turn the queued report into a processing turn.
+    let flushed = app.flush_pending_reports_for_thread(troll_thread_id);
+    assert!(flushed, "flush should drain the pending queue");
+    let task = drain_spawn_agent_task_for(&mut rx, troll_thread_id)
+        .expect("idle transition should flush the queued report as a turn");
+    assert!(task.contains("A child pane has reported back"));
+    assert!(task.contains("Snaga"));
+    assert!(
+        app.spawn_pending_reports_by_thread
+            .get(&troll_thread_id)
+            .map_or(true, |q| q.is_empty())
+    );
+}
+
+#[tokio::test]
+async fn multiple_reports_to_busy_parent_flush_as_one_combined_turn() {
+    let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+    let troll_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000421").expect("valid thread id");
+    let orc_a =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000422").expect("valid thread id");
+    let orc_b =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000423").expect("valid thread id");
+
+    app.upsert_agent_picker_thread(
+        troll_thread_id,
+        Some("Burzum".to_string()),
+        Some("troll".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        orc_a,
+        Some("Snaga".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        orc_b,
+        Some("Ghash".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.spawn_parent_by_thread.insert(orc_a, troll_thread_id);
+    app.spawn_parent_by_thread.insert(orc_b, troll_thread_id);
+    app.agent_navigation.set_running(troll_thread_id, true);
+
+    // Two Orcs report in parallel while the Troll is busy.
+    app.record_spawn_child_report_for_thread(
+        orc_a,
+        codex_app_server_protocol::CollabAgentStatus::Completed,
+        Some("stars done".to_string()),
+    );
+    app.record_spawn_child_report_for_thread(
+        orc_b,
+        codex_app_server_protocol::CollabAgentStatus::Completed,
+        Some("dossier done".to_string()),
+    );
+
+    assert_eq!(
+        app.spawn_pending_reports_by_thread
+            .get(&troll_thread_id)
+            .map_or(0, |q| q.len()),
+        2,
+        "both reports should be queued"
+    );
+
+    let flushed = app.flush_pending_reports_for_thread(troll_thread_id);
+    assert!(flushed);
+
+    // A single combined processing turn should reference both children.
+    let task = drain_spawn_agent_task_for(&mut rx, troll_thread_id)
+        .expect("flush should produce one combined processing turn");
+    assert!(task.contains("Multiple child panes have reported back"));
+    assert!(task.contains("Snaga"));
+    assert!(task.contains("Ghash"));
+    assert!(
+        app.spawn_pending_reports_by_thread
+            .get(&troll_thread_id)
+            .map_or(true, |q| q.is_empty())
+    );
+}
+
+#[tokio::test]
+async fn duplicate_child_report_is_not_requeued() {
+    let (mut app, mut _rx, _op_rx) = make_test_app_with_channels().await;
+    let troll_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000431").expect("valid thread id");
+    let orc_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000432").expect("valid thread id");
+    app.upsert_agent_picker_thread(
+        troll_thread_id,
+        Some("Burzum".to_string()),
+        Some("troll".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        orc_thread_id,
+        Some("Snaga".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.spawn_parent_by_thread
+        .insert(orc_thread_id, troll_thread_id);
+    app.agent_navigation.set_running(troll_thread_id, true);
+
+    app.record_spawn_child_report_for_thread(
+        orc_thread_id,
+        codex_app_server_protocol::CollabAgentStatus::Completed,
+        Some("same result".to_string()),
+    );
+    app.record_spawn_child_report_for_thread(
+        orc_thread_id,
+        codex_app_server_protocol::CollabAgentStatus::Completed,
+        Some("same result".to_string()),
+    );
+
+    assert_eq!(
+        app.spawn_pending_reports_by_thread
+            .get(&troll_thread_id)
+            .map_or(0, |q| q.len()),
+        1,
+        "identical back-to-back report should be deduped, not enqueued twice"
+    );
+}
+
+#[tokio::test]
 async fn troll_spawn_task_submission_names_existing_orc_panes() {
     let mut app = make_test_app().await;
     let main_thread_id =
@@ -2198,6 +2488,383 @@ async fn child_report_auto_duplicate_child_report_does_not_trigger_duplicate_tur
 }
 
 #[tokio::test]
+async fn nazgul_root_does_not_report_up_to_itself() {
+    // A spawned Nazgul is the root of the hierarchy. Its own turns must not be recorded as a
+    // "child report" delivered up to its spawn parent, which previously echoed the Nazgul's own
+    // answer back to the user's pane ("Euclid [nazgul] reported back").
+    let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+    let primary_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000501").expect("valid thread id");
+    let nazgul_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000502").expect("valid thread id");
+    app.primary_thread_id = Some(primary_thread_id);
+    app.upsert_agent_picker_thread(
+        nazgul_thread_id,
+        Some("Euclid".to_string()),
+        Some("nazgul".to_string()),
+        /*is_closed*/ false,
+    );
+    // The spawn edge records the Nazgul as a child of the primary thread (how it was spawned),
+    // but as root it must still report to nobody.
+    app.spawn_parent_by_thread
+        .insert(nazgul_thread_id, primary_thread_id);
+
+    app.record_spawn_child_report_for_thread(
+        nazgul_thread_id,
+        codex_app_server_protocol::CollabAgentStatus::Completed,
+        Some("I am Nazgul Euclid".to_string()),
+    );
+
+    // No report should be turned into a task on the primary pane, and nothing queued.
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                AppEvent::SubmitSpawnAgentTask { .. } | AppEvent::SubmitSpawnClaudePaneTask { .. }
+            ),
+            "Nazgul root must not echo its own turn as a child report"
+        );
+    }
+    assert!(
+        app.spawn_pending_reports_by_thread.is_empty(),
+        "no pending report should be queued for the Nazgul root's parent"
+    );
+}
+
+#[tokio::test]
+async fn child_report_to_codex_main_routes_to_native_primary_not_claude_pane() {
+    // When the Nazgul root is codex-main (the primary native thread, not a Claude pane), a child
+    // report routed to `pane:codex-main` must NOT be sent as a SubmitSpawnClaudePaneTask (which
+    // errors with "Claude pane `codex-main` does not exist"). It must route to the native primary
+    // thread as a SubmitSpawnAgentTask.
+    let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+    let primary_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000511").expect("valid thread id");
+    let troll_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000512").expect("valid thread id");
+    app.primary_thread_id = Some(primary_thread_id);
+    app.active_thread_id = Some(primary_thread_id);
+    app.upsert_agent_picker_thread(
+        troll_thread_id,
+        Some("Burzum".to_string()),
+        Some("troll".to_string()),
+        /*is_closed*/ false,
+    );
+    // Troll's logical parent is the codex-main root pane.
+    app.spawn_parent_by_thread
+        .insert(troll_thread_id, primary_thread_id);
+
+    app.record_spawn_child_report_for_thread(
+        troll_thread_id,
+        codex_app_server_protocol::CollabAgentStatus::Completed,
+        Some("orcs done".to_string()),
+    );
+
+    // Expect a native SubmitSpawnAgentTask targeted at the primary thread, and no Claude pane task.
+    let mut got_native = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AppEvent::SubmitSpawnAgentTask { thread_id, task }
+                if thread_id == primary_thread_id =>
+            {
+                got_native = true;
+                assert!(task.contains("A child pane has reported back"));
+                assert!(task.contains("Burzum"));
+            }
+            AppEvent::SubmitSpawnClaudePaneTask { ref pane_id, .. } => {
+                panic!(
+                    "codex-main must not route to a Claude pane task, got SubmitSpawnClaudePaneTask for `{pane_id}`"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        got_native,
+        "report to codex-main should produce a native SubmitSpawnAgentTask on the primary thread"
+    );
+}
+
+#[tokio::test]
+async fn native_nazgul_sees_live_troll_and_orc_tree_even_if_spawned_before_them() {
+    // The bug: a spawned Nazgul's base_instructions are frozen at spawn time, so if it was created
+    // before its Troll/Orcs it would forever answer "none spawned yet". The fix renders the live
+    // hierarchy per turn via spawn_context_for_thread. This test proves the live view sees a Troll
+    // and two Orcs that exist now, regardless of when the Nazgul was spawned.
+    let mut app = make_test_app().await;
+    let nazgul_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000601").expect("valid thread id");
+    let troll_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000602").expect("valid thread id");
+    let orc_a =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000603").expect("valid thread id");
+    let orc_b =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000604").expect("valid thread id");
+
+    app.upsert_agent_picker_thread(
+        nazgul_thread_id,
+        Some("Euclid".to_string()),
+        Some("nazgul".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        troll_thread_id,
+        Some("Burzum".to_string()),
+        Some("troll".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        orc_a,
+        Some("Snaga".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        orc_b,
+        Some("Ghash".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.spawn_parent_by_thread
+        .insert(troll_thread_id, nazgul_thread_id);
+    app.spawn_parent_by_thread.insert(orc_a, troll_thread_id);
+    app.spawn_parent_by_thread.insert(orc_b, troll_thread_id);
+
+    let context = app
+        .spawn_context_for_thread(nazgul_thread_id)
+        .expect("Nazgul thread should receive live spawn context");
+    assert!(context.contains("You are the PFTerminal Nazgul/root pane"));
+    assert!(
+        context.contains("Euclid [nazgul]"),
+        "context uses the Nazgul picker label, got: {context}"
+    );
+    assert!(
+        context.contains("Burzum [troll]"),
+        "Nazgul must see the live Troll, got: {context}"
+    );
+    assert!(
+        context.contains("Snaga [orc]"),
+        "Nazgul must see the live Orc Snaga, got: {context}"
+    );
+    assert!(
+        context.contains("Ghash [orc]"),
+        "Nazgul must see the live Orc Ghash, got: {context}"
+    );
+    assert!(
+        !context.contains("none spawned yet"),
+        "Nazgul must not claim the tree is empty when it is not"
+    );
+}
+
+#[tokio::test]
+async fn native_nazgul_dispatch_block_routes_task_to_troll_once() {
+    let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+    let nazgul_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000621").expect("valid thread id");
+    let troll_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000622").expect("valid thread id");
+
+    app.active_thread_id = Some(nazgul_thread_id);
+    app.upsert_agent_picker_thread(
+        nazgul_thread_id,
+        Some("Euclid".to_string()),
+        Some("nazgul".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        troll_thread_id,
+        Some("Burzum".to_string()),
+        Some("troll".to_string()),
+        /*is_closed*/ false,
+    );
+    app.spawn_parent_by_thread
+        .insert(troll_thread_id, nazgul_thread_id);
+
+    let message = r#"Dispatching now.
+<pfterminal_send_task target="Burzum">
+Code review recent PFTerminal changes. Dispatch Orc fixes if needed.
+</pfterminal_send_task>
+Done."#;
+    let notification = turn_completed_with_agent_message(
+        nazgul_thread_id,
+        "turn-native-nazgul-dispatch",
+        TurnStatus::Completed,
+        message,
+    );
+
+    app.update_spawn_status_for_thread_notification(&notification);
+    // The same notification can pass through enqueue/replay paths. It must not double-dispatch.
+    app.update_spawn_status_for_thread_notification(&notification);
+
+    let mut routed_tasks = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::SubmitSpawnAgentTask { thread_id, task } = event {
+            routed_tasks.push((thread_id, task));
+        }
+    }
+
+    assert_eq!(
+        routed_tasks.len(),
+        1,
+        "dispatch must be consumed exactly once"
+    );
+    assert_eq!(routed_tasks[0].0, troll_thread_id);
+    assert!(
+        routed_tasks[0]
+            .1
+            .contains("Assigned by Euclid [nazgul] to Burzum [troll]")
+    );
+    assert!(
+        routed_tasks[0]
+            .1
+            .contains("Code review recent PFTerminal changes")
+    );
+}
+
+#[tokio::test]
+async fn native_troll_dispatch_blocks_route_distinct_tasks_to_orcs() {
+    let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+    let nazgul_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000631").expect("valid thread id");
+    let troll_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000632").expect("valid thread id");
+    let snaga_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000633").expect("valid thread id");
+    let ghash_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000634").expect("valid thread id");
+
+    app.upsert_agent_picker_thread(
+        nazgul_thread_id,
+        Some("Euclid".to_string()),
+        Some("nazgul".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        troll_thread_id,
+        Some("Burzum".to_string()),
+        Some("troll".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        snaga_thread_id,
+        Some("Snaga".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        ghash_thread_id,
+        Some("Ghash".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.spawn_parent_by_thread
+        .insert(troll_thread_id, nazgul_thread_id);
+    app.spawn_parent_by_thread
+        .insert(snaga_thread_id, troll_thread_id);
+    app.spawn_parent_by_thread
+        .insert(ghash_thread_id, troll_thread_id);
+
+    let message = r#"Splitting fixes.
+<pfterminal_send_task target="Snaga">
+Own tui/src/spawn_orchestration.rs. Fix dispatch parsing tests.
+</pfterminal_send_task>
+<pfterminal_send_task target="Ghash">
+Own tui/src/app/thread_routing.rs. Fix native notification routing.
+</pfterminal_send_task>
+Both sent."#;
+    let notification = turn_completed_with_agent_message(
+        troll_thread_id,
+        "turn-native-troll-dispatch",
+        TurnStatus::Completed,
+        message,
+    );
+
+    app.update_spawn_status_for_thread_notification(&notification);
+
+    let mut routed_tasks = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::SubmitSpawnAgentTask { thread_id, task } = event
+            && (thread_id == snaga_thread_id || thread_id == ghash_thread_id)
+        {
+            routed_tasks.push((thread_id, task));
+        }
+    }
+    routed_tasks.sort_by_key(|(thread_id, _)| thread_id.to_string());
+
+    assert_eq!(routed_tasks.len(), 2);
+    assert!(routed_tasks.iter().any(|(thread_id, task)| {
+        *thread_id == snaga_thread_id
+            && task.contains("Assigned by Burzum [troll] to Snaga [orc]")
+            && task.contains("Own tui/src/spawn_orchestration.rs")
+    }));
+    assert!(routed_tasks.iter().any(|(thread_id, task)| {
+        *thread_id == ghash_thread_id
+            && task.contains("Assigned by Burzum [troll] to Ghash [orc]")
+            && task.contains("Own tui/src/app/thread_routing.rs")
+    }));
+}
+
+#[tokio::test]
+async fn active_native_nazgul_turn_receives_live_spawn_context_with_orcs() {
+    // Direct user input in the active Nazgul pane uses the normal active-thread submit path, not
+    // SubmitSpawnAgentTask. It still must receive live hierarchy context; otherwise the Nazgul sees
+    // only spawn-time instructions and says no Orcs exist even while /spawn status lists them.
+    let mut app = make_test_app().await;
+    let nazgul_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000611").expect("valid thread id");
+    let troll_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000612").expect("valid thread id");
+    let orc_a =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000613").expect("valid thread id");
+    let orc_b =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000614").expect("valid thread id");
+
+    app.active_thread_id = Some(nazgul_thread_id);
+    app.upsert_agent_picker_thread(
+        nazgul_thread_id,
+        Some("Euclid".to_string()),
+        Some("nazgul".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        troll_thread_id,
+        Some("Burzum".to_string()),
+        Some("troll".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        orc_a,
+        Some("Snaga".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        orc_b,
+        Some("Ghash".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.spawn_parent_by_thread
+        .insert(troll_thread_id, nazgul_thread_id);
+    app.spawn_parent_by_thread.insert(orc_a, troll_thread_id);
+    app.spawn_parent_by_thread.insert(orc_b, troll_thread_id);
+
+    let context_map = app
+        .spawn_additional_context_for_thread(nazgul_thread_id)
+        .expect("active Nazgul turn should receive live spawn context");
+    let context = &context_map
+        .get("pfterminal_spawn_context")
+        .expect("spawn context entry")
+        .value;
+
+    assert!(context.contains("Euclid [nazgul]"), "got: {context}");
+    assert!(context.contains("Burzum [troll]"), "got: {context}");
+    assert!(context.contains("Snaga [orc]"), "got: {context}");
+    assert!(context.contains("Ghash [orc]"), "got: {context}");
+    assert!(!context.contains("none spawned yet"), "got: {context}");
+}
+
+#[tokio::test]
 async fn claude_orc_completion_is_reported_to_native_troll_context() {
     let mut app = make_test_app().await;
     let troll_thread_id =
@@ -2250,6 +2917,7 @@ async fn claude_orc_completion_is_reported_to_native_troll_context() {
 }
 
 #[test]
+#[ignore = "live integration test: spawns real threads and needs ZAI/Vercel/OpenAI provider auth present in the environment"]
 fn spawn_app_path_creates_troll_with_two_named_orcs() -> Result<()> {
     const WORKER_THREADS: usize = 1;
     const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
@@ -2288,10 +2956,21 @@ fn spawn_app_path_creates_troll_with_two_named_orcs() -> Result<()> {
                 .enabled(Feature::MultiAgentMode)
         );
 
-        let troll_thread_id = app.create_spawn_demo_crew(&mut app_server).await?;
+        let (nazgul_thread_id, troll_thread_id) =
+            app.create_spawn_standard_crew(&mut app_server).await?;
+        // The Nazgul is parented to Codex Main and auto-bound as root.
+        assert_eq!(
+            app.spawn_parent_by_thread.get(&nazgul_thread_id),
+            Some(&main_thread_id)
+        );
+        assert_eq!(
+            app.spawn_nazgul_pane_id.as_deref(),
+            Some(crate::spawn_orchestration::thread_node_id(nazgul_thread_id).as_str())
+        );
+        // The Troll is parented to the Nazgul.
         assert_eq!(
             app.spawn_parent_by_thread.get(&troll_thread_id),
-            Some(&main_thread_id)
+            Some(&nazgul_thread_id)
         );
 
         let orcs = app
@@ -2306,25 +2985,42 @@ fn spawn_app_path_creates_troll_with_two_named_orcs() -> Result<()> {
         assert_eq!(orcs.len(), 2);
         assert_eq!(orcs[0].1.agent_nickname.as_deref(), Some("Snaga"));
         assert_eq!(orcs[1].1.agent_nickname.as_deref(), Some("Ghash"));
-
-        let demo_prompt = app
-            .spawn_demo_task_for_troll(troll_thread_id)
-            .expect("two named Orcs should enable demo task");
-        assert!(demo_prompt.contains("Snaga [orc]"));
-        assert!(demo_prompt.contains("Ghash [orc]"));
-        assert!(demo_prompt.contains("Send both Orcs work in parallel"));
-        assert!(demo_prompt.contains("last_result_message"));
-
         let status_items = app.spawn_tree_items(/*show_task_actions*/ true);
         assert!(
-            status_items.iter().any(|item| item
-                .name
-                .contains("Demo task: animated website + crypto formulas")),
-            "spawn status should expose the two-Orc demo action"
+            status_items
+                .iter()
+                .all(|item| !item.name.contains("Demo task")),
+            "spawn status must not expose a built-in demo action"
         );
 
         Ok(())
     })
+}
+
+#[tokio::test]
+async fn standard_crew_quick_start_uses_the_expected_role_picker_label() {
+    // Smoke test: the /spawn quick-start entry is labeled for the standard crew (Nazgul + Troll +
+    // 2 Orcs), without restoring the old demo-task behavior.
+    let mut app = make_test_app().await;
+    app.open_spawn_role_picker();
+    // The picker is rendered into the chat widget; assert the role-picker path doesn't error and
+    // the standard crew constants resolve to the intended models/providers.
+    assert_eq!(App::STANDARD_NAZGUL_MODEL, "glm-5.2");
+    assert_eq!(App::STANDARD_TROLL_MODEL, "zai/glm-5.2-fast");
+    assert_eq!(App::STANDARD_ORC_MODEL, "gpt-5.5");
+    // Provider resolution for each crew model.
+    assert_eq!(
+        crate::chatwidget::ChatWidget::model_provider_for_selection("glm-5.2").as_deref(),
+        Some("zai")
+    );
+    assert_eq!(
+        crate::chatwidget::ChatWidget::model_provider_for_selection("zai/glm-5.2-fast").as_deref(),
+        Some("vercel-anthropic-fast")
+    );
+    assert_eq!(
+        crate::chatwidget::ChatWidget::model_provider_for_selection("gpt-5.5").as_deref(),
+        Some("openai")
+    );
 }
 
 #[tokio::test]
@@ -2347,7 +3043,7 @@ async fn native_spawn_defaults_follow_active_claude_profile() -> Result<()> {
     assert_eq!(model, VERCEL_GLM_5_2_FAST_MODEL);
     assert_eq!(
         ChatWidget::model_provider_for_selection(&model).as_deref(),
-        Some(VERCEL_PROVIDER_ID)
+        Some(VERCEL_ANTHROPIC_FAST_PROVIDER_ID)
     );
     Ok(())
 }
@@ -5323,6 +6019,8 @@ async fn make_test_app() -> App {
         spawn_parent_by_node: HashMap::new(),
         spawn_status_by_thread: HashMap::new(),
         spawn_parent_reports_by_node: HashMap::new(),
+        spawn_pending_reports_by_thread: HashMap::new(),
+        spawn_processed_dispatch_turns: HashSet::new(),
         spawn_nazgul_pane_id: None,
         side_threads: HashMap::new(),
         claude_panes: crate::claude_panes::ClaudePaneRegistry::new(),
@@ -5395,6 +6093,8 @@ async fn make_test_app_with_channels() -> (
             spawn_parent_by_node: HashMap::new(),
             spawn_status_by_thread: HashMap::new(),
             spawn_parent_reports_by_node: HashMap::new(),
+            spawn_pending_reports_by_thread: HashMap::new(),
+            spawn_processed_dispatch_turns: HashSet::new(),
             spawn_nazgul_pane_id: None,
             side_threads: HashMap::new(),
             claude_panes: crate::claude_panes::ClaudePaneRegistry::new(),

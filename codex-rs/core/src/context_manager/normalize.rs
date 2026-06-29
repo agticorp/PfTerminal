@@ -6,7 +6,7 @@ use codex_protocol::openai_models::InputModality;
 use std::collections::HashSet;
 
 use crate::util::error_or_panic;
-use tracing::info;
+use tracing::{info, warn};
 
 const IMAGE_CONTENT_OMITTED_PLACEHOLDER: &str =
     "image content omitted because you do not support image input";
@@ -165,18 +165,14 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItem>) {
             let has_match =
                 function_call_ids.contains(call_id) || local_shell_call_ids.contains(call_id);
             if !has_match {
-                error_or_panic(format!(
-                    "Orphan function call output for call id: {call_id}"
-                ));
+                warn!("Orphan function call output for call id: {call_id}");
             }
             has_match
         }
         ResponseItem::CustomToolCallOutput { call_id, .. } => {
             let has_match = custom_tool_call_ids.contains(call_id);
             if !has_match {
-                error_or_panic(format!(
-                    "Orphan custom tool call output for call id: {call_id}"
-                ));
+                warn!("Orphan custom tool call output for call id: {call_id}");
             }
             has_match
         }
@@ -187,7 +183,7 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItem>) {
         } => {
             let has_match = tool_search_call_ids.contains(call_id);
             if !has_match {
-                error_or_panic(format!("Orphan tool search output for call id: {call_id}"));
+                warn!("Orphan tool search output for call id: {call_id}");
             }
             has_match
         }
